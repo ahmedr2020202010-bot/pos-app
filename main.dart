@@ -1,8 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:excel/excel.dart' as xl;
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:permission_handler/permission_handler.dart';
 
 void main() => runApp(const PosApp());
@@ -13,7 +16,7 @@ class PosApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'POS',
+      title: 'إيصالات POS',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
       builder: (context, child) =>
@@ -23,7 +26,43 @@ class PosApp extends StatelessWidget {
   }
 }
 
-// ───────────── receipt filter (same idea as the Termux script) ─────────────
+// ───────────────────── بيانات الماكينات والوحدات ─────────────────────
+class TerminalInfo {
+  final int orderNum;
+  final int excelRow;
+  final String unitName;
+  const TerminalInfo(this.orderNum, this.excelRow, this.unitName);
+}
+
+final Map<String, TerminalInfo> terminals = {
+  "50335710": const TerminalInfo(1, 2, "أبيس"),
+  "50335993": const TerminalInfo(2, 2, "أبيس"),
+  "50335987": const TerminalInfo(3, 2, "أبيس"),
+  "50325716": const TerminalInfo(4, 3, "برج العرب"),
+  "50335998": const TerminalInfo(5, 3, "برج العرب"),
+  "50335994": const TerminalInfo(6, 3, "برج العرب"),
+  "50335711": const TerminalInfo(7, 3, "برج العرب"),
+  "50382298": const TerminalInfo(8, 4, "المنتزه"),
+  "50383712": const TerminalInfo(9, 4, "المنتزه"),
+  "50382306": const TerminalInfo(10, 5, "محرم بك"),
+  "50382316": const TerminalInfo(11, 5, "محرم بك"),
+  "50382308": const TerminalInfo(12, 6, "العجمي"),
+  "50383706": const TerminalInfo(13, 6, "العجمي"),
+  "50382300": const TerminalInfo(14, 7, "القباري"),
+  "50383702": const TerminalInfo(15, 8, "مصطفى كامل"),
+  "50382312": const TerminalInfo(16, 9, "مديرية الأمن"),
+  "50383699": const TerminalInfo(17, 10, "ميناء الإسكندرية"),
+  "50383700": const TerminalInfo(18, 11, "مجمع خدمات"),
+};
+
+final Map<String, String> tidFix = {
+  "50336994": "50335994",
+  "50336711": "50335711",
+  "50336998": "50335998",
+  "50302316": "50382316",
+};
+
+// ───────────────────── خوارزميات الاستخراج والفحص ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -39,30 +78,111 @@ final List<RegExp> _markers = [
 
 int receiptScore(String text) => _markers.where((r) => r.hasMatch(text)).length;
 
-// ───────────── files ─────────────
+String? findTerminal(String text) {
+  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s]{6,9}\d)", caseSensitive: false)
+      .firstMatch(text);
+  if (m != null) {
+    var raw = m.group(1)!.replaceAll(RegExp(r'\D'), '');
+    if (raw.length >= 8) {
+      var d = raw.substring(raw.length - 8);
+      d = tidFix[d] ?? d;
+      if (terminals.containsKey(d)) return d;
+    }
+  }
+  for (final tid in terminals.keys) {
+    if (text.contains(tid)) return tid;
+  }
+  for (final match in RegExp(r"\b(503\d{5})\b").allMatches(text)) {
+    var c = match.group(1)!;
+    c = tidFix[c] ?? c;
+    if (terminals.containsKey(c)) return c;
+  }
+  return null;
+}
+
+String? findDate(String text) {
+  final m = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", caseSensitive: false)
+      .firstMatch(text);
+  if (m != null) {
+    final mo = int.tryParse(m.group(2)!) ?? 0;
+    final d = int.tryParse(m.group(3)!) ?? 0;
+    return "$d.$mo";
+  }
+  return null;
+}
+
+List<double> amountsIn(String text) {
+  final out = <double>[];
+  final reg = RegExp(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})(?!\d)");
+  for (final m in reg.allMatches(text)) {
+    try {
+      final whole = m.group(1)!.replaceAll(',', '');
+      final dec = m.group(2)!;
+      final v = double.tryParse("$whole.$dec");
+      if (v != null && v >= 0.5 && v <= 5000000) {
+        out.add(double.parse(v.toStringAsFixed(2)));
+      }
+    } catch (_) {}
+  }
+  return out;
+}
+
+double? modeValue(List<double> vals) {
+  if (vals.isEmpty) return null;
+  final counts = <double, int>{};
+  for (final v in vals) {
+    counts[v] = (counts[v] ?? 0) + 1;
+  }
+  double best = vals.first;
+  int mx = 0;
+  counts.forEach((k, v) {
+    if (v > mx) {
+      mx = v;
+      best = k;
+    }
+  });
+  return best;
+}
+
+double extractAmount(String text) {
+  final brandReg = RegExp(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", caseSensitive: false);
+  final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(text);
+  final pre = gm != null ? text.substring(0, gm.start) : text;
+  final post = gm != null ? text.substring(gm.start) : "";
+
+  final brandVals = <double>[];
+  final parts = pre.split(brandReg);
+  if (parts.length > 1) {
+    for (var i = 1; i < parts.length; i++) {
+      final v = modeValue(amountsIn(parts[i]));
+      if (v != null) brandVals.add(v);
+    }
+  }
+
+  final grand = amountsIn(post);
+  final brandSum = brandVals.isNotEmpty
+      ? double.parse(brandVals.reduce((a, b) => a + b).toStringAsFixed(2))
+      : null;
+
+  if (brandSum != null && grand.any((g) => (g - brandSum).abs() < 0.05)) {
+    return brandSum;
+  }
+  if (grand.isNotEmpty) {
+    return modeValue(grand) ?? 0.0;
+  }
+  if (brandSum != null) return brandSum;
+  return 0.0;
+}
+
+// ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
-final String outDirPath = '$root/all/raw_images';
-final String seenPath = '$root/all/.app_seen.json';
+final String baseDir = '$root/all';
+final String rawImagesDir = '$baseDir/raw_images';
+final String outputDir = '$baseDir/output';
+final String seenPath = '$baseDir/.app_seen.json';
+final String cfgPath = '$baseDir/.app_cfg.json';
 
 String baseName(String path) => path.split('/').last;
-
-final String cfgPath = '$root/all/.app_cfg.json';
-
-String? loadFolder() {
-  try {
-    return (jsonDecode(File(cfgPath).readAsStringSync()) as Map)['folder'] as String?;
-  } catch (_) {
-    return null;
-  }
-}
-
-void saveFolder(String? f) {
-  try {
-    File(cfgPath)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode({'folder': f}));
-  } catch (_) {}
-}
 
 List<Directory> _subDirs(String path) {
   try {
@@ -123,15 +243,44 @@ void saveSeen(Map<String, dynamic> seen) {
   } catch (_) {}
 }
 
-// ───────────── screen ─────────────
-class Found {
-  final String path;
-  final int score;
-  final String snippet;
-  final bool receipt;
-  Found(this.path, this.score, this.snippet, this.receipt);
+String? loadFolder() {
+  try {
+    return (jsonDecode(File(cfgPath).readAsStringSync()) as Map)['folder'] as String?;
+  } catch (_) {
+    return null;
+  }
 }
 
+void saveFolder(String? f) {
+  try {
+    File(cfgPath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode({'folder': f}));
+  } catch (_) {}
+}
+
+// ───────────────────── نموذج بيانات الإيصال ─────────────────────
+class ReceiptItem {
+  final String path;
+  String? tid;
+  int? orderNum;
+  int? row;
+  String? unitName;
+  double amount;
+  String? date;
+
+  ReceiptItem({
+    required this.path,
+    this.tid,
+    this.orderNum,
+    this.row,
+    this.unitName,
+    this.amount = 0.0,
+    this.date,
+  });
+}
+
+// ───────────────────── الشاشة الرئيسية ─────────────────────
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -140,16 +289,12 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  int days = 0; // 0 = today, -1 = all
+  int days = 0;
   String? customDir;
-  int pdfSkipped = 0;
   bool busy = false;
   double progress = 0;
-  String status = 'اضغط "فحص الواتساب" لسحب إيصالات الفترة المختارة.';
-  final List<Found> found = [];
-  final List<Found> others = [];
-  int errors = 0;
-  String lastError = '';
+  String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
+  final List<ReceiptItem> processedItems = [];
 
   @override
   void initState() {
@@ -179,32 +324,32 @@ class _HomePageState extends State<HomePage> {
     setState(() => customDir = null);
   }
 
-  Future<void> scan() async {
-    setState(() {
-      busy = true;
-      progress = 0;
-      found.clear();
-      others.clear();
-      errors = 0;
-      lastError = '';
-      status = 'طلب إذن الوصول للملفات...';
-    });
+  void resetSeen() {
+    try {
+      File(seenPath).deleteSync();
+    } catch (_) {}
+    setState(() => status = 'اتمسحت ذاكرة الفحص، الفحص القادم سيبدأ من الأول.');
+  }
 
+  Future<void> runFullPipeline() async {
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
-      setState(() {
-        busy = false;
-        status = 'لازم تسمح بالوصول لكل الملفات من الإعدادات، وبعدين جرّب تاني.';
-      });
+      setState(() => status = 'يجب منح إذن الوصول إلى جميع الملفات للمتابعة.');
       return;
     }
 
-    pdfSkipped = 0;
+    setState(() {
+      busy = true;
+      progress = 0;
+      processedItems.clear();
+      status = 'جاري البحث عن الصور الجديدة...';
+    });
+
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
     if (dirs.isEmpty) {
       setState(() {
         busy = false;
-        status = customDir != null ? 'الفولدر ده مش موجود.' : 'مش لاقي فولدر صور الواتساب.';
+        status = 'تعذر العثور على مجلد الصور.';
       });
       return;
     }
@@ -215,14 +360,11 @@ class _HomePageState extends State<HomePage> {
         : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final seen = loadSeen();
     final todo = <File>[];
+
     for (final d in dirs) {
       try {
         for (final e in d.listSync().whereType<File>()) {
           final lower = e.path.toLowerCase();
-          if (lower.endsWith('.pdf')) {
-            pdfSkipped++;
-            continue;
-          }
           if (!(lower.endsWith('.jpg') ||
               lower.endsWith('.jpeg') ||
               lower.endsWith('.png') ||
@@ -237,56 +379,183 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    setState(() => status = '${dirs.length} فولدر، ${todo.length} صورة جديدة. جاري الفحص...');
-    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-    Directory(outDirPath).createSync(recursive: true);
-    var copied = 0;
+    if (todo.isEmpty) {
+      setState(() {
+        busy = false;
+        status = 'لا توجد صور إيصالات جديدة في الفترة المحددة.';
+      });
+      return;
+    }
 
+    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    Directory(rawImagesDir).createSync(recursive: true);
+    Directory(outputDir).createSync(recursive: true);
+
+    final rawReceipts = <ReceiptItem>[];
+
+    // الخطوة 1: فحص الصور بالـ OCR
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
         final res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         final sc = receiptScore(res.text);
-        final flat = res.text.replaceAll('\n', ' ');
-        final snip = flat.length > 70 ? flat.substring(0, 70) : flat;
         seen['${baseName(f.path)}:${f.lengthSync()}'] = true;
-        if (sc < 2) others.add(Found(f.path, sc, snip, false));
+
         if (sc >= 2) {
-          final dst = '$outDirPath/wa_${baseName(f.path)}';
-          if (!File(dst).existsSync()) {
-            f.copySync(dst);
-            copied++;
+          final dst = '$rawImagesDir/wa_${baseName(f.path)}';
+          final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
+
+          final tid = findTerminal(res.text);
+          final amt = extractAmount(res.text);
+          final d = findDate(res.text);
+
+          int? order;
+          int? row;
+          String? uName;
+          if (tid != null && terminals.containsKey(tid)) {
+            final info = terminals[tid]!;
+            order = info.orderNum;
+            row = info.excelRow;
+            uName = info.unitName;
           }
-          found.add(Found(f.path, sc, snip, true));
+
+          rawReceipts.add(ReceiptItem(
+            path: localFile.path,
+            tid: tid,
+            orderNum: order,
+            row: row,
+            unitName: uName,
+            amount: amt,
+            date: d,
+          ));
         }
-      } catch (e) {
-        errors++;
-        lastError = e.toString();
-      }
+      } catch (_) {}
+
       if (!mounted) return;
       setState(() {
-        progress = (i + 1) / todo.length;
-        status = 'فحص ${i + 1} من ${todo.length}  •  إيصالات: ${found.length}';
+        progress = ((i + 1) / todo.length) * 0.5;
+        status = 'فحص OCR: ${i + 1} من ${todo.length}';
       });
     }
 
     await recognizer.close();
     saveSeen(seen);
+
+    if (rawReceipts.isEmpty) {
+      setState(() {
+        busy = false;
+        status = 'تم فحص ${todo.length} صورة، ولم يتم العثور على إيصالات.';
+      });
+      return;
+    }
+
+    // الخطوة 2: ترقيم وإعادة تسمية الصور بأرقام الماكينات (1 إلى 18)
+    setState(() => status = 'إعادة تسمية الصور وترتيبها...');
+    final orderedReceipts = <ReceiptItem>[];
+    for (final item in rawReceipts) {
+      if (item.orderNum != null) {
+        final ext = item.path.split('.').last;
+        final newPath = '$rawImagesDir/${item.orderNum}.$ext';
+        try {
+          final renFile = File(item.path).renameSync(newPath);
+          orderedReceipts.add(ReceiptItem(
+            path: renFile.path,
+            tid: item.tid,
+            orderNum: item.orderNum,
+            row: item.row,
+            unitName: item.unitName,
+            amount: item.amount,
+            date: item.date,
+          ));
+        } catch (_) {
+          orderedReceipts.add(item);
+        }
+      } else {
+        orderedReceipts.add(item);
+      }
+    }
+
+    orderedReceipts.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
+
+    // استخراج تاريخ الإيصالات الأغلب
+    final dateCounts = <String, int>{};
+    for (final r in orderedReceipts) {
+      if (r.date != null) {
+        dateCounts[r.date!] = (dateCounts[r.date!] ?? 0) + 1;
+      }
+    }
+    String reportDate = "اليوم";
+    if (dateCounts.isNotEmpty) {
+      reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
+    }
+
+    // الخطوة 3: إنشاء ملف الـ PDF المجمع
+    setState(() => status = 'توليد ملف PDF المجمع...');
+    final pdf = pw.Document();
+    for (final r in orderedReceipts) {
+      if (File(r.path).existsSync()) {
+        try {
+          final imgBytes = File(r.path).readAsBytesSync();
+          final imgWidget = pw.MemoryImage(imgBytes);
+          pdf.addPage(
+            pw.Page(
+              pageFormat: PdfPageFormat.a4,
+              build: (pw.Context ctx) => pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+            ),
+          );
+        } catch (_) {}
+      }
+    }
+    final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
+    await pdfOutFile.writeAsBytes(await pdf.save());
+
+    // الخطوة 4: تحديث وتعبئة شيت الإكسيل
+    setState(() => status = 'تحديث شيت الإكسيل...');
+    final unitTotals = <int, double>{};
+    for (var r = 2; r <= 11; r++) {
+      unitTotals[r] = 0.0;
+    }
+    for (final item in orderedReceipts) {
+      if (item.row != null && item.amount > 0) {
+        unitTotals[item.row!] = (unitTotals[item.row!] ?? 0.0) + item.amount;
+      }
+    }
+
+    final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
+    if (tplFile.existsSync()) {
+      try {
+        final bytes = tplFile.readAsBytesSync();
+        final excel = xl.Excel.decodeBytes(bytes);
+        final defaultSheet = excel.tables.keys.first;
+        final sheet = excel[defaultSheet];
+
+        for (var r = 2; r <= 11; r++) {
+          final tot = unitTotals[r] ?? 0.0;
+          // العمود D يمثل الفهرس 3، والصف (r - 1)
+          final cell = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
+          cell.value = xl.DoubleCellValue(tot);
+        }
+
+        final excelOutBytes = excel.encode();
+        if (excelOutBytes != null) {
+          File('$outputDir/الاسكندريه $reportDate.xlsx')
+            ..createSync(recursive: true)
+            ..writeAsBytesSync(excelOutBytes);
+        }
+      } catch (_) {}
+    }
+
     if (!mounted) return;
     setState(() {
       busy = false;
-      status = 'خلص: ${todo.length} صورة اتفحصت، ${found.length} إيصال، '
-          '$copied اتنسخ لـ all/raw_images (الأصول ما اتمسحتش).'
-          '${errors > 0 ? '\nأخطاء قراءة: $errors  ($lastError)' : ''}'
-          '${pdfSkipped > 0 ? '\n$pdfSkipped ملف PDF اتجاهل (دعم PDF لسه جاي).' : ''}';
+      progress = 1.0;
+      processedItems.addAll(orderedReceipts);
+      status = 'اكتمل بنجاح!\n'
+          '• تم فرز وترقيم ${orderedReceipts.length} إيصال.\n'
+          '• حُفظ الـ PDF: الاسكندريه $reportDate.pdf\n'
+          '• حُفظ الإكسيل: الاسكندريه $reportDate.xlsx\n'
+          'المكان: مجلد all/output';
     });
-  }
-
-  void resetSeen() {
-    try {
-      File(seenPath).deleteSync();
-    } catch (_) {}
-    setState(() => status = 'اتمسحت ذاكرة الفحص، المرة الجاية هيفحص من الأول.');
   }
 
   @override
@@ -333,32 +602,48 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 4),
             FilledButton.icon(
-              onPressed: busy ? null : scan,
-              icon: const Icon(Icons.search),
-              label: const Text('فحص الواتساب'),
+              onPressed: busy ? null : runFullPipeline,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('بدء المعالجة الشاملة (PDF + إكسيل)'),
             ),
             TextButton(
               onPressed: busy ? null : resetSeen,
               child: const Text('إعادة الفحص من الأول'),
             ),
-            if (busy) LinearProgressIndicator(value: progress),
+            if (busy) LinearProgressIndicator(value: progress > 0 ? progress : null),
             const SizedBox(height: 8),
-            Text(status),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade200,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(status),
+            ),
             const SizedBox(height: 8),
             Expanded(
               child: ListView.builder(
-                itemCount: found.length + others.length,
+                itemCount: processedItems.length,
                 itemBuilder: (context, i) {
-                  final f = i < found.length ? found[i] : others[i - found.length];
-                  return ListTile(
-                    leading: Image.file(File(f.path),
-                        width: 48, height: 48, fit: BoxFit.cover, cacheWidth: 120),
-                    title: Text(
-                      '${f.receipt ? '✓ ' : '✗ '}${baseName(f.path)}',
-                      textDirection: TextDirection.ltr,
+                  final item = processedItems[i];
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    child: ListTile(
+                      leading: Image.file(
+                        File(item.path),
+                        width: 48,
+                        height: 48,
+                        fit: BoxFit.cover,
+                      ),
+                      title: Text(
+                        'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Text(
+                        'TID: ${item.tid ?? '—'} | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م',
+                      ),
+                      trailing: Text(item.path.split('/').last),
                     ),
-                    subtitle: Text('علامات: ${f.score}  |  ${f.snippet}',
-                        maxLines: 2, textDirection: TextDirection.ltr),
                   );
                 },
               ),
@@ -370,8 +655,7 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-
-// ───────────── simple folder browser ─────────────
+// ───────────────────── متصفح الفولدرات ─────────────────────
 class FolderPicker extends StatefulWidget {
   final String start;
   const FolderPicker({super.key, required this.start});
