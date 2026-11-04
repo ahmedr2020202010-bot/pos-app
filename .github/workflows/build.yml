@@ -30,7 +30,7 @@ jobs:
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
           echo '-dontwarn com.google.mlkit.vision.text.**' > android/app/proguard-rules.pro
-          sed -i 's|signingConfig = signingConfigs.getByName("debug")|&\n            proguardFiles(getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro")|' android/app/build.gradle.kts
+          sed -i 's|signingConfig = signingConfigs.getByName("debug")|&\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")|' android/app/build.gradle.kts
           grep -n "proguard" android/app/build.gradle.kts
           rm -rf test
 
