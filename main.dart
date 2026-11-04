@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:excel/excel.dart' as xl;
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -45,7 +47,7 @@ final Map<String, TerminalInfo> terminals = {
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
   "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 القديمة
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الاحتياطية/القديمة
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -66,7 +68,7 @@ final Map<int, String> numToTid = {
   6: "50335994",
   7: "50335711",
   8: "50382298",
-  9: "50382315",
+  9: "50382315", // منتزه 2
   10: "50382306",
   11: "50382316",
   12: "50382308",
@@ -84,6 +86,8 @@ final Map<String, String> tidFix = {
   "50336998": "50335998",
   "50302316": "50382316",
   "50382318": "50382315",
+  "50330987": "50335987",
+  "60382308": "50382308",
 };
 
 final Map<String, int> merchantCodeMap = {
@@ -94,7 +98,7 @@ final Map<String, int> merchantCodeMap = {
 final List<MapEntry<List<String>, int>> nameHints = [
   MapEntry(["ABYSS", "ABIS"], 2),
   MapEntry(["BURJ", "BORG"], 3),
-  MapEntry(["MONTZAH", "TOSUN"], 4),
+  MapEntry(["MONTZAH", "TOSUN", "WAHDI", "WAHUT"], 4),
   MapEntry(["MUHRAM", "MOHARAM"], 5),
   MapEntry(["AJAMI", "AGAMI"], 6),
   MapEntry(["KABBARY", "KABARY"], 7),
@@ -110,7 +114,17 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "مجمع خدمات",
 };
 
-// ───────────────────── خوارزميات الاستخراج ─────────────────────
+// ───────────────────── تنظيف نصوص OCR ─────────────────────
+String normalizeOcrText(String text) {
+  var s = text;
+  // إصلاح تحول رقم 7 إلى شرطة مائلة / وسط الأرقام (مثل 50335/10 أو 14,0/1.00)
+  s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
+  // إصلاح حرف B الملتبس برقم 8 في بداية المبالغ (مثل B358.69)
+  s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
+  return s;
+}
+
+// ───────────────────── خوارزميات الاستخراج المطابقة للبايثون ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -120,19 +134,22 @@ final List<RegExp> _markers = [
   RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
   RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
   RegExp(r'THANK\s*YOU', caseSensitive: false),
-  RegExp(r'NET\s*AMOUNT', caseSensitive: false),
-  RegExp(r'\bSALE\b', caseSensitive: false),
 ];
 
-int receiptScore(String text) => _markers.where((r) => r.hasMatch(text)).length;
+int receiptScore(String rawText) {
+  final text = normalizeOcrText(rawText);
+  return _markers.where((r) => r.hasMatch(text)).length +
+      (findTerminal(text) != null ? 1 : 0);
+}
 
-String? findTerminal(String text) {
-  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s]{6,9}\d)", caseSensitive: false)
+String? findTerminal(String rawText) {
+  final text = normalizeOcrText(rawText);
+  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,10}\d)", caseSensitive: false)
       .firstMatch(text);
   if (m != null) {
-    var raw = m.group(1)!.replaceAll(RegExp(r'\D'), '');
-    if (raw.length >= 8) {
-      var d = raw.substring(raw.length - 8);
+    var clean = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
+    if (clean.length >= 8) {
+      var d = clean.substring(clean.length - 8);
       d = tidFix[d] ?? d;
       if (terminals.containsKey(d)) return d;
     }
@@ -140,7 +157,7 @@ String? findTerminal(String text) {
   for (final tid in terminals.keys) {
     if (text.contains(tid)) return tid;
   }
-  for (final match in RegExp(r"\b(503\d{5})\b").allMatches(text)) {
+  for (final match in RegExp(r"\b([56]03\d{5})\b").allMatches(text)) {
     var c = match.group(1)!;
     c = tidFix[c] ?? c;
     if (terminals.containsKey(c)) return c;
@@ -148,45 +165,59 @@ String? findTerminal(String text) {
   return null;
 }
 
-String? findTerminalFuzzy(String text, int? targetRow) {
+String? findTerminalFuzzy(String rawText, int? targetRow) {
+  final text = normalizeOcrText(rawText);
   final pool = terminals.entries
       .where((e) => targetRow == null || e.value.excelRow == targetRow)
       .map((e) => e.key)
       .toList();
 
-  final runs = RegExp(r"\d[\d ]{6,14}\d").allMatches(text);
-  String? bestTid;
-  int minDiff = 99;
+  final dist = <String, int>{};
+  final runs = RegExp(r"\d[\d /]{6,14}\d").allMatches(text);
 
   for (final run in runs) {
-    final digits = run.group(0)!.replaceAll(RegExp(r'\D'), '');
+    final digits = run.group(0)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
     if (digits.length < 8) continue;
     for (var i = 0; i <= digits.length - 8; i++) {
       final cand = digits.substring(i, i + 8);
-      if (!cand.startsWith("50")) continue;
+      if (!cand.startsWith("50") && !cand.startsWith("60")) continue;
       for (final tid in pool) {
         int d = 0;
         for (var k = 0; k < 8; k++) {
           if (cand[k] != tid[k]) d++;
         }
-        if (d < minDiff) {
-          minDiff = d;
-          bestTid = tid;
+        if (d < (dist[tid] ?? 99)) {
+          dist[tid] = d;
         }
       }
     }
   }
-  if (minDiff <= 1) return bestTid;
+  if (dist.isEmpty) return null;
+  final best = dist.values.reduce(min);
+  final winners = dist.entries.where((e) => e.value == best).map((e) => e.key).toList();
+  if (best <= 1 && winners.length == 1) {
+    return winners.first;
+  }
   return null;
 }
 
-int? findUnitByExtra(String text) {
-  final m = RegExp(r"MERCHANT\s*ID\D{0,15}?(\d[\d\s]{8,13}\d)", caseSensitive: false).firstMatch(text);
-  final digits = m != null ? m.group(1)!.replaceAll(RegExp(r'\D'), '') : text.replaceAll(RegExp(r'\D'), '');
-  final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(digits);
-  if (mm != null && merchantCodeMap.containsKey(mm.group(1))) {
-    return merchantCodeMap[mm.group(1)];
+int? findUnitByExtra(String rawText) {
+  final text = normalizeOcrText(rawText);
+  final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,14}\d)", caseSensitive: false)
+      .firstMatch(text);
+  final cands = <String>[];
+  if (m != null) {
+    cands.add(m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
   }
+  cands.add(text.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
+
+  for (final d in cands) {
+    final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(d);
+    if (mm != null && merchantCodeMap.containsKey(mm.group(1))) {
+      return merchantCodeMap[mm.group(1)];
+    }
+  }
+
   final up = text.toUpperCase();
   for (final hint in nameHints) {
     if (hint.key.any((w) => up.contains(w))) {
@@ -202,64 +233,200 @@ String? findDate(String text) {
   if (m != null) {
     final mo = int.tryParse(m.group(2)!) ?? 0;
     final d = int.tryParse(m.group(3)!) ?? 0;
-    return "$d.$mo";
+    if (mo > 0 && d > 0) return "$d.$mo";
   }
   return null;
 }
 
-List<double> amountsIn(String text) {
+String? findBatchNo(String text) {
+  final m = RegExp(r"BATCH\s*NO\D{0,6}(\d{4,7})", caseSensitive: false).firstMatch(text);
+  return m?.group(1);
+}
+
+final RegExp _amountRe = RegExp(r"(?<![\d,.])(\d{1,3}(?:[.,\s]\d{3})*|\d+)[.,\s](\d{2})(?!\d)");
+final RegExp _brandRe = RegExp(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", caseSensitive: false);
+
+List<double> amountsIn(String rawText) {
+  final text = normalizeOcrText(rawText);
   final out = <double>[];
-  final reg = RegExp(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})(?!\d)");
-  for (final m in reg.allMatches(text)) {
+  for (final m in _amountRe.allMatches(text)) {
     try {
-      final whole = m.group(1)!.replaceAll(',', '');
+      final whole = m.group(1)!.replaceAll(RegExp(r'[.,\s]'), '');
       final dec = m.group(2)!;
       final v = double.tryParse("$whole.$dec");
       if (v != null && v >= 0.5 && v <= 5000000) {
-        out.add(double.parse(v.toStringAsFixed(2)));
+        out.add(round2(v));
       }
     } catch (_) {}
   }
   return out;
 }
 
-// ───────────────────── استخراج الإجمالي العام الدقيق ─────────────────────
-double extractReceiptAmounts(String text) {
-  // فحص ما بعد منطقة GRAND TOTALS
-  final grandMatch = RegExp(r"(?:GRAND\s*TOTALS?|TOTALS?\s*GRAND)[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(text);
-  if (grandMatch != null) {
-    final gAmts = amountsIn(grandMatch.group(0)!);
-    if (gAmts.isNotEmpty) {
-      return gAmts.reduce((a, b) => a > b ? a : b);
+double? modeValue(List<double> vals) {
+  if (vals.isEmpty) return null;
+  final counts = <double, int>{};
+  for (final v in vals) {
+    counts[v] = (counts[v] ?? 0) + 1;
+  }
+  var bestVal = vals.first;
+  var bestCnt = 0;
+  for (final e in counts.entries) {
+    if (e.value > bestCnt) {
+      bestCnt = e.value;
+      bestVal = e.key;
+    }
+  }
+  return bestVal;
+}
+
+class AmountDecision {
+  final double amount;
+  final bool confirmed;
+  const AmountDecision(this.amount, this.confirmed);
+}
+
+AmountDecision extractReceiptAmountPythonStyle(String rawText) {
+  final txt = normalizeOcrText(rawText);
+
+  // قص النص عند نهاية الإيصال لتجاهل الأرقام المكتوبة بخط اليد في الأسفل
+  final stopMatch = RegExp(r"THANK\s*YOU|Hotline|App\s*Versi", caseSensitive: false).firstMatch(txt);
+  final t = stopMatch != null ? txt.substring(0, stopMatch.start) : txt;
+
+  // فصل منطقة ما قبل GRAND TOTALS وما بعدها
+  final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(t);
+  String pre = gm != null ? t.substring(0, gm.start) : t;
+  String post = gm != null ? t.substring(gm.start) : "";
+
+  final bm = _brandRe.firstMatch(pre);
+  if (bm != null) {
+    pre = pre.substring(bm.start);
+  } else {
+    final sm = RegExp(r"SUCCESSFULL?Y|CLOSED", caseSensitive: false).firstMatch(pre);
+    if (sm != null) {
+      pre = pre.substring(sm.end);
     }
   }
 
-  // فحص أرقام Net Amount
-  final netMatches = RegExp(r"Total\s*Net\s*Amount[\s\S]*?(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})", caseSensitive: false).allMatches(text);
-  if (netMatches.isNotEmpty) {
-    final lastNet = netMatches.last;
-    final v = double.tryParse("${lastNet.group(1)!.replaceAll(',', '')}.${lastNet.group(2)!}");
-    if (v != null && v >= 0.5) return double.parse(v.toStringAsFixed(2));
+  // تقسيم حسب شبكات الدفع (VISA / MASTER / MEZZA)
+  final brandMatches = _brandRe.allMatches(pre).toList();
+  final sections = <String>[];
+  if (brandMatches.isNotEmpty) {
+    for (var i = 0; i < brandMatches.length; i++) {
+      final start = brandMatches[i].end;
+      final end = (i + 1 < brandMatches.length) ? brandMatches[i + 1].start : pre.length;
+      sections.add(pre.substring(start, end));
+    }
+  } else {
+    sections.add(pre);
   }
 
-  // قاعدة أعلى مبلغ مسجل
-  final allAmts = amountsIn(text);
-  if (allAmts.isNotEmpty) {
-    return allAmts.reduce((a, b) => a > b ? a : b);
+  final brandVals = <double>[];
+  for (final sec in sections) {
+    final mv = modeValue(amountsIn(sec));
+    if (mv != null) brandVals.add(mv);
   }
-  return 0.0;
+
+  final grand = amountsIn(post);
+  final brandSum = brandVals.isNotEmpty ? round2(brandVals.fold(0.0, (a, b) => a + b)) : null;
+
+  // 1) تطابق تام بين مجموع الكروت والـ Grand Total
+  if (brandSum != null && grand.any((g) => (g - brandSum).abs() < 0.005)) {
+    return AmountDecision(brandSum, true);
+  }
+
+  // 2) اختلاف رقم واحد فقط في الطباعة بين مجموع الكروت والـ Grand Total
+  if (brandSum != null && brandVals.length >= 2) {
+    final sb = brandSum.toStringAsFixed(2);
+    for (final g in grand) {
+      final sa = g.toStringAsFixed(2);
+      if (sa.length == sb.length) {
+        int diff = 0;
+        for (var k = 0; k < sa.length; k++) {
+          if (sa[k] != sb[k]) diff++;
+        }
+        if (diff == 1) {
+          return AmountDecision(brandSum, true);
+        }
+      }
+    }
+  }
+
+  // 3) إذا كان الـ Grand Total مكرراً ومؤكداً (Sale + Total + Total Net Amount)
+  if (grand.isNotEmpty) {
+    final counts = <double, int>{};
+    for (final g in grand) {
+      counts[g] = (counts[g] ?? 0) + 1;
+    }
+    final topGrand = counts.entries.reduce((a, b) => a.value >= b.value ? a : b);
+    if (topGrand.value >= 2) {
+      return AmountDecision(topGrand.key, brandSum == null);
+    }
+  }
+
+  // 4) إذا كانت منطقة الـ Grand Total مشوهة، اعتمد مجموع الشبكات الثلاثة
+  if (brandSum != null && brandVals.length >= 2) {
+    return AmountDecision(brandSum, true);
+  }
+
+  // 5) التصويت العام
+  final pool = <double>[...grand];
+  if (brandSum != null) pool.add(brandSum);
+  final voted = modeValue(pool);
+  if (voted != null) {
+    return AmountDecision(voted, false);
+  }
+
+  return const AmountDecision(0.0, false);
 }
 
 double round2(double val) => double.parse(val.toStringAsFixed(2));
 
-// ───────────────────── مسارات المجلدات ─────────────────────
+// ───────────────────── مسارات المجلدات والملفات المساعدة ─────────────────────
 const String root = '/storage/emulated/0';
 final String baseDir = '$root/all';
 final String rawImagesDir = '$baseDir/raw_images';
 final String outputDir = '$baseDir/output';
 final String cfgPath = '$baseDir/.app_cfg.json';
+final String fixPath = '$baseDir/.pos_fix.json';
+final String ignorePath = '$baseDir/ignore.txt';
 
 String baseName(String path) => path.split('/').last;
+
+String fileKey(String path) {
+  final bytes = File(path).readAsBytesSync();
+  return 'v4${crypto.md5.convert(bytes)}';
+}
+
+Map<String, dynamic> loadFixes() {
+  try {
+    final f = File(fixPath);
+    if (f.existsSync()) {
+      return Map<String, dynamic>.from(jsonDecode(f.readAsStringSync()) as Map);
+    }
+  } catch (_) {}
+  return {};
+}
+
+void saveFixes(Map<String, dynamic> fixes) {
+  try {
+    File(fixPath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(fixes));
+  } catch (_) {}
+}
+
+Set<int> loadIgnoreList() {
+  try {
+    final f = File(ignorePath);
+    if (f.existsSync()) {
+      return RegExp(r'\d+')
+          .allMatches(f.readAsStringSync())
+          .map((m) => int.parse(m.group(0)!))
+          .toSet();
+    }
+  } catch (_) {}
+  return {};
+}
 
 List<Directory> _subDirs(String path) {
   try {
@@ -273,7 +440,6 @@ List<Directory> _subDirs(String path) {
 
 List<Directory> findWhatsAppImageDirs() {
   final out = <Directory>[];
-
   void checkAndAdd(String p) {
     final d = Directory(p);
     if (d.existsSync() && !out.any((x) => x.path == d.path)) {
@@ -300,13 +466,6 @@ List<Directory> findWhatsAppImageDirs() {
       }
     }
   }
-
-  for (final d in _subDirs(root)) {
-    if (baseName(d.path).toLowerCase().startsWith('whatsapp')) {
-      checkAndAdd('${d.path}/Media/WhatsApp Images');
-    }
-  }
-
   return out;
 }
 
@@ -337,25 +496,48 @@ void saveFolder(String? f) {
   } catch (_) {}
 }
 
-// ───────────────────── نموذج الإيصال ─────────────────────
+// ───────────────────── نموذج الإيصال الشامل ─────────────────────
 class ReceiptItem {
+  String fn;
   String path;
+  String? key;
   String? tid;
+  String? origTid;
   int? orderNum;
+  int? suffix;
   int? row;
   String? unitName;
   double amount;
+  bool confirmed;
+  String how; // manual | terminal | fuzzy | file-number | name/merchant | auto-number | conflict | extra-batch
   String? date;
+  String? batchNo;
+  bool skip;
+  bool conflict;
+  String? newName;
 
   ReceiptItem({
+    required this.fn,
     required this.path,
+    this.key,
     this.tid,
+    this.origTid,
     this.orderNum,
+    this.suffix,
     this.row,
     this.unitName,
     this.amount = 0.0,
+    this.confirmed = false,
+    this.how = "none",
     this.date,
+    this.batchNo,
+    this.skip = false,
+    this.conflict = false,
+    this.newName,
   });
+
+  String get displayOrder =>
+      orderNum != null ? (suffix != null ? '${orderNum}_$suffix' : '$orderNum') : '؟';
 }
 
 // ───────────────────── الشاشة الرئيسية ─────────────────────
@@ -373,9 +555,11 @@ class _HomePageState extends State<HomePage> {
   double progress = 0;
   String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
   final List<ReceiptItem> processedItems = [];
+  final List<String> warnings = [];
   String? standardXlsxPath;
   String? advancedXlsxPath;
   String? generatedPdfPath;
+  String? reportTxtPath;
   List<int> missingTerminals = [];
 
   @override
@@ -424,12 +608,107 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> shareAdvancedFile() async {
+    final files = <XFile>[];
     if (advancedXlsxPath != null && File(advancedXlsxPath!).existsSync()) {
-      await Share.shareXFiles([XFile(advancedXlsxPath!)], text: 'تقرير إيصالات POS الشامل بالتفاصيل');
+      files.add(XFile(advancedXlsxPath!));
+    }
+    if (reportTxtPath != null && File(reportTxtPath!).existsSync()) {
+      files.add(XFile(reportTxtPath!));
+    }
+    if (files.isNotEmpty) {
+      await Share.shareXFiles(files, text: 'تقرير إيصالات POS الشامل وتقرير المراجعة');
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')),
       );
+    }
+  }
+
+  // ───────────────────── المرحلة 2: توزيع أرقام الماكينات وحل التعارض (مطابق للبايثون) ─────────────────────
+  void assignTerminalsStage2(List<ReceiptItem> recs) {
+    warnings.clear();
+    for (final r in recs) {
+      r.skip = false;
+      r.conflict = false;
+      r.suffix = null;
+      if (r.origTid != null && r.tid == null) {
+        r.tid = r.origTid;
+      }
+    }
+
+    const prio = {"manual": 0, "terminal": 0, "fuzzy": 1, "file-number": 2};
+    final taken = <String, ReceiptItem>{};
+
+    final withTid = recs.where((x) => x.tid != null).toList()
+      ..sort((a, b) => (prio[a.how] ?? 3).compareTo(prio[b.how] ?? 3));
+
+    for (final r in withTid) {
+      final t = r.tid!;
+      if (!taken.containsKey(t)) {
+        taken[t] = r;
+      } else if (r.amount > 0 && (taken[t]!.amount - r.amount).abs() < 0.005) {
+        r.skip = true;
+        warnings.add("${r.fn}: مكرر نفس الماكينة $t ونفس المبلغ ${r.amount.toStringAsFixed(2)} - تم استبعاده");
+      } else {
+        r.origTid = r.tid;
+        r.tid = null;
+        r.conflict = true;
+      }
+    }
+
+    final usedSuffix = <String>{};
+    void giveSuffix(ReceiptItem r, String targetTid) {
+      var k = 2;
+      while (usedSuffix.contains('${targetTid}_$k')) {
+        k++;
+      }
+      usedSuffix.add('${targetTid}_$k');
+      r.tid = targetTid;
+      r.orderNum = terminals[targetTid]!.orderNum;
+      r.suffix = k;
+      r.how = "extra-batch";
+    }
+
+    for (final r in recs) {
+      if (r.skip || r.tid != null || r.row == null) continue;
+
+      if (r.conflict && (r.how == "terminal" || r.how == "fuzzy") && r.origTid != null) {
+        giveSuffix(r, r.origTid!);
+        continue;
+      }
+
+      // البحث عن ماكينة فارغة في نفس الوحدة (نفس الصف)
+      final freeEntries = terminals.entries
+          .where((kv) => kv.value.excelRow == r.row && !taken.containsKey(kv.key))
+          .toList()
+        ..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+
+      if (freeEntries.isNotEmpty) {
+        final chosenTid = freeEntries.first.key;
+        r.tid = chosenTid;
+        r.orderNum = freeEntries.first.value.orderNum;
+        taken[chosenTid] = r;
+        r.how = r.conflict ? "conflict" : "auto-number";
+      } else if (r.origTid != null) {
+        giveSuffix(r, r.origTid!);
+      } else {
+        // إذا كانت كل ماكينات الوحدة ممتلئة (مثل المنتزه 3 الإضافي)، ألحقه كباتش إضافي بآخر ماكينة في الوحدة
+        final unitEntries = terminals.entries
+            .where((kv) => kv.value.excelRow == r.row)
+            .toList()
+          ..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+        if (unitEntries.isNotEmpty) {
+          giveSuffix(r, unitEntries.last.key);
+        }
+      }
+    }
+
+    for (final r in recs) {
+      if (r.tid != null && terminals.containsKey(r.tid)) {
+        r.orderNum = terminals[r.tid]!.orderNum;
+        r.row = terminals[r.tid]!.excelRow;
+        r.unitName = terminals[r.tid]!.unitName;
+      }
     }
   }
 
@@ -441,17 +720,17 @@ class _HomePageState extends State<HomePage> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlgState) => AlertDialog(
-          title: const Text('تعديل بيانات الإيصال'),
+          title: const Text('تعديل بيانات الإيصال (يُحفظ تلقائياً)'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Image.file(File(item.path), height: 160, fit: BoxFit.contain),
+                Image.file(File(item.path), height: 180, fit: BoxFit.contain),
                 const SizedBox(height: 8),
                 TextField(
                   controller: amtController,
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(labelText: 'المبلغ الإجمالي'),
+                  decoration: const InputDecoration(labelText: 'المبلغ الإجمالي الصحيح'),
                 ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<int>(
@@ -473,17 +752,33 @@ class _HomePageState extends State<HomePage> {
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
             FilledButton(
               onPressed: () {
-                final newAmt = double.tryParse(amtController.text) ?? item.amount;
+                final newAmt = double.tryParse(amtController.text.replaceAll(',', '')) ?? item.amount;
                 setState(() {
                   item.amount = round2(newAmt);
+                  item.confirmed = true;
+                  item.how = "manual";
+                  item.skip = false;
                   if (selectedOrder != null) {
                     item.orderNum = selectedOrder;
                     item.tid = numToTid[selectedOrder];
+                    item.origTid = item.tid;
                     item.row = terminals[item.tid]!.excelRow;
                     item.unitName = terminals[item.tid]!.unitName;
                   }
+                  // حفظ التصحيح في .pos_fix.json مثل البايثون تماماً
+                  if (item.key != null && item.row != null) {
+                    final fixes = loadFixes();
+                    fixes[item.key!] = {
+                      "val": item.amount,
+                      "tid": item.tid,
+                      "row": item.row,
+                      "date": item.date,
+                    };
+                    saveFixes(fixes);
+                  }
                 });
                 Navigator.pop(ctx);
+                assignTerminalsStage2(processedItems);
                 rebuildFiles();
               },
               child: const Text('حفظ وتحديث الملفات'),
@@ -495,22 +790,58 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> rebuildFiles() async {
-    setState(() => status = 'جاري توليد الملفات وتحديث الشيتات...');
+    setState(() => status = 'جاري إعادة التسمية وتوليد الملفات...');
+
     final dateCounts = <String, int>{};
     for (final r in processedItems) {
-      if (r.date != null) {
+      if (!r.skip && r.date != null) {
         dateCounts[r.date!] = (dateCounts[r.date!] ?? 0) + 1;
       }
     }
-    String reportDate = "اليوم";
+    String reportDate = "today";
     if (dateCounts.isNotEmpty) {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
-    // 1. بناء ملف الـ PDF المجمع
+    // إعادة تسمية الصور في raw_images بنظام آمن ضد التضارب (1.jpg, 9_2.jpg, dup_...)
+    for (var k = 0; k < processedItems.length; k++) {
+      final r = processedItems[k];
+      final ext = r.path.split('.').last.toLowerCase();
+      String targetName;
+      if (r.skip) {
+        targetName = 'dup_${baseName(r.path)}';
+      } else if (r.orderNum != null) {
+        final sfx = r.suffix != null ? '_${r.suffix}' : '';
+        targetName = '${r.orderNum}$sfx.$ext';
+      } else {
+        continue;
+      }
+      r.newName = targetName;
+      final newPath = '$rawImagesDir/$targetName';
+      if (r.path != newPath && File(r.path).existsSync()) {
+        try {
+          final tmpPath = '$rawImagesDir/__tmp_${k}_${DateTime.now().millisecondsSinceEpoch}.$ext';
+          final fTmp = File(r.path).renameSync(tmpPath);
+          if (File(newPath).existsSync()) {
+            File(newPath).deleteSync();
+          }
+          final fFinal = fTmp.renameSync(newPath);
+          r.path = fFinal.path;
+        } catch (_) {}
+      }
+    }
+
+    // ترتيب العناصر (من 1 إلى 18 ثم الباتشات الإضافية)
+    processedItems.sort((a, b) {
+      if (a.skip != b.skip) return a.skip ? 1 : -1;
+      final c1 = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
+      if (c1 != 0) return c1;
+      return (a.suffix ?? 0).compareTo(b.suffix ?? 0);
+    });
+
+    // 1. بناء ملف الـ PDF المجمع (فقط للإيصالات المعتمدة غير المكررة)
     final pdf = pw.Document();
-    processedItems.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
-    for (final r in processedItems) {
+    for (final r in processedItems.where((x) => !x.skip && x.orderNum != null)) {
       if (File(r.path).existsSync()) {
         try {
           final imgBytes = File(r.path).readAsBytesSync();
@@ -528,20 +859,29 @@ class _HomePageState extends State<HomePage> {
     await pdfOutFile.writeAsBytes(await pdf.save());
     generatedPdfPath = pdfOutFile.path;
 
-    // حساب إجماليات كل وحدة
-    final unitTotals = <int, double>{};
-    for (var r = 2; r <= 11; r++) {
-      unitTotals[r] = 0.0;
-    }
+    // حساب إجماليات كل وحدة (الصفوف 2 إلى 11)
+    final unitTotals = <int, double>{for (var r = 2; r <= 11; r++) r: 0.0};
+    final unitCounts = <int, int>{for (var r = 2; r <= 11; r++) r: 0};
+
     for (final item in processedItems) {
-      if (item.row != null && item.amount > 0) {
-        unitTotals[item.row!] = (unitTotals[item.row!] ?? 0.0) + item.amount;
+      if (!item.skip && item.row != null && item.amount > 0) {
+        unitTotals[item.row!] = round2((unitTotals[item.row!] ?? 0.0) + item.amount);
+        unitCounts[item.row!] = (unitCounts[item.row!] ?? 0) + 1;
       }
     }
 
-    final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
-    if (tplFile.existsSync()) {
-      // 2. الملف الأصلي: مطابق تماماً لتمبلت الاسكندريه 00.xlsx دون إضافة أو مساس بأي شيء آخر
+    // البحث عن تمبلت الإكسيل
+    File? tplFile;
+    for (final d in [baseDir, rawImagesDir, outputDir]) {
+      final exact = File('$d/الاسكندريه 00.xlsx');
+      if (exact.existsSync()) {
+        tplFile = exact;
+        break;
+      }
+    }
+
+    if (tplFile != null) {
+      // 2. ملف الإكسيل الرسمي
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -553,15 +893,8 @@ class _HomePageState extends State<HomePage> {
           final cellD = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
           cellD.value = xl.DoubleCellValue(tot);
 
-          final cellE = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
-          double cashVal = 0.0;
-          if (cellE.value != null && cellE.value is xl.DoubleCellValue) {
-            cashVal = (cellE.value as xl.DoubleCellValue).value;
-          }
-          cashVal = round2(cashVal);
-
           final cellF = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
-          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
+          cellF.value = xl.FormulaCellValue('=D$r+IF(ISBLANK(E$r),0,E$r)');
         }
 
         final excelOutBytes = excel.encode();
@@ -581,25 +914,13 @@ class _HomePageState extends State<HomePage> {
         final sheetAdv = excelAdv[defaultSheet];
 
         double grandPos = 0.0;
-        double grandCash = 0.0;
-
         for (var r = 2; r <= 11; r++) {
           final tot = round2(unitTotals[r] ?? 0.0);
           grandPos += tot;
-
-          final cellD = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
-          cellD.value = xl.DoubleCellValue(tot);
-
-          final cellE = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
-          double cashVal = 0.0;
-          if (cellE.value != null && cellE.value is xl.DoubleCellValue) {
-            cashVal = (cellE.value as xl.DoubleCellValue).value;
-          }
-          cashVal = round2(cashVal);
-          grandCash += cashVal;
-
-          final cellF = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
-          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
+          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value =
+              xl.DoubleCellValue(tot);
+          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1)).value =
+              xl.DoubleCellValue(tot);
         }
 
         const rowTotalIndex = 11;
@@ -609,38 +930,47 @@ class _HomePageState extends State<HomePage> {
             xl.IntCellValue(18);
         sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value =
             xl.DoubleCellValue(round2(grandPos));
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandCash));
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandPos + grandCash));
 
         final detailSheet = excelAdv['تفاصيل الماكينات'];
-        final headers = ['رقم الترتيب', 'اسم الوحدة', 'TID الماكينة', 'المبلغ (ج.م)', 'حالة الإيصال'];
+        final headers = ['رقم الترتيب', 'اسم الوحدة', 'TID الماكينة', 'المبلغ (ج.م)', 'طريقة التعرف / الحالة'];
         for (var c = 0; c < headers.length; c++) {
           detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).value =
               xl.TextCellValue(headers[c]);
         }
 
+        var rowIdx = 1;
         for (var i = 1; i <= 18; i++) {
           final currentTid = numToTid[i]!;
           final info = terminals[currentTid]!;
-          final matched = processedItems.where((e) => e.orderNum == i).toList();
+          final matched = processedItems.where((e) => !e.skip && e.orderNum == i).toList();
 
-          double amt = 0.0;
-          for (final m in matched) {
-            amt += m.amount;
+          if (matched.isEmpty) {
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value =
+                xl.TextCellValue('$i');
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value =
+                xl.TextCellValue(info.unitName);
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value =
+                xl.TextCellValue(currentTid);
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value =
+                xl.DoubleCellValue(0.0);
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value =
+                xl.TextCellValue('⚠️ غير وارد (مفقود)');
+            rowIdx++;
+          } else {
+            for (final m in matched) {
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value =
+                  xl.TextCellValue(m.displayOrder);
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value =
+                  xl.TextCellValue(info.unitName);
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value =
+                  xl.TextCellValue(m.tid ?? currentTid);
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value =
+                  xl.DoubleCellValue(round2(m.amount));
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value =
+                  xl.TextCellValue('${m.confirmed ? "✓ مؤكد" : "⚠️ يحتاج مراجعة"} (${m.how})');
+              rowIdx++;
+            }
           }
-
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: i)).value =
-              xl.IntCellValue(i);
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: i)).value =
-              xl.TextCellValue(info.unitName);
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: i)).value =
-              xl.TextCellValue(currentTid);
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: i)).value =
-              xl.DoubleCellValue(round2(amt));
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: i)).value =
-              xl.TextCellValue(matched.isNotEmpty ? 'تم الفحص بنجاح' : '⚠️ غير وارد (مفقود)');
         }
 
         final advBytes = excelAdv.encode();
@@ -653,13 +983,55 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    final foundOrders = processedItems.map((e) => e.orderNum).whereType<int>().toSet();
-    missingTerminals = [for (var i = 1; i <= 18; i++) if (!foundOrders.contains(i)) i];
+    // حساب الماكينات الناقصة مع مراعاة ملف ignore.txt
+    final ignoreSet = loadIgnoreList();
+    final foundOrders = processedItems
+        .where((e) => !e.skip && e.orderNum != null && e.amount > 0)
+        .map((e) => e.orderNum!)
+        .toSet();
+    missingTerminals = [
+      for (var i = 1; i <= 18; i++)
+        if (!foundOrders.contains(i) && !ignoreSet.contains(i)) i
+    ];
 
-    setState(() => status = 'اكتمل بنجاح!\n'
-        '• تم توليد التقرير الأصلي: الاسكندريه $reportDate.xlsx\n'
-        '• تم توليد التقرير الشامل: تقرير_شامل_POS_$reportDate.xlsx\n'
-        '• تم توليد ملف الـ PDF المجمع.');
+    // 4. كتابة ملف review_report.txt مطابق للبايثون
+    final lines = <String>[
+      "Review report - $reportDate",
+      "=" * 60,
+      "",
+    ];
+    for (final r in processedItems) {
+      final name = r.newName ?? r.fn;
+      final flags = <String>[];
+      if (r.skip) flags.add("duplicate - removed");
+      if (r.amount <= 0) flags.add("amount unreadable");
+      if (r.row == null) flags.add("unit unknown");
+      if (!r.confirmed && r.amount > 0) flags.add("amount needs checking");
+      if (["auto-number", "conflict", "extra-batch", "name/merchant", "fuzzy"].contains(r.how)) {
+        flags.add("terminal set by ${r.how}");
+      }
+      if (r.date != null && r.date != reportDate) {
+        flags.add("date ${r.date} (expected $reportDate)");
+      }
+      final mark = flags.isNotEmpty ? "⚠️" : "✓ ";
+      lines.add(
+          "$mark ${name.padRight(14)} ${(r.unitName ?? '??').padRight(18)} ${r.amount.toStringAsFixed(2).padLeft(12)}"
+          "${flags.isNotEmpty ? '   [${flags.join(' | ')}]' : ''}");
+    }
+    final grandSum = unitTotals.values.fold(0.0, (a, b) => a + b);
+    lines.addAll(["", "=" * 60, "Grand total: ${grandSum.toStringAsFixed(2)} EGP"]);
+    if (missingTerminals.isNotEmpty) {
+      lines.add("");
+      lines.add("Missing terminals: " +
+          missingTerminals.map((n) => "$n (${rowNames[terminals[numToTid[n]]!.excelRow]})").join(", "));
+    }
+    final repFile = File('$outputDir/review_report.txt');
+    repFile.writeAsStringSync(lines.join("\n"));
+    reportTxtPath = repFile.path;
+
+    setState(() => status = 'اكتمل بنجاح! الإجمالي العام: ${grandSum.toStringAsFixed(2)} ج.م\n'
+        '• التقرير الرسمي: الاسكندريه $reportDate.xlsx\n'
+        '• ملف الـ PDF وتقرير المراجعة جاهزون للمشاركة.');
   }
 
   Future<void> runFullPipeline() async {
@@ -674,14 +1046,15 @@ class _HomePageState extends State<HomePage> {
       progress = 0;
       processedItems.clear();
       missingTerminals.clear();
-      status = 'جاري البحث عن مجلدات الصور...';
+      warnings.clear();
+      status = 'جاري البحث عن الصور...';
     });
 
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
     if (dirs.isEmpty) {
       setState(() {
         busy = false;
-        status = 'تعذر العثور على مجلد صور الواتساب تلقائياً.';
+        status = 'تعذر العثور على مجلد الصور.';
       });
       return;
     }
@@ -692,18 +1065,19 @@ class _HomePageState extends State<HomePage> {
         : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final todo = <File>[];
 
-    // جلب كل الصور الواقعة في الفترة المحددة فوراً ودون حظر الذاكرة
     for (final d in dirs) {
       try {
         for (final e in d.listSync().whereType<File>()) {
-          final lower = e.path.toLowerCase();
+          final fn = baseName(e.path);
+          if (fn.startsWith('.') || fn.startsWith('dup_')) continue;
+          final lower = fn.toLowerCase();
           if (!(lower.endsWith('.jpg') ||
               lower.endsWith('.jpeg') ||
               lower.endsWith('.png') ||
               lower.endsWith('.webp'))) {
             continue;
           }
-          if (fileDate(e).isBefore(cutoff)) continue;
+          if (customDir == null && fileDate(e).isBefore(cutoff)) continue;
           todo.add(e);
         }
       } catch (_) {}
@@ -712,37 +1086,71 @@ class _HomePageState extends State<HomePage> {
     if (todo.isEmpty) {
       setState(() {
         busy = false;
-        status = 'لا توجد صور في مجلد الواتساب بالفترة المحددة.';
+        status = 'لا توجد صور في الفترة المحددة.';
       });
       return;
     }
 
+    final fixes = loadFixes();
     final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
     Directory(rawImagesDir).createSync(recursive: true);
     Directory(outputDir).createSync(recursive: true);
 
     final rawReceipts = <ReceiptItem>[];
+    final seenBatchKey = <String>{};
 
-    // المرحلة 1: فحص الـ OCR واستخراج مبالغ الـ Grand Total الحقيقية
+    // المرحلة 1: فحص الـ OCR وتطبيق قواعد البايثون
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
+        final key = fileKey(f.path);
+
+        // التحقق مما إذا كانت الصورة مصححة يدوياً من قبل (.pos_fix.json)
+        if (fixes.containsKey(key)) {
+          final fx = Map<String, dynamic>.from(fixes[key] as Map);
+          final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
+          final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
+          final tid = fx['tid'] as String?;
+          final row = fx['row'] as int?;
+          rawReceipts.add(ReceiptItem(
+            fn: baseName(localFile.path),
+            path: localFile.path,
+            key: key,
+            tid: tid,
+            origTid: tid,
+            orderNum: tid != null ? terminals[tid]?.orderNum : null,
+            row: row,
+            unitName: row != null ? rowNames[row] : null,
+            amount: (fx['val'] as num).toDouble(),
+            confirmed: true,
+            how: "manual",
+            date: fx['date'] as String?,
+          ));
+          continue;
+        }
+
         final res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         final sc = receiptScore(res.text);
 
-        if (sc >= 2) {
-          final dst = '$rawImagesDir/wa_${baseName(f.path)}';
+        if (sc >= 2 || customDir == rawImagesDir) {
+          final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
           final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
+          final fn = baseName(localFile.path);
+          final nameOnly = fn.contains('.') ? fn.substring(0, fn.lastIndexOf('.')) : fn;
+
+          final decision = extractReceiptAmountPythonStyle(res.text);
+          final bNo = findBatchNo(res.text);
 
           var tid = findTerminal(res.text);
+          var how = tid != null ? "terminal" : "none";
           int? row;
           String? uName;
           int? order;
 
           final extraRow = findUnitByExtra(res.text);
-
           if (tid == null) {
             tid = findTerminalFuzzy(res.text, extraRow);
+            if (tid != null) how = "fuzzy";
           }
 
           if (tid != null && terminals.containsKey(tid)) {
@@ -753,27 +1161,51 @@ class _HomePageState extends State<HomePage> {
           } else if (extraRow != null) {
             row = extraRow;
             uName = rowNames[extraRow];
+            how = "name/merchant";
           }
 
-          final amt = extractReceiptAmounts(res.text);
-          final d = findDate(res.text);
+          // إذا كان اسم الملف رقماً (1..18) مثل البايثون
+          final fnNum = int.tryParse(nameOnly);
+          if (tid == null && fnNum != null && numToTid.containsKey(fnNum)) {
+            final ft = numToTid[fnNum]!;
+            if (row == null || terminals[ft]!.excelRow == row) {
+              tid = ft;
+              order = terminals[ft]!.orderNum;
+              row = terminals[ft]!.excelRow;
+              uName = terminals[ft]!.unitName;
+              how = "file-number";
+            }
+          }
+
+          // منع تكرار نفس الباتش ونفس المبلغ
+          if (bNo != null && decision.amount > 0) {
+            final bKey = '${tid ?? row}_$bNo_${decision.amount.toStringAsFixed(2)}';
+            if (seenBatchKey.contains(bKey)) continue;
+            seenBatchKey.add(bKey);
+          }
 
           rawReceipts.add(ReceiptItem(
+            fn: fn,
             path: localFile.path,
+            key: key,
             tid: tid,
+            origTid: tid,
             orderNum: order,
             row: row,
             unitName: uName,
-            amount: amt,
-            date: d,
+            amount: decision.amount,
+            confirmed: decision.confirmed,
+            how: how,
+            date: findDate(res.text),
+            batchNo: bNo,
           ));
         }
       } catch (_) {}
 
       if (!mounted) return;
       setState(() {
-        progress = ((i + 1) / todo.length) * 0.5;
-        status = 'فحص OCR: ${i + 1} من ${todo.length}';
+        progress = ((i + 1) / todo.length) * 0.7;
+        status = 'فحص الإيصالات: ${i + 1} من ${todo.length}';
       });
     }
 
@@ -782,27 +1214,15 @@ class _HomePageState extends State<HomePage> {
     if (rawReceipts.isEmpty) {
       setState(() {
         busy = false;
-        status = 'تم فحص ${todo.length} صورة، ولم يتم العثور على إيصالات مطابقة.';
+        status = 'لم يتم العثور على إيصالات مطابقة.';
       });
       return;
     }
 
-    // المرحلة 2: إعادة التسمية
-    setState(() => status = 'إعادة تسمية الصور وترتيبها...');
-    final orderedReceipts = <ReceiptItem>[];
-    for (final item in rawReceipts) {
-      if (item.orderNum != null) {
-        final ext = item.path.split('.').last;
-        final newPath = '$rawImagesDir/${item.orderNum}.$ext';
-        try {
-          final renFile = File(item.path).renameSync(newPath);
-          item.path = renFile.path;
-        } catch (_) {}
-      }
-      orderedReceipts.add(item);
-    }
+    // المرحلة 2: توزيع الأرقام وحل التعارض (مثل البايثون تماماً)
+    assignTerminalsStage2(rawReceipts);
 
-    processedItems.addAll(orderedReceipts);
+    processedItems.addAll(rawReceipts);
     await rebuildFiles();
 
     if (!mounted) return;
@@ -816,7 +1236,7 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('إيصالات POS'),
+        title: const Text('إيصالات POS (نسخة البايثون المطورة)'),
         actions: [
           IconButton(
             icon: const Icon(Icons.share),
@@ -835,6 +1255,7 @@ class _HomePageState extends State<HomePage> {
               children: [
                 for (final o in const [
                   [0, 'اليوم'],
+                  [1, 'أمس واليوم'],
                   [3, '3 أيام'],
                   [7, 'أسبوع'],
                   [-1, 'الكل'],
@@ -883,7 +1304,7 @@ class _HomePageState extends State<HomePage> {
                 IconButton.filledTonal(
                   onPressed: busy ? null : shareAdvancedFile,
                   icon: const Icon(Icons.table_chart),
-                  tooltip: 'مشاركة التقرير الشامل المفصل',
+                  tooltip: 'مشاركة التقرير الشامل وتقرير المراجعة',
                 ),
               ],
             ),
@@ -936,7 +1357,11 @@ class _HomePageState extends State<HomePage> {
                 itemCount: processedItems.length,
                 itemBuilder: (context, i) {
                   final item = processedItems[i];
+                  final needsReview = !item.confirmed || item.row == null || item.amount <= 0;
                   return Card(
+                    color: item.skip
+                        ? Colors.red.shade50
+                        : (needsReview ? Colors.orange.shade50 : null),
                     margin: const EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
                       leading: Image.file(
@@ -944,13 +1369,17 @@ class _HomePageState extends State<HomePage> {
                         width: 48,
                         height: 48,
                         fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const Icon(Icons.receipt_long),
                       ),
                       title: Text(
-                        'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                        item.skip
+                            ? 'مكرر (مستبعد) - ماكينة ${item.displayOrder}'
+                            : 'ماكينة ${item.displayOrder} - ${item.unitName ?? 'وحدة غير معروفة'}',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       subtitle: Text(
-                        'TID: ${item.tid ?? 'غير محدد'} | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م',
+                        'TID: ${item.tid ?? 'غير محدد'} (${item.how})\n'
+                        'المبلغ: ${item.amount.toStringAsFixed(2)} ج.م ${item.confirmed ? "✓" : "⚠️ راجع المبلغ"}',
                       ),
                       trailing: IconButton(
                         icon: const Icon(Icons.edit, color: Colors.teal),
