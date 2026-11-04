@@ -62,7 +62,7 @@ final Map<String, String> tidFix = {
   "50302316": "50382316",
 };
 
-// ───────────────────── خوارزميات الاستخراج ─────────────────────
+// ───────────────────── خوارزميات الاستخراج المماثلة لبايثون ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -127,28 +127,83 @@ List<double> amountsIn(String text) {
   return out;
 }
 
-double extractAmountAccurate(String text) {
-  final grandMatch = RegExp(r"GRAND\s*TOTALS?[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(text);
-  if (grandMatch != null) {
-    final grandText = grandMatch.group(0)!;
-    final grandAmounts = amountsIn(grandText);
-    if (grandAmounts.isNotEmpty) {
-      return grandAmounts.reduce((a, b) => a > b ? a : b);
+double? mostFrequent(List<double> vals) {
+  if (vals.isEmpty) return null;
+  final counts = <double, int>{};
+  for (final v in vals) {
+    counts[v] = (counts[v] ?? 0) + 1;
+  }
+  double best = vals.first;
+  int mx = 0;
+  counts.forEach((k, v) {
+    if (v > mx) {
+      mx = v;
+      best = k;
+    }
+  });
+  return best;
+}
+
+double parseSingleReceiptText(String txt) {
+  final brandReg = RegExp(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", caseSensitive: false);
+  final endSplit = txt.split(RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false))[0];
+  
+  final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(endSplit);
+  final pre = gm != null ? endSplit.substring(0, gm.start) : endSplit;
+  final post = gm != null ? endSplit.substring(gm.start) : "";
+
+  final brandVals = <double>[];
+  final parts = pre.split(brandReg);
+  if (parts.length > 1) {
+    for (var i = 1; i < parts.length; i++) {
+      final secAmounts = amountsIn(parts[i]);
+      final v = mostFrequent(secAmounts);
+      if (v != null) brandVals.add(v);
     }
   }
 
-  final netMatches = RegExp(r"Total\s*Net\s*Amount[\s\S]*?(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})", caseSensitive: false).allMatches(text);
-  if (netMatches.isNotEmpty) {
-    final lastNet = netMatches.last;
-    final v = double.tryParse("${lastNet.group(1)!.replaceAll(',', '')}.${lastNet.group(2)!}");
-    if (v != null && v >= 0.5) return double.parse(v.toStringAsFixed(2));
+  final grandAmounts = amountsIn(post);
+  final brandSum = brandVals.isNotEmpty
+      ? double.parse(brandVals.reduce((a, b) => a + b).toStringAsFixed(2))
+      : null;
+
+  // 1. التطابق التام بين مجموع البطاقات والإجمالي العام
+  if (brandSum != null && grandAmounts.any((g) => (g - brandSum).abs() < 0.05)) {
+    return brandSum;
   }
 
-  final allAmts = amountsIn(text);
-  if (allAmts.isNotEmpty) {
-    return allAmts.reduce((a, b) => a > b ? a : b);
+  // 2. إذا وجد إجمالي مكرر في خانة الـ Grand Totals
+  if (grandAmounts.isNotEmpty) {
+    final freq = mostFrequent(grandAmounts);
+    if (freq != null && freq > 0) return freq;
+    return grandAmounts.reduce((a, b) => a > b ? a : b);
   }
-  return 0.0;
+
+  if (brandSum != null && brandSum > 0) return brandSum;
+
+  final all = amountsIn(txt);
+  return all.isNotEmpty ? all.reduce((a, b) => a > b ? a : b) : 0.0;
+}
+
+double extractReceiptAmounts(String text) {
+  // فحص ما إذا كانت الصورة تحتوي على أكثر من إيصال (مثل إيصالين بجانب بعضهما)
+  final batchMatches = RegExp(r"BATCH\s*CLOSED|SUCCESSFULLY", caseSensitive: false).allMatches(text).toList();
+  if (batchMatches.length > 1) {
+    double totalCombined = 0.0;
+    int prev = 0;
+    for (var i = 1; i < batchMatches.length; i++) {
+      final chunk = text.substring(prev, batchMatches[i].start);
+      final amt = parseSingleReceiptText(chunk);
+      if (amt > 0) totalCombined += amt;
+      prev = batchMatches[i].start;
+    }
+    final lastChunk = text.substring(prev);
+    final lastAmt = parseSingleReceiptText(lastChunk);
+    if (lastAmt > 0) totalCombined += lastAmt;
+    if (totalCombined > 0) return double.parse(totalCombined.toStringAsFixed(2));
+  }
+
+  return parseSingleReceiptText(text);
 }
 
 double round2(double val) => double.parse(val.toStringAsFixed(2));
@@ -389,7 +444,7 @@ class _HomePageState extends State<HomePage> {
 
     final rawReceipts = <ReceiptItem>[];
 
-    // المرحلة 1: فحص الـ OCR
+    // المرحلة 1: فحص الـ OCR واستخراج المبالغ بدقة
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
@@ -402,7 +457,7 @@ class _HomePageState extends State<HomePage> {
           final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
 
           final tid = findTerminal(res.text);
-          final amt = extractAmountAccurate(res.text);
+          final amt = extractReceiptAmounts(res.text);
           final d = findDate(res.text);
 
           int? order;
@@ -505,7 +560,7 @@ class _HomePageState extends State<HomePage> {
     final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
     await pdfOutFile.writeAsBytes(await pdf.save());
 
-    // المرحلة 4: كتابة المبالغ والإجمالي المقرب بخانتين عشريتين في الإكسيل
+    // المرحلة 4: كتابة المبالغ الدقيقة في الإكسيل
     setState(() => status = 'تحديث شيت الإكسيل...');
     final unitTotals = <int, double>{};
     for (var r = 2; r <= 11; r++) {
@@ -536,7 +591,7 @@ class _HomePageState extends State<HomePage> {
           final cellD = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
           cellD.value = xl.DoubleCellValue(tot);
 
-          // قراءة عمود الكاش إن وُجد (العمود E)
+          // قراءة عمود الكاش (العمود E)
           final cellE = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
           double cashVal = 0.0;
           if (cellE.value != null && cellE.value is xl.DoubleCellValue) {
@@ -545,13 +600,13 @@ class _HomePageState extends State<HomePage> {
           cashVal = round2(cashVal);
           grandCashTotal += cashVal;
 
-          // العمود F (الإجمالي = POS + Cash) مقرب تماماً لخانتين
+          // العمود F (الإجمالي الكلي = POS + Cash)
           final cellF = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
           cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
         }
 
         // صف الإجمالي العام النهائي أسفل الجدول (الصف 12)
-        final rowTotalIndex = 11; // يمثل Row 12
+        const rowTotalIndex = 11;
         sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value =
             xl.TextCellValue('الإجمالي العام');
         sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value =
@@ -580,7 +635,7 @@ class _HomePageState extends State<HomePage> {
       status = 'اكتمل بنجاح!\n'
           '• تم سحب وترقيم ${orderedReceipts.length} إيصال.\n'
           '• حُفظ الـ PDF: الاسكندريه $reportDate.pdf\n'
-          '• حُفظ الإكسيل بمبالغ مقربة: الاسكندريه $reportDate.xlsx\n'
+          '• حُفظ الإكسيل: الاسكندريه $reportDate.xlsx\n'
           'المسار: all/output';
     });
   }
