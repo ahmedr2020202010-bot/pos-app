@@ -33,6 +33,8 @@ final List<RegExp> _markers = [
   RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
   RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
   RegExp(r'THANK\s*YOU', caseSensitive: false),
+  RegExp(r'NET\s*AMOUNT', caseSensitive: false),
+  RegExp(r'\bSALE\b', caseSensitive: false),
 ];
 
 int receiptScore(String text) => _markers.where((r) => r.hasMatch(text)).length;
@@ -125,7 +127,9 @@ void saveSeen(Map<String, dynamic> seen) {
 class Found {
   final String path;
   final int score;
-  Found(this.path, this.score);
+  final String snippet;
+  final bool receipt;
+  Found(this.path, this.score, this.snippet, this.receipt);
 }
 
 class HomePage extends StatefulWidget {
@@ -143,6 +147,9 @@ class _HomePageState extends State<HomePage> {
   double progress = 0;
   String status = 'اضغط "فحص الواتساب" لسحب إيصالات الفترة المختارة.';
   final List<Found> found = [];
+  final List<Found> others = [];
+  int errors = 0;
+  String lastError = '';
 
   @override
   void initState() {
@@ -177,6 +184,9 @@ class _HomePageState extends State<HomePage> {
       busy = true;
       progress = 0;
       found.clear();
+      others.clear();
+      errors = 0;
+      lastError = '';
       status = 'طلب إذن الوصول للملفات...';
     });
 
@@ -237,16 +247,22 @@ class _HomePageState extends State<HomePage> {
       try {
         final res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         final sc = receiptScore(res.text);
+        final flat = res.text.replaceAll('\n', ' ');
+        final snip = flat.length > 70 ? flat.substring(0, 70) : flat;
         seen['${baseName(f.path)}:${f.lengthSync()}'] = true;
+        if (sc < 2) others.add(Found(f.path, sc, snip, false));
         if (sc >= 2) {
           final dst = '$outDirPath/wa_${baseName(f.path)}';
           if (!File(dst).existsSync()) {
             f.copySync(dst);
             copied++;
           }
-          found.add(Found(f.path, sc));
+          found.add(Found(f.path, sc, snip, true));
         }
-      } catch (_) {}
+      } catch (e) {
+        errors++;
+        lastError = e.toString();
+      }
       if (!mounted) return;
       setState(() {
         progress = (i + 1) / todo.length;
@@ -261,6 +277,7 @@ class _HomePageState extends State<HomePage> {
       busy = false;
       status = 'خلص: ${todo.length} صورة اتفحصت، ${found.length} إيصال، '
           '$copied اتنسخ لـ all/raw_images (الأصول ما اتمسحتش).'
+          '${errors > 0 ? '\nأخطاء قراءة: $errors  ($lastError)' : ''}'
           '${pdfSkipped > 0 ? '\n$pdfSkipped ملف PDF اتجاهل (دعم PDF لسه جاي).' : ''}';
     });
   }
@@ -330,14 +347,18 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 8),
             Expanded(
               child: ListView.builder(
-                itemCount: found.length,
+                itemCount: found.length + others.length,
                 itemBuilder: (context, i) {
-                  final f = found[i];
+                  final f = i < found.length ? found[i] : others[i - found.length];
                   return ListTile(
                     leading: Image.file(File(f.path),
                         width: 48, height: 48, fit: BoxFit.cover, cacheWidth: 120),
-                    title: Text(baseName(f.path)),
-                    subtitle: Text('علامات الإيصال: ${f.score}'),
+                    title: Text(
+                      '${f.receipt ? '✓ ' : '✗ '}${baseName(f.path)}',
+                      textDirection: TextDirection.ltr,
+                    ),
+                    subtitle: Text('علامات: ${f.score}  |  ${f.snippet}',
+                        maxLines: 2, textDirection: TextDirection.ltr),
                   );
                 },
               ),
