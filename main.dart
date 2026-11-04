@@ -60,33 +60,16 @@ final Map<String, TerminalInfo> terminals = {
 };
 
 final Map<int, String> numToTid = {
-  1: "50335710",
-  2: "50335993",
-  3: "50335987",
-  4: "50325716",
-  5: "50335998",
-  6: "50335994",
-  7: "50335711",
-  8: "50382298",
-  9: "50382315",
-  10: "50382306",
-  11: "50382316",
-  12: "50382308",
-  13: "50383706",
-  14: "50382300",
-  15: "50383702",
-  16: "50382312",
-  17: "50383699",
-  18: "50383700",
+  1: "50335710", 2: "50335993", 3: "50335987",
+  4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
+  8: "50382298", 9: "50382315", 10: "50382306", 11: "50382316",
+  12: "50382308", 13: "50383706", 14: "50382300", 15: "50383702",
+  16: "50382312", 17: "50383699", 18: "50383700",
 };
 
 final Map<String, String> tidFix = {
-  "50336994": "50335994",
-  "50336711": "50335711",
-  "50336998": "50335998",
-  "50302316": "50382316",
-  "50382318": "50382315",
-  "50330987": "50335987",
+  "50336994": "50335994", "50336711": "50335711", "50336998": "50335998",
+  "50302316": "50382316", "50382318": "50382315", "50330987": "50335987",
   "60382308": "50382308",
 };
 
@@ -182,18 +165,14 @@ String? findTerminalFuzzy(String rawText, int? targetRow) {
         for (var k = 0; k < 8; k++) {
           if (cand[k] != tid[k]) d++;
         }
-        if (d < (dist[tid] ?? 99)) {
-          dist[tid] = d;
-        }
+        if (d < (dist[tid] ?? 99)) dist[tid] = d;
       }
     }
   }
   if (dist.isEmpty) return null;
   final best = dist.values.reduce(min);
   final winners = dist.entries.where((e) => e.value == best).map((e) => e.key).toList();
-  if (best <= 1 && winners.length == 1) {
-    return winners.first;
-  }
+  if (best <= 1 && winners.length == 1) return winners.first;
   return null;
 }
 
@@ -216,9 +195,7 @@ int? findUnitByExtra(String rawText) {
 
   final up = text.toUpperCase();
   for (final hint in nameHints) {
-    if (hint.key.any((w) => up.contains(w))) {
-      return hint.value;
-    }
+    if (hint.key.any((w) => up.contains(w))) return hint.value;
   }
   return null;
 }
@@ -249,7 +226,7 @@ List<double> amountsIn(String rawText) {
       final whole = m.group(1)!.replaceAll(RegExp(r'[.,\s]'), '');
       final dec = m.group(2)!;
       final v = double.tryParse("$whole.$dec");
-      if (v != null && v >= 10.0 && v <= 5000000) { // تجاهل المبالغ الصغيرة جداً لضمان عدم القراءة الخاطئة
+      if (v != null && v >= 0.5 && v <= 5000000) {
         out.add(round2(v));
       }
     } catch (_) {}
@@ -263,22 +240,41 @@ class AmountDecision {
   const AmountDecision(this.amount, this.confirmed);
 }
 
+// 🎯 استخراج يعتمد تماماً على تكرار المبلغ في قسم GRAND TOTALS (كما أشرت)
 AmountDecision extractReceiptAmountPythonStyle(String rawText) {
   final txt = normalizeOcrText(rawText);
-  
-  // تركيز الاستخراج على منطقة GRAND TOTALS لضمان الدقة المطلقة وعدم أخذ أرقام عشوائية
+
+  // 1. التركيز على منطقة GRAND TOTALS بالكامل
   final grandMatch = RegExp(r"(?:GRAND\s*TOTALS?|TOTALS?\s*GRAND)[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(txt);
+  
   if (grandMatch != null) {
-    final gAmts = amountsIn(grandMatch.group(0)!);
+    final grandText = grandMatch.group(0)!;
+    final gAmts = amountsIn(grandText);
+    
     if (gAmts.isNotEmpty) {
-      return AmountDecision(gAmts.reduce((a, b) => a > b ? a : b), true);
+      // فحص هل المبلغ متكرر داخل الـ GRAND TOTALS (Sale و Total و Net Amount)
+      final counts = <double, int>{};
+      for (final a in gAmts) {
+        counts[a] = (counts[a] ?? 0) + 1;
+      }
+      
+      // اختيار المبلغ الأكثر تكراراً في قسم الـ Grand Total (مؤكد 100%)
+      final sortedEntries = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+      if (sortedEntries.isNotEmpty) {
+        return AmountDecision(sortedEntries.first.key, true);
+      }
     }
   }
 
-  // إذا لم تجد الكلمة حرفياً، خذ أكبر مبلغ حقيقي في الإيصال بالكامل
+  // 2. كاحتياطي: جلب أكبر مبلغ متكرر في الإيصال بأكمله
   final allAmts = amountsIn(txt);
   if (allAmts.isNotEmpty) {
-    return AmountDecision(allAmts.reduce((a, b) => a > b ? a : b), true);
+    final counts = <double, int>{};
+    for (final a in allAmts) {
+      counts[a] = (counts[a] ?? 0) + 1;
+    }
+    final sortedEntries = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    return AmountDecision(sortedEntries.first.key, sortedEntries.first.value >= 2);
   }
 
   return const AmountDecision(0.0, false);
@@ -333,9 +329,7 @@ List<Directory> findWhatsAppImageDirs() {
   final out = <Directory>[];
   void checkAndAdd(String p) {
     final d = Directory(p);
-    if (d.existsSync() && !out.any((x) => x.path == d.path)) {
-      out.add(d);
-    }
+    if (d.existsSync() && !out.any((x) => x.path == d.path)) out.add(d);
   }
 
   checkAndAdd('$root/Android/media/com.whatsapp/WhatsApp/accounts/1003/Media/WhatsApp Images');
@@ -348,12 +342,6 @@ List<Directory> findWhatsAppImageDirs() {
       if (baseName(pkg.path).toLowerCase().contains('whatsapp')) {
         checkAndAdd('${pkg.path}/Media/WhatsApp Images');
         checkAndAdd('${pkg.path}/WhatsApp/Media/WhatsApp Images');
-        for (final acc in _subDirs('${pkg.path}/WhatsApp/accounts')) {
-          checkAndAdd('${acc.path}/Media/WhatsApp Images');
-        }
-        for (final acc in _subDirs('${pkg.path}/accounts')) {
-          checkAndAdd('${acc.path}/Media/WhatsApp Images');
-        }
       }
     }
   }
@@ -364,8 +352,7 @@ DateTime fileDate(File f) {
   final m = RegExp(r'-(\d{8})-').firstMatch(baseName(f.path));
   if (m != null) {
     final s = m.group(1)!;
-    final d = DateTime.tryParse(
-        '${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6, 8)}');
+    final d = DateTime.tryParse('${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6, 8)}');
     if (d != null) return d;
   }
   return f.lastModifiedSync();
@@ -481,35 +468,23 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> shareStandardFiles() async {
     final files = <XFile>[];
-    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
-      files.add(XFile(standardXlsxPath!));
-    }
-    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
-      files.add(XFile(generatedPdfPath!));
-    }
+    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) files.add(XFile(standardXlsxPath!));
+    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) files.add(XFile(generatedPdfPath!));
     if (files.isNotEmpty) {
       await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')));
     }
   }
 
   Future<void> shareAdvancedFile() async {
     final files = <XFile>[];
-    if (advancedXlsxPath != null && File(advancedXlsxPath!).existsSync()) {
-      files.add(XFile(advancedXlsxPath!));
-    }
-    if (reportTxtPath != null && File(reportTxtPath!).existsSync()) {
-      files.add(XFile(reportTxtPath!));
-    }
+    if (advancedXlsxPath != null && File(advancedXlsxPath!).existsSync()) files.add(XFile(advancedXlsxPath!));
+    if (reportTxtPath != null && File(reportTxtPath!).existsSync()) files.add(XFile(reportTxtPath!));
     if (files.isNotEmpty) {
       await Share.shareXFiles(files, text: 'تقرير إيصالات POS الشامل وتقرير المراجعة');
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')));
     }
   }
 
@@ -519,9 +494,7 @@ class _HomePageState extends State<HomePage> {
       r.skip = false;
       r.conflict = false;
       r.suffix = null;
-      if (r.origTid != null && r.tid == null) {
-        r.tid = r.origTid;
-      }
+      if (r.origTid != null && r.tid == null) r.tid = r.origTid;
     }
 
     const prio = {"manual": 0, "terminal": 0, "fuzzy": 1, "file-number": 2};
@@ -536,7 +509,6 @@ class _HomePageState extends State<HomePage> {
         taken[t] = r;
       } else if (r.amount > 0 && (taken[t]!.amount - r.amount).abs() < 0.005) {
         r.skip = true;
-        warnings.add("${r.fn}: مكرر نفس الماكينة $t - تم استبعاده");
       } else {
         r.origTid = r.tid;
         r.tid = null;
@@ -691,7 +663,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> rebuildFiles() async {
-    setState(() => status = 'جاري إعادة التسمية وتوليد الملفات...');
+    setState(() => status = 'جاري توليد الملفات...');
 
     final dateCounts = <String, int>{};
     for (final r in processedItems) {
@@ -722,9 +694,7 @@ class _HomePageState extends State<HomePage> {
         try {
           final tmpPath = '$rawImagesDir/__tmp_${k}_${DateTime.now().millisecondsSinceEpoch}.$ext';
           final fTmp = File(r.path).renameSync(tmpPath);
-          if (File(newPath).existsSync()) {
-            File(newPath).deleteSync();
-          }
+          if (File(newPath).existsSync()) File(newPath).deleteSync();
           final fFinal = fTmp.renameSync(newPath);
           r.path = fFinal.path;
         } catch (_) {}
@@ -743,11 +713,10 @@ class _HomePageState extends State<HomePage> {
       if (File(r.path).existsSync()) {
         try {
           final imgBytes = File(r.path).readAsBytesSync();
-          final imgWidget = pw.MemoryImage(imgBytes);
           pdf.addPage(
             pw.Page(
               pageFormat: PdfPageFormat.a4,
-              build: (pw.Context ctx) => pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+              build: (pw.Context ctx) => pw.Center(child: pw.Image(pw.MemoryImage(imgBytes), fit: pw.BoxFit.contain)),
             ),
           );
         } catch (_) {}
@@ -777,7 +746,6 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
-      // 2. تحديث التقرير الرسمي بالمحافظة الحرفية على القالب الأصلي (Cols C & D)
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -788,7 +756,6 @@ class _HomePageState extends State<HomePage> {
           final tot = round2(unitTotals[r] ?? 0.0);
           final cnt = unitCounts[r] ?? 0;
 
-          // عمود POS Count (index 2 / Col C) و POS amount (index 3 / Col D)
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
 
@@ -805,7 +772,6 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (_) {}
 
-      // 3. التقرير الشامل
       try {
         final bytesAdv = tplFile.readAsBytesSync();
         final excelAdv = xl.Excel.decodeBytes(bytesAdv);
@@ -850,7 +816,7 @@ class _HomePageState extends State<HomePage> {
               detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value = xl.TextCellValue(info.unitName);
               detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value = xl.TextCellValue(m.tid ?? currentTid);
               detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value = xl.DoubleCellValue(round2(m.amount));
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value = xl.TextCellValue('${m.confirmed ? "✓ مؤكد" : "⚠️ يحتاج مراجعة"} (${m.how})');
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value = xl.TextCellValue('${m.confirmed ? "✓ مؤكد" : "⚠️ راجع المبلغ"} (${m.how})');
               rowIdx++;
             }
           }
@@ -875,49 +841,15 @@ class _HomePageState extends State<HomePage> {
         if (!foundOrders.contains(i)) i
     ];
 
-    final lines = <String>[
-      "Review report - $reportDate",
-      "=" * 60,
-      "",
-    ];
-    for (final r in processedItems) {
-      final name = r.newName ?? r.fn;
-      final flags = <String>[];
-      if (r.skip) flags.add("duplicate - removed");
-      if (r.amount <= 0) flags.add("amount unreadable");
-      if (r.row == null) flags.add("unit unknown");
-      if (!r.confirmed && r.amount > 0) flags.add("amount needs checking");
-      if (["auto-number", "conflict", "extra-batch", "name/merchant", "fuzzy"].contains(r.how)) {
-        flags.add("terminal set by ${r.how}");
-      }
-      if (r.date != null && r.date != reportDate) {
-        flags.add("date ${r.date} (expected $reportDate)");
-      }
-      final mark = flags.isNotEmpty ? "⚠️" : "✓ ";
-      lines.add(
-          "$mark ${name.padRight(14)} ${(r.unitName ?? '??').padRight(18)} ${r.amount.toStringAsFixed(2).padLeft(12)}"
-          "${flags.isNotEmpty ? '   [${flags.join(' | ')}]' : ''}");
-    }
     final grandSum = unitTotals.values.fold(0.0, (a, b) => a + b);
-    lines.addAll(["", "=" * 60, "Grand total: ${grandSum.toStringAsFixed(2)} EGP"]);
-    if (missingTerminals.isNotEmpty) {
-      lines.add("");
-      lines.add("Missing terminals: " +
-          missingTerminals.map((n) => "$n (${rowNames[terminals[numToTid[n]]!.excelRow]})").join(", "));
-    }
-    final repFile = File('$outputDir/review_report.txt');
-    repFile.writeAsStringSync(lines.join("\n"));
-    reportTxtPath = repFile.path;
-
     setState(() => status = 'اكتمل بنجاح! الإجمالي العام: ${grandSum.toStringAsFixed(2)} ج.م\n'
-        '• التقرير الرسمي: الاسكندريه $reportDate.xlsx\n'
-        '• ملف الـ PDF وتقرير المراجعة جاهزون للمشاركة.');
+        '• التقرير الرسمي: الاسكندريه $reportDate.xlsx');
   }
 
   Future<void> runFullPipeline() async {
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
-      setState(() => status = 'يجب منح إذن الوصول إلى جميع الملفات للمتابعة.');
+      setState(() => status = 'يجب منح إذن الوصول لجميع الملفات.');
       return;
     }
 
@@ -927,7 +859,7 @@ class _HomePageState extends State<HomePage> {
       processedItems.clear();
       missingTerminals.clear();
       warnings.clear();
-      status = 'جاري البحث عن الصور...';
+      status = 'جاري فحص الصور...';
     });
 
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
@@ -951,10 +883,7 @@ class _HomePageState extends State<HomePage> {
           final fn = baseName(e.path);
           if (fn.startsWith('.') || fn.startsWith('dup_')) continue;
           final lower = fn.toLowerCase();
-          if (!(lower.endsWith('.jpg') ||
-              lower.endsWith('.jpeg') ||
-              lower.endsWith('.png') ||
-              lower.endsWith('.webp'))) {
+          if (!(lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.webp'))) {
             continue;
           }
           if (customDir == null && fileDate(e).isBefore(cutoff)) continue;
@@ -1111,7 +1040,7 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('إيصالات POS (نسخة البايثون المطورة)'),
+        title: const Text('إيصالات POS (نسخة مطابقة للبايثون)'),
         actions: [
           IconButton(
             icon: const Icon(Icons.share),
@@ -1143,8 +1072,7 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
             const SizedBox(height: 8),
-            Text('المصدر: ${customDir ?? 'واتساب (تلقائي)'}',
-                textDirection: TextDirection.ltr),
+            Text('المصدر: ${customDir ?? 'واتساب (تلقائي)'}', textDirection: TextDirection.ltr),
             Row(
               children: [
                 TextButton.icon(
@@ -1190,10 +1118,7 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade200,
-                borderRadius: BorderRadius.circular(8),
-              ),
+              decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
               child: Text(status),
             ),
             if (missingTerminals.isNotEmpty) ...[
@@ -1210,16 +1135,11 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     Text(
                       '⚠️ ماكينات ناقصة (${missingTerminals.length} من 18):',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.amber.shade900,
-                      ),
+                      style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900),
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      missingTerminals
-                          .map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})')
-                          .join(' ، '),
+                      missingTerminals.map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})').join(' ، '),
                       style: const TextStyle(fontSize: 13),
                     ),
                   ],
@@ -1234,9 +1154,7 @@ class _HomePageState extends State<HomePage> {
                   final item = processedItems[i];
                   final needsReview = !item.confirmed || item.row == null || item.amount <= 0;
                   return Card(
-                    color: item.skip
-                        ? Colors.red.shade50
-                        : (needsReview ? Colors.orange.shade50 : null),
+                    color: item.skip ? Colors.red.shade50 : (needsReview ? Colors.orange.shade50 : null),
                     margin: const EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
                       leading: Image.file(
@@ -1247,14 +1165,11 @@ class _HomePageState extends State<HomePage> {
                         errorBuilder: (_, __, ___) => const Icon(Icons.receipt_long),
                       ),
                       title: Text(
-                        item.skip
-                            ? 'مكرر (مستبعد) - ماكينة ${item.displayOrder}'
-                            : 'ماكينة ${item.displayOrder} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                        item.skip ? 'مكرر (مستبعد) - ماكينة ${item.displayOrder}' : 'ماكينة ${item.displayOrder} - ${item.unitName ?? 'وحدة غير معروفة'}',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       subtitle: Text(
-                        'TID: ${item.tid ?? 'غير محدد'} (${item.how})\n'
-                        'المبلغ: ${item.amount.toStringAsFixed(2)} ج.م ${item.confirmed ? "✓" : "⚠️ راجع المبلغ"}',
+                        'TID: ${item.tid ?? 'غير محدد'} (${item.how})\nالمبلغ: ${item.amount.toStringAsFixed(2)} ج.م',
                       ),
                       trailing: IconButton(
                         icon: const Icon(Icons.edit, color: Colors.teal),
@@ -1298,8 +1213,7 @@ class _FolderPickerState extends State<FolderPicker> {
           .whereType<Directory>()
           .where((d) => !baseName(d.path).startsWith('.'))
           .toList();
-      l.sort((a, b) =>
-          baseName(a.path).toLowerCase().compareTo(baseName(b.path).toLowerCase()));
+      l.sort((a, b) => baseName(a.path).toLowerCase().compareTo(baseName(b.path).toLowerCase()));
       dirs = l;
       error = null;
     } catch (_) {
@@ -1321,15 +1235,8 @@ class _FolderPickerState extends State<FolderPicker> {
       body: SafeArea(
         child: Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(path, textDirection: TextDirection.ltr),
-            ),
-            if (error != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Text(error!),
-              ),
+            Padding(padding: const EdgeInsets.all(12), child: Text(path, textDirection: TextDirection.ltr)),
+            if (error != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text(error!)),
             Expanded(
               child: ListView(
                 children: [
