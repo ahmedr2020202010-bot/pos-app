@@ -46,8 +46,8 @@ final Map<String, TerminalInfo> terminals = {
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"),
-  "50383712": const TerminalInfo(19, 4, "المنتزه"), // الماكينة الثالثة القديمة للمنتزه
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة
+  "50383712": const TerminalInfo(19, 4, "المنتزه"), // منتزه 3 القديمة
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -62,7 +62,7 @@ final Map<String, TerminalInfo> terminals = {
 final Map<int, String> numToTid = {
   1: "50335710", 2: "50335993", 3: "50335987",
   4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
-  8: "50382298", 9: "50382315", 19: "50383712", 
+  8: "50382298", 9: "50382315", 19: "50383712",
   10: "50382306", 11: "50382316",
   12: "50382308", 13: "50383706", 14: "50382300", 15: "50383702",
   16: "50382312", 17: "50383699", 18: "50383700",
@@ -244,7 +244,48 @@ class _HomePageState extends State<HomePage> {
   String? reportTxtPath;
   List<int> missingTerminals = [];
 
-  // ───────────────────── دوال المعالجة ─────────────────────
+  // ───────────────────── دوال المعالجة (قص الصور والذكاء الاصطناعي) ─────────────────────
+
+  // 🎯 هذه الدالة تحاكي OpenCV في البايثون، حيث تقوم بفصل الإيصالات المتجاورة هندسياً
+  List<String> clusterBlocksToReceipts(RecognizedText recognizedText) {
+    final blocks = recognizedText.blocks;
+    if (blocks.isEmpty) return [recognizedText.text];
+
+    final List<TextBlock> sortedBlocks = List.from(blocks);
+    sortedBlocks.sort((a, b) => a.boundingBox.center.dx.compareTo(b.boundingBox.center.dx));
+
+    double minX = sortedBlocks.first.boundingBox.center.dx;
+    double maxX = sortedBlocks.last.boundingBox.center.dx;
+    double totalWidth = maxX - minX;
+
+    List<List<TextBlock>> columns = [[sortedBlocks.first]];
+    for (int i = 0; i < sortedBlocks.length - 1; i++) {
+      double gap = sortedBlocks[i+1].boundingBox.center.dx - sortedBlocks[i].boundingBox.center.dx;
+      // إذا كان الفراغ بين الكلمات كبيراً أفقياً، فهذا يعني أننا انتقلنا للإيصال الثاني الملتصق
+      if (totalWidth > 0 && gap > totalWidth * 0.15) {
+        columns.add([sortedBlocks[i+1]]);
+      } else {
+        columns.last.add(sortedBlocks[i+1]);
+      }
+    }
+
+    List<String> receipts = [];
+    for (var col in columns) {
+      if (col.length >= 3) {
+        // ترتيب الكلمات من أعلى لأسفل داخل الإيصال الواحد
+        col.sort((a, b) {
+          if ((a.boundingBox.top - b.boundingBox.top).abs() < 15) {
+            return a.boundingBox.left.compareTo(b.boundingBox.left);
+          }
+          return a.boundingBox.top.compareTo(b.boundingBox.top);
+        });
+        receipts.add(col.map((b) => b.text).join('\n'));
+      }
+    }
+
+    if (receipts.isEmpty) return [recognizedText.text];
+    return receipts;
+  }
 
   String normalizeOcrText(String text) {
     var s = text;
@@ -326,7 +367,6 @@ class _HomePageState extends State<HomePage> {
     return null;
   }
 
-  // 🎯 إضافة الدالة المفقودة
   String? findBatchNo(String text) {
     final m = RegExp(r"BATCH\s*NO\D{0,6}(\d{4,7})", caseSensitive: false).firstMatch(text);
     return m?.group(1);
@@ -359,6 +399,7 @@ class _HomePageState extends State<HomePage> {
     return sorted.first.key;
   }
 
+  // 🎯 استخراج المبالغ بطريقة البايثون بحذافيرها
   ParseResult parseReceipt(String txt) {
     final stopMatch = RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false).firstMatch(txt);
     final t = stopMatch != null ? txt.substring(0, stopMatch.start) : txt;
@@ -442,34 +483,6 @@ class _HomePageState extends State<HomePage> {
       return AmountDecision(top.key, false);
     }
     return const AmountDecision(0.0, false);
-  }
-
-  List<String> getReceiptChunks(String text) {
-    final chunks = <String>[];
-    final splitMatches = RegExp(r"BATCH", caseSensitive: false).allMatches(text).toList();
-    if (splitMatches.isEmpty) return [text];
-    int start = 0;
-    for (int i = 0; i < splitMatches.length; i++) {
-      int end = (i + 1 < splitMatches.length) ? splitMatches[i+1].start : text.length;
-      chunks.add(text.substring(start, end));
-      start = end;
-    }
-    return chunks.where((c) => c.trim().length > 50).toList();
-  }
-
-  int receiptScore(String rawText) {
-    final text = normalizeOcrText(rawText);
-    final markers = [
-      RegExp(r'TERMINAL', caseSensitive: false),
-      RegExp(r'GRAND|TOTALS?', caseSensitive: false),
-      RegExp(r'NATIONAL\s*BANK|\bNBE\b', caseSensitive: false),
-      RegExp(r'BATCH', caseSensitive: false),
-      RegExp(r'MERCHANT', caseSensitive: false),
-      RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
-      RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
-      RegExp(r'THANK\s*YOU', caseSensitive: false),
-    ];
-    return markers.where((r) => r.hasMatch(text)).length + (findTerminal(text) != null ? 1 : 0);
   }
 
   ReceiptItem _buildItem(String chunk, String filePath, String key, double amt, bool confirmed, {String? fallbackText, String? bNo}) {
@@ -802,7 +815,7 @@ class _HomePageState extends State<HomePage> {
     
     missingTerminals.clear();
     for (var i = 1; i <= 19; i++) {
-        if (i == 8 || i == 9 || i == 19) continue; 
+        if (i == 8 || i == 9 || i == 19) continue;
         if (!foundOrders.contains(i)) missingTerminals.add(i);
     }
     
@@ -888,7 +901,8 @@ class _HomePageState extends State<HomePage> {
 
         final res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         
-        final chunks = getReceiptChunks(res.text);
+        // 🎯 فصل الإيصالات المتجاورة (Crop محاكى برمجياً)
+        final chunks = clusterBlocksToReceipts(res);
         List<double> chunkAmounts = [];
         bool allChunksConfirmed = true;
 
