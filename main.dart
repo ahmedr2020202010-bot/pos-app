@@ -201,11 +201,15 @@ List<List<OcrLine>> splitColumns(List<OcrLine> lines) {
   return [lines];
 }
 
-final RegExp _amountRe = RegExp(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)");
-final RegExp _brandRe = RegExp(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", caseSensitive: false);
+final RegExp _amountRe =
+    RegExp(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)");
+final RegExp _brandRe = RegExp(
+    r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b",
+    caseSensitive: false);
 
 List<double> amountsIn(String rawText) {
-  final text = rawText.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
+  final text = rawText.replaceAllMapped(
+      RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
   final out = <double>[];
   for (final m in _amountRe.allMatches(text)) {
     final v = double.tryParse("${m.group(1)!.replaceAll(',', '')}.${m.group(2)!}");
@@ -235,7 +239,9 @@ class Parsed {
 }
 
 Parsed parseReceipt(String txt) {
-  final t = txt.split(RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false)).first;
+  final t = txt
+      .split(RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false))
+      .first;
   final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(t);
   var pre = gm != null ? t.substring(0, gm.start) : t;
   final post = gm != null ? t.substring(gm.start) : "";
@@ -248,7 +254,8 @@ Parsed parseReceipt(String txt) {
       sections.add(pre.substring(bms[i].end, end));
     }
   } else {
-    final sm = RegExp(r"SUCCESSFULL?Y|CLOSED", caseSensitive: false).firstMatch(pre);
+    final sm =
+        RegExp(r"SUCCESSFULL?Y|CLOSED", caseSensitive: false).firstMatch(pre);
     if (sm != null) pre = pre.substring(sm.end);
     sections.add(pre);
   }
@@ -259,6 +266,16 @@ Parsed parseReceipt(String txt) {
     if (mc != null) bvals.add(mc.key);
   }
   final grand = amountsIn(post);
+  
+  // قراءة بديلة متساهلة للأرقام كحل بديل (الميزة 1)
+  if (bvals.isEmpty && grand.isEmpty) {
+    final fallback = RegExp(r"(\d{3,6})[.,]\d{2}").allMatches(txt);
+    for(final m in fallback) {
+      final v = double.tryParse(m.group(0)!.replaceAll(',', '.'));
+      if (v != null && v > 10) grand.add(v);
+    }
+  }
+  
   final bsum = bvals.isNotEmpty ? round2(bvals.reduce((a, b) => a + b)) : null;
   return Parsed(grand, bsum, bvals);
 }
@@ -272,7 +289,9 @@ class Decision {
 Decision decide(List<Parsed> results) {
   for (final r in results) {
     final b = r.bsum;
-    if (b != null && b > 0 && r.grand.any((g) => (g - b).abs() < 0.005)) return Decision(b, true);
+    if (b != null && b > 0 && r.grand.any((g) => (g - b).abs() < 0.005)) {
+      return Decision(b, true);
+    }
   }
   for (final r in results) {
     final b = r.bsum;
@@ -329,7 +348,9 @@ String? batchNo(List<String> texts) {
 }
 
 String? _tidLabeled(String t) {
-  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)", caseSensitive: false).firstMatch(t);
+  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)",
+          caseSensitive: false)
+      .firstMatch(t);
   if (m == null) return null;
   final raw = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
   if (raw.length < 8) return null;
@@ -363,7 +384,10 @@ String? findTerminalIn(List<String> texts) {
 }
 
 String? findTerminalFuzzyIn(List<String> texts, int? targetRow) {
-  final pool = terminals.entries.where((e) => targetRow == null || e.value.excelRow == targetRow).map((e) => e.key).toList();
+  final pool = terminals.entries
+      .where((e) => targetRow == null || e.value.excelRow == targetRow)
+      .map((e) => e.key)
+      .toList();
   final dist = <String, int>{};
   for (final t in texts) {
     for (final run in RegExp(r"\d[\d /]{6,14}\d").allMatches(t)) {
@@ -390,7 +414,8 @@ String? findTerminalFuzzyIn(List<String> texts, int? targetRow) {
 
 int? findUnitExtraIn(List<String> texts) {
   for (final t in texts) {
-    final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", caseSensitive: false).firstMatch(t);
+    final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,13}\d)", caseSensitive: false)
+        .firstMatch(t);
     final cands = <String>[
       if (m != null) m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''),
       t.replaceAll(RegExp(r'\D'), ''),
@@ -412,7 +437,8 @@ int? findUnitExtraIn(List<String> texts) {
 }
 
 String? findDateIn(List<String> texts) {
-  final reg = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", caseSensitive: false);
+  final reg = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})",
+      caseSensitive: false);
   for (final t in texts) {
     final m = reg.firstMatch(t);
     if (m != null) {
@@ -434,7 +460,8 @@ class Analysis {
   List<double> batches;
   String? date;
   String debug = '';
-  Analysis(this.tid, this.how, this.row, this.unitName, this.val, this.ok, this.batches, this.date);
+  Analysis(this.tid, this.how, this.row, this.unitName, this.val, this.ok,
+      this.batches, this.date);
 }
 
 Analysis analyzeLines(List<OcrLine> all) {
@@ -458,7 +485,7 @@ Analysis analyzeLines(List<OcrLine> all) {
     }
     final b = batchNo(r.texts);
     final key = '$b|${r.val}';
-    if (b != null && seen.contains(key)) continue;
+    if (b != null && seen.contains(key)) continue; 
     seen.add(key);
     batches.add(r.val);
     allOk = allOk && r.ok;
@@ -472,7 +499,9 @@ Analysis analyzeLines(List<OcrLine> all) {
     if (r.val > 0 && (r.ok || batches.isEmpty)) {
       total = r.val;
       ok = r.ok;
-      batches..clear()..add(r.val);
+      batches
+        ..clear()
+        ..add(r.val);
     }
   }
 
@@ -569,7 +598,8 @@ DateTime fileDate(File f) {
   final m = RegExp(r'-(\d{8})-').firstMatch(baseName(f.path));
   if (m != null) {
     final s = m.group(1)!;
-    final d = DateTime.tryParse('${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6, 8)}');
+    final d = DateTime.tryParse(
+        '${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6, 8)}');
     if (d != null) return d;
   }
   return f.lastModifiedSync();
@@ -585,7 +615,9 @@ String? loadFolder() {
 
 void saveFolder(String? f) {
   try {
-    File(cfgPath)..createSync(recursive: true)..writeAsStringSync(jsonEncode({'folder': f}));
+    File(cfgPath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode({'folder': f}));
   } catch (_) {}
 }
 
@@ -597,14 +629,15 @@ class ReceiptItem {
   String? unitName;
   double amount;
   String? date;
-  String key;
-  bool ok;
-  String how;
+  String key; 
+  bool ok; 
+  String how; 
   List<double> batches;
   int? suffix;
   String? origTid;
   bool conflict;
   bool skip;
+  bool isRotated;
 
   ReceiptItem({
     required this.path,
@@ -622,9 +655,11 @@ class ReceiptItem {
     this.origTid,
     this.conflict = false,
     this.skip = false,
+    this.isRotated = false,
   }) : batches = batches ?? <double>[];
 
-  bool get needsReview => amount <= 0 || row == null || !ok || how == 'auto-number' || how == 'conflict';
+  bool get needsReview =>
+      amount <= 0 || row == null || !ok || how == 'auto-number' || how == 'conflict';
 }
 
 final String fixPath = '$baseDir/.app_fix.json';
@@ -642,11 +677,14 @@ void saveFix(ReceiptItem item) {
   try {
     final m = loadFixes();
     m[item.key] = {'val': item.amount, 'tid': item.tid};
-    File(fixPath)..createSync(recursive: true)..writeAsStringSync(jsonEncode(m));
+    File(fixPath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
   } catch (_) {}
 }
 
-bool sameDay(ReceiptItem a, ReceiptItem b) => a.date == null || b.date == null || a.date == b.date;
+bool sameDay(ReceiptItem a, ReceiptItem b) =>
+    a.date == null || b.date == null || a.date == b.date;
 
 // ───────────────────── الشاشة الرئيسية ─────────────────────
 class HomePage extends StatefulWidget {
@@ -708,7 +746,9 @@ class _HomePageState extends State<HomePage> {
     if (files.isNotEmpty) {
       await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
+      );
     }
   }
 
@@ -720,7 +760,9 @@ class _HomePageState extends State<HomePage> {
     if (files.isNotEmpty) {
       await Share.shareXFiles(files, text: 'التقرير الشامل + تقرير المراجعة + ملف الـ OCR');
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')),
+      );
     }
   }
 
@@ -737,7 +779,9 @@ class _HomePageState extends State<HomePage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Image.file(File(item.path), height: 160, fit: BoxFit.contain),
+                item.isRotated 
+                  ? Transform.rotate(angle: 3.14159, child: Image.file(File(item.path), height: 160, fit: BoxFit.contain))
+                  : Image.file(File(item.path), height: 160, fit: BoxFit.contain),
                 const SizedBox(height: 8),
                 TextField(
                   controller: amtController,
@@ -812,10 +856,16 @@ class _HomePageState extends State<HomePage> {
         try {
           final imgBytes = File(r.path).readAsBytesSync();
           final imgWidget = pw.MemoryImage(imgBytes);
+          
+          pw.Widget child = pw.Image(imgWidget, fit: pw.BoxFit.contain);
+          if (r.isRotated) {
+            child = pw.Transform.rotate(angle: 3.1415926535897932, child: child);
+          }
+          
           pdf.addPage(
             pw.Page(
               pageFormat: PdfPageFormat.a4,
-              build: (pw.Context ctx) => pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+              build: (pw.Context ctx) => pw.Center(child: child),
             ),
           );
         } catch (_) {}
@@ -959,7 +1009,8 @@ class _HomePageState extends State<HomePage> {
         ignore.add(int.parse(m.group(0)!));
       }
     } catch (_) {}
-    final foundOrders = processedItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
+    final foundOrders =
+        processedItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
     missingTerminals = [
       for (var i = 1; i <= 19; i++)
         if (!foundOrders.contains(i) && !ignore.contains(i)) i
@@ -1016,7 +1067,9 @@ class _HomePageState extends State<HomePage> {
       for (final w in warnings) {
         sb.writeln('- $w');
       }
-      File('$outputDir/review_report.txt')..createSync(recursive: true)..writeAsStringSync(sb.toString());
+      File('$outputDir/review_report.txt')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(sb.toString());
     } catch (_) {}
   }
 
@@ -1037,64 +1090,59 @@ class _HomePageState extends State<HomePage> {
     });
 
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
-    if (dirs.isEmpty) {
-      setState(() {
-        busy = false;
-        status = 'تعذر العثور على مجلد صور الواتساب تلقائياً.';
-      });
-      return;
-    }
-
+    
+    // الميزة الخاصة باستخراج الصور من PDF لو مفيش صور في الواتس
     final now = DateTime.now();
-    final cutoff = days < 0
-        ? DateTime(2000)
-        : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+    final dateStr = "${now.day}.${now.month}";
     final todo = <File>[];
-    for (final d in dirs) {
-      try {
-        for (final e in d.listSync().whereType<File>()) {
-          final lower = e.path.toLowerCase();
-          if (!(lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.webp'))) {
-            continue;
-          }
-          if (baseName(e.path).startsWith('.') || baseName(e.path).startsWith('dup_')) continue;
-          if (fileDate(e).isBefore(cutoff)) continue;
-          todo.add(e);
-        }
-      } catch (_) {}
-    }
-    todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
 
-    // الميزة المطلوبة: معالجة الـ PDF (وتحويله لصور) لو لم نجد صور جديدة في الواتساب
+    if (dirs.isNotEmpty) {
+      final cutoff = days < 0
+          ? DateTime(2000)
+          : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+      for (final d in dirs) {
+        try {
+          for (final e in d.listSync().whereType<File>()) {
+            final lower = e.path.toLowerCase();
+            if (!(lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.webp'))) continue;
+            if (baseName(e.path).startsWith('.') || baseName(e.path).startsWith('dup_')) continue;
+            if (fileDate(e).isBefore(cutoff)) continue;
+            todo.add(e);
+          }
+        } catch (_) {}
+      }
+    }
+
+    // إذا لم تتوفر أي صور، حاول البحث عن ملف الـ PDF لليوم
     if (todo.isEmpty) {
-      final dateStr = "${now.day}.${now.month}";
-      final pdfFile = File('$outputDir/الاسكندريه $dateStr.pdf');
-      
+      final pdfPath = '$baseDir/الاسكندريه $dateStr.pdf';
+      final pdfFile = File(pdfPath);
       if (pdfFile.existsSync()) {
-        setState(() => status = 'لا توجد صور جديدة، جاري معالجة ملف الـ PDF لليوم...');
+        setState(() => status = 'جاري تحويل صفحات الـ PDF إلى صور...');
         try {
           final bytes = pdfFile.readAsBytesSync();
           int pageIndex = 0;
-          
-          await for (final page in Printing.raster(bytes, dpi: 250)) {
-            final tempFile = File('$rawImagesDir/pdf_extracted_$pageIndex.png');
+          await for (final page in Printing.raster(bytes, dpi: 300)) {
+            final tempFile = File('$rawImagesDir/pdf_page_$pageIndex.png');
             final pngBytes = await page.toPng();
             tempFile.writeAsBytesSync(pngBytes);
             todo.add(tempFile);
             pageIndex++;
           }
         } catch (e) {
-          warnings.add('فشل قراءة الـ PDF: $e');
+          warnings.add('مشكلة في الـ PDF: $e');
         }
       }
+    }
 
-      if (todo.isEmpty) {
-        setState(() {
-          busy = false;
-          status = 'لا توجد صور في الواتساب ولم يتم العثور على ملف PDF باسم "الاسكندريه $dateStr"';
-        });
-        return;
-      }
+    todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
+
+    if (todo.isEmpty) {
+      setState(() {
+        busy = false;
+        status = 'لا توجد صور في الواتساب، ولم يتم العثور على ملف الاسكندريه $dateStr.pdf';
+      });
+      return;
     }
 
     final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
@@ -1106,22 +1154,34 @@ class _HomePageState extends State<HomePage> {
     final fixes = loadFixes();
     final rawReceipts = <ReceiptItem>[];
 
+    // ═════════ المرحلة 1: قراءة الصور ═════════
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
         var res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         var sc = receiptScore(res.text);
+        bool rotated = false;
 
-        // ميزة 1 و 6: إذا كانت القراءة سيئة أو الصورة مقلوبة، قم بتدويرها وإعادة القراءة
+        // मيزة 6: تدوير الصورة في الذاكرة فقط دون تغيير الملف الأصلي
         if (sc < 2 && findTerminalIn([res.text]) == null) {
-          final imageBytes = f.readAsBytesSync();
-          final decodedImage = img.decodeImage(imageBytes);
-          if (decodedImage != null) {
-            final rotated = img.copyRotate(decodedImage, angle: 180);
-            f.writeAsBytesSync(img.encodeJpg(rotated));
-            res = await recognizer.processImage(InputImage.fromFilePath(f.path));
-            sc = receiptScore(res.text);
-          }
+          try {
+            final bytes = f.readAsBytesSync();
+            final decoded = img.decodeImage(bytes);
+            if (decoded != null) {
+              final rotImg = img.copyRotate(decoded, angle: 180);
+              final tmpPath = '${f.path}_tmp.jpg';
+              File(tmpPath).writeAsBytesSync(img.encodeJpg(rotImg, quality: 95));
+              
+              final resRot = await recognizer.processImage(InputImage.fromFilePath(tmpPath));
+              final scRot = receiptScore(resRot.text);
+              if (scRot > sc) {
+                res = resRot;
+                sc = scRot;
+                rotated = true;
+              }
+              File(tmpPath).deleteSync();
+            }
+          } catch (_) {}
         }
 
         if (sc >= 2 || findTerminalIn([res.text]) != null) {
@@ -1146,7 +1206,8 @@ class _HomePageState extends State<HomePage> {
 
           final inRaw = f.path.startsWith('$rawImagesDir/');
           final dst = inRaw ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
-          final localFile = (inRaw || File(dst).existsSync()) ? File(dst) : f.copySync(dst);
+          final localFile =
+              (inRaw || File(dst).existsSync()) ? File(dst) : f.copySync(dst);
 
           final item = ReceiptItem(
             path: localFile.path,
@@ -1160,6 +1221,7 @@ class _HomePageState extends State<HomePage> {
             ok: a.ok,
             how: a.how,
             batches: a.batches,
+            isRotated: rotated, // تخزين حالة التدوير هنا لاستخدامها في الـ PDF
           );
 
           final fx = fixes[key];
@@ -1204,6 +1266,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    // ═════════ المرحلة 2: التكرار وترقيم الماكينات ═════════
     setState(() => status = 'مراجعة التكرار وترقيم الماكينات...');
     final prio = <String, int>{'manual': 0, 'terminal': 0, 'fuzzy': 1, 'file-number': 2};
     final withTid = rawReceipts.where((r) => r.tid != null).toList();
@@ -1218,8 +1281,10 @@ class _HomePageState extends State<HomePage> {
       final prev = taken[n];
       if (prev == null) {
         taken[n] = r;
-      } else if (r.amount > 0 && (prev.amount - r.amount).abs() < 0.005 && sameDay(prev, r)) {
-        r.skip = true;
+      } else if (r.amount > 0 &&
+          (prev.amount - r.amount).abs() < 0.005 &&
+          sameDay(prev, r)) {
+        r.skip = true; 
         warnings.add('${baseName(r.path)}: نفس الماكينة $n ونفس المبلغ '
             '${r.amount.toStringAsFixed(2)} (إيصال مكرر) - تم استبعاده');
       } else {
@@ -1244,7 +1309,7 @@ class _HomePageState extends State<HomePage> {
     for (final r in rawReceipts) {
       if (r.skip || r.tid != null || r.row == null) continue;
       if (r.conflict && (r.how == 'terminal' || r.how == 'fuzzy')) {
-        giveSuffix(r);
+        giveSuffix(r); 
         continue;
       }
       final free = <int>[];
@@ -1293,6 +1358,7 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
+    // ═════════ المرحلة 3: إعادة التسمية ═════════
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
     final moves = <ReceiptItem>[];
     final newNames = <ReceiptItem, String>{};
@@ -1336,13 +1402,6 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('إيصالات POS'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.share),
-            tooltip: 'مشاركة الملفات الرسمية',
-            onPressed: busy ? null : shareStandardFiles,
-          ),
-        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -1395,6 +1454,7 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(width: 4),
                 IconButton.filledTonal(
                   onPressed: busy ? null : () async {
+                    // ميزة 3: شاشة المراجعة السريعة
                     final doubtful = processedItems.where((i) => i.needsReview).toList();
                     final changed = await Navigator.push(
                       context,
@@ -1411,12 +1471,6 @@ class _HomePageState extends State<HomePage> {
                   icon: const Icon(Icons.send),
                   color: Colors.green,
                   tooltip: 'مشاركة (أساسي)',
-                ),
-                const SizedBox(width: 4),
-                IconButton.filledTonal(
-                  onPressed: busy ? null : shareAdvancedFile,
-                  icon: const Icon(Icons.table_chart),
-                  tooltip: 'مشاركة التقرير الشامل',
                 ),
               ],
             ),
@@ -1487,12 +1541,9 @@ class _HomePageState extends State<HomePage> {
                   return Card(
                     margin: const EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
-                      leading: Image.file(
-                        File(item.path),
-                        width: 48,
-                        height: 48,
-                        fit: BoxFit.cover,
-                      ),
+                      leading: item.isRotated 
+                        ? Transform.rotate(angle: 3.14159, child: Image.file(File(item.path), width: 48, height: 48, fit: BoxFit.cover))
+                        : Image.file(File(item.path), width: 48, height: 48, fit: BoxFit.cover),
                       title: Text(
                         'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
                         style: const TextStyle(fontWeight: FontWeight.bold),
@@ -1650,7 +1701,9 @@ class _ReviewScreenState extends State<ReviewScreen> {
                 Expanded(
                   flex: 2,
                   child: InteractiveViewer(
-                    child: Image.file(File(item.path), fit: BoxFit.contain, width: double.infinity),
+                    child: item.isRotated 
+                      ? Transform.rotate(angle: 3.14159, child: Image.file(File(item.path), fit: BoxFit.contain, width: double.infinity))
+                      : Image.file(File(item.path), fit: BoxFit.contain, width: double.infinity),
                   ),
                 ),
                 const SizedBox(height: 16),
