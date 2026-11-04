@@ -45,9 +45,9 @@ final Map<String, TerminalInfo> terminals = {
   "50335998": const TerminalInfo(5, 3, "برج العرب"),
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
-  "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 القديمة
+  "50382298": const TerminalInfo(8, 4, "المنتزه"), // المنتزه 1
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // المنتزه 2 الجديدة
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // المنتزه 2 القديمة (الآن تُعامل كماكينة ثالثة إذا لزم الأمر)
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -59,10 +59,12 @@ final Map<String, TerminalInfo> terminals = {
   "50383700": const TerminalInfo(18, 11, "مجمع خدمات"),
 };
 
+// تعديل numToTid ليعكس أن 9 هي المنتزه 2 الجديدة، ويمكن إضافة القديمة كـ 19 مجازياً لتتبعها
 final Map<int, String> numToTid = {
   1: "50335710", 2: "50335993", 3: "50335987",
   4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
-  8: "50382298", 9: "50382315", 10: "50382306", 11: "50382316",
+  8: "50382298", 9: "50382315", // المنتزه 2 الجديدة هي الأساسية هنا
+  10: "50382306", 11: "50382316",
   12: "50382308", 13: "50383706", 14: "50382300", 15: "50383702",
   16: "50382312", 17: "50383699", 18: "50383700",
 };
@@ -102,23 +104,6 @@ String normalizeOcrText(String text) {
   s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
   s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
   return s;
-}
-
-final List<RegExp> _markers = [
-  RegExp(r'TERMINAL', caseSensitive: false),
-  RegExp(r'GRAND|TOTALS?', caseSensitive: false),
-  RegExp(r'NATIONAL\s*BANK|\bNBE\b', caseSensitive: false),
-  RegExp(r'BATCH', caseSensitive: false),
-  RegExp(r'MERCHANT', caseSensitive: false),
-  RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
-  RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
-  RegExp(r'THANK\s*YOU', caseSensitive: false),
-];
-
-int receiptScore(String rawText) {
-  final text = normalizeOcrText(rawText);
-  return _markers.where((r) => r.hasMatch(text)).length +
-      (findTerminal(text) != null ? 1 : 0);
 }
 
 String? findTerminal(String rawText) {
@@ -208,28 +193,24 @@ String? findDate(String text) {
   return null;
 }
 
-String? findBatchNo(String text) {
-  final m = RegExp(r"BATCH\s*NO\D{0,6}(\d{4,7})", caseSensitive: false).firstMatch(text);
-  return m?.group(1);
+List<String> findBatchNos(String text) {
+  final matches = RegExp(r"BATCH\s*NO\D{0,6}(\d{4,7})", caseSensitive: false).allMatches(text);
+  return matches.map((m) => m.group(1)!).toSet().toList();
 }
 
-// 🎯 دالة جديدة كلياً تفهم وتلتقط الأرقام الضخمة حتى لو بها مسافات غريبة من الـ OCR
+// ريجيكس قوي جداً للتعامل مع المبالغ التي تحتوي مسافات بدلاً من الفواصل (مثل 66 259.39)
+final RegExp _amountRe = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
+
 List<double> amountsIn(String rawText) {
   final text = normalizeOcrText(rawText);
   final out = <double>[];
-  
-  // هذا الريجيكس يضمن التقاط (251,324.44) و (66 259.39) ويرفض دمج الأرقام الوهمية
-  final reg = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
-  for (final m in reg.allMatches(text)) {
+  for (final m in _amountRe.allMatches(text)) {
     try {
-      final wholeStr = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
-      final decStr = m.group(2)!;
-      if (wholeStr.isNotEmpty) {
-        final v = double.tryParse("$wholeStr.$decStr");
-        // حماية: الإجمالي العام في POS مستحيل أن يكون أقل من 10 جنيهات
-        if (v != null && v >= 10.0 && v <= 5000000) {
-          out.add(round2(v));
-        }
+      final whole = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
+      final dec = m.group(2)!;
+      final v = double.tryParse("$whole.$dec");
+      if (v != null && v >= 0.5 && v <= 5000000) {
+        out.add(round2(v));
       }
     } catch (_) {}
   }
@@ -242,21 +223,55 @@ class AmountDecision {
   const AmountDecision(this.amount, this.confirmed);
 }
 
-// 🎯 الاعتماد المطلق على "أكبر مبلغ مالي" وتكراره في منطقة الـ Grand Total
+// الدالة الأساسية لاستخراج المبالغ بطريقة البايثون، مع دعم "أكثر من باتش" في نفس الصورة
 AmountDecision extractReceiptAmountPythonStyle(String rawText) {
   final txt = normalizeOcrText(rawText);
-  final allAmts = amountsIn(txt);
   
-  if (allAmts.isEmpty) return const AmountDecision(0.0, false);
+  // تقسيم النص إلى أقسام بناءً على كلمة GRAND TOTALS (لأن الصورة قد تحتوي أكثر من إيصال)
+  final parts = txt.split(RegExp(r"GRAND\s*TOTALS?|TOTALS?\s*GRAND", caseSensitive: false));
+  
+  if (parts.length > 1) {
+    double totalSum = 0.0;
+    bool allConfirmed = true;
+    
+    // فحص كل قسم بعد GRAND TOTALS
+    for (int i = 1; i < parts.length; i++) {
+      final postGrandText = parts[i].split(RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false)).first;
+      final gAmts = amountsIn(postGrandText);
+      
+      if (gAmts.isNotEmpty) {
+        final counts = <double, int>{};
+        for (final a in gAmts) counts[a] = (counts[a] ?? 0) + 1;
+        
+        final sorted = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+        final amt = sorted.first.key;
+        final conf = sorted.first.value >= 2;
+        
+        totalSum += amt;
+        allConfirmed = allConfirmed && conf;
+      }
+    }
+    
+    if (totalSum > 0) return AmountDecision(round2(totalSum), allConfirmed);
+  }
 
-  // استخراج أكبر مبلغ مالي في الإيصال بأكمله (وهو حتماً الإجمالي العام)
-  final maxAmt = allAmts.reduce((a, b) => a > b ? a : b);
+  // طريقة احتياطية: إذا لم توجد الكلمة بوضوح، استخرج أكبر مبالغ مرتبطة بالباتشات
+  final bNos = findBatchNos(txt);
+  if (bNos.isNotEmpty) {
+     final allAmts = amountsIn(txt);
+     if (allAmts.isNotEmpty) {
+        // ترتيب المبالغ تنازلياً وجمع أكبر مبالغ بعدد الباتشات الموجودة
+        allAmts.sort((a, b) => b.compareTo(a));
+        double sum = 0.0;
+        int count = min(bNos.length, allAmts.length);
+        for(int i = 0; i < count; i++) {
+           sum += allAmts[i];
+        }
+        return AmountDecision(round2(sum), false);
+     }
+  }
 
-  // التأكد من أن هذا المبلغ الأكبر تم تكراره في الإيصال كما هو معتاد (Sale, Total, Net Amount)
-  final occurrences = allAmts.where((a) => a == maxAmt).length;
-
-  // إذا تكرر مرتين على الأقل، فهو صحيح ومؤكد بنسبة 100%
-  return AmountDecision(maxAmt, occurrences >= 2);
+  return const AmountDecision(0.0, false);
 }
 
 double round2(double val) => double.parse(val.toStringAsFixed(2));
@@ -655,6 +670,7 @@ class _HomePageState extends State<HomePage> {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
+    // نقل وتسمية الصور بناءً على الترتيب النهائي، وحفظها في output
     for (var k = 0; k < processedItems.length; k++) {
       final r = processedItems[k];
       final ext = r.path.split('.').last.toLowerCase();
@@ -668,14 +684,11 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
       r.newName = targetName;
-      final newPath = '$rawImagesDir/$targetName';
+      final newPath = '$outputDir/$targetName'; // حفظ النتيجة النهائية في output
       if (r.path != newPath && File(r.path).existsSync()) {
         try {
-          final tmpPath = '$rawImagesDir/__tmp_${k}_${DateTime.now().millisecondsSinceEpoch}.$ext';
-          final fTmp = File(r.path).renameSync(tmpPath);
-          if (File(newPath).existsSync()) File(newPath).deleteSync();
-          final fFinal = fTmp.renameSync(newPath);
-          r.path = fFinal.path;
+          final fTmp = File(r.path).copySync(newPath); // نسخ وليس نقل للاحتفاظ بالأصل في raw
+          r.path = fTmp.path;
         } catch (_) {}
       }
     }
@@ -725,7 +738,6 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
-      // 🎯 التحديث الآمن جداً للإكسيل (كتابة الأرقام فقط دون مسح القالب)
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -736,9 +748,10 @@ class _HomePageState extends State<HomePage> {
           final tot = round2(unitTotals[r] ?? 0.0);
           final cnt = unitCounts[r] ?? 0;
 
-          // تحديث خلية العدد والمبلغ فقط
+          // تعديل عمود POS Count (العمود C) و POS amount (العمود D) فقط
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
+          // لا يتم المساس بالمعادلات أو الألوان الموجودة في الأعمدة الأخرى
         }
 
         final excelOutBytes = excel.encode();
@@ -749,112 +762,40 @@ class _HomePageState extends State<HomePage> {
           standardXlsxPath = stdFile.path;
         }
       } catch (_) {}
-
-      try {
-        final bytesAdv = tplFile.readAsBytesSync();
-        final excelAdv = xl.Excel.decodeBytes(bytesAdv);
-        final defaultSheet = excelAdv.tables.keys.first;
-        final sheetAdv = excelAdv[defaultSheet];
-
-        double grandPos = 0.0;
-        for (var r = 2; r <= 11; r++) {
-          final tot = round2(unitTotals[r] ?? 0.0);
-          grandPos += tot;
-          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
-          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
-        }
-
-        const rowTotalIndex = 11;
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value = xl.TextCellValue('الإجمالي العام');
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value = xl.IntCellValue(18);
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value = xl.DoubleCellValue(round2(grandPos));
-
-        final detailSheet = excelAdv['تفاصيل الماكينات'];
-        final headers = ['رقم الترتيب', 'اسم الوحدة', 'TID الماكينة', 'المبلغ (ج.م)', 'طريقة التعرف / الحالة'];
-        for (var c = 0; c < headers.length; c++) {
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).value = xl.TextCellValue(headers[c]);
-        }
-
-        var rowIdx = 1;
-        for (var i = 1; i <= 18; i++) {
-          final currentTid = numToTid[i]!;
-          final info = terminals[currentTid]!;
-          final matched = processedItems.where((e) => !e.skip && e.orderNum == i).toList();
-
-          if (matched.isEmpty) {
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value = xl.TextCellValue('$i');
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value = xl.TextCellValue(info.unitName);
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value = xl.TextCellValue(currentTid);
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value = xl.DoubleCellValue(0.0);
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value = xl.TextCellValue('⚠️ غير وارد (مفقود)');
-            rowIdx++;
-          } else {
-            for (final m in matched) {
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value = xl.TextCellValue(m.displayOrder);
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value = xl.TextCellValue(info.unitName);
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value = xl.TextCellValue(m.tid ?? currentTid);
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value = xl.DoubleCellValue(round2(m.amount));
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value = xl.TextCellValue('${m.confirmed ? "✓ مؤكد" : "⚠️ راجع المبلغ"} (${m.how})');
-              rowIdx++;
-            }
-          }
-        }
-
-        final advBytes = excelAdv.encode();
-        if (advBytes != null) {
-          final advFile = File('$outputDir/تقرير_شامل_POS_$reportDate.xlsx');
-          advFile.createSync(recursive: true);
-          advFile.writeAsBytesSync(advBytes);
-          advancedXlsxPath = advFile.path;
-        }
-      } catch (_) {}
     }
 
+    // تحديد النواقص، مع التأكد من أن المنتزه يتطلب 3 ماكينات الآن (8، 9، و 9 الإضافية التي ستأخذ رقم 19 مجازاً)
     final foundOrders = processedItems
         .where((e) => !e.skip && e.orderNum != null && e.amount > 0)
         .map((e) => e.orderNum!)
         .toSet();
-    missingTerminals = [
-      for (var i = 1; i <= 18; i++)
-        if (!foundOrders.contains(i)) i
-    ];
-
-    final lines = <String>[
-      "Review report - $reportDate",
-      "=" * 60,
-      "",
-    ];
-    for (final r in processedItems) {
-      final name = r.newName ?? r.fn;
-      final flags = <String>[];
-      if (r.skip) flags.add("duplicate - removed");
-      if (r.amount <= 0) flags.add("amount unreadable");
-      if (r.row == null) flags.add("unit unknown");
-      if (!r.confirmed && r.amount > 0) flags.add("amount needs checking");
-      if (["auto-number", "conflict", "extra-batch", "name/merchant", "fuzzy"].contains(r.how)) {
-        flags.add("terminal set by ${r.how}");
-      }
-      if (r.date != null && r.date != reportDate) {
-        flags.add("date ${r.date} (expected $reportDate)");
-      }
-      final mark = flags.isNotEmpty ? "⚠️" : "✓ ";
-      lines.add(
-          "$mark ${name.padRight(14)} ${(r.unitName ?? '??').padRight(18)} ${r.amount.toStringAsFixed(2).padLeft(12)}"
-          "${flags.isNotEmpty ? '   [${flags.join(' | ')}]' : ''}");
+    
+    // عدد الإيصالات التي تم العثور عليها للمنتزه (صف رقم 4)
+    final montazahCount = processedItems.where((e) => !e.skip && e.row == 4 && e.amount > 0).length;
+    
+    missingTerminals.clear();
+    for (var i = 1; i <= 18; i++) {
+        // إذا كان الرقم 8 أو 9 (المنتزه) نعتمد على العدد الإجمالي لإيصالات المنتزه
+        if (i == 8 || i == 9) {
+            continue;
+        }
+        if (!foundOrders.contains(i)) missingTerminals.add(i);
     }
+    
+    // المنتزه يجب أن يحتوي على 3 إيصالات (أو أكثر)
+    if (montazahCount < 3) {
+       // إضافة ماكينة وهمية برقم 19 للإشارة إلى نقص في المنتزه
+       missingTerminals.add(19); 
+       // إضافة الاسم مجازاً للطباعة
+       numToTid[19] = "50383712"; 
+       terminals["50383712"] = const TerminalInfo(19, 4, "المنتزه (ماكينة 3)");
+       rowNames[4] = "المنتزه";
+    }
+
     final grandSum = unitTotals.values.fold(0.0, (a, b) => a + b);
-    lines.addAll(["", "=" * 60, "Grand total: ${grandSum.toStringAsFixed(2)} EGP"]);
-    if (missingTerminals.isNotEmpty) {
-      lines.add("");
-      lines.add("Missing terminals: " +
-          missingTerminals.map((n) => "$n (${rowNames[terminals[numToTid[n]]!.excelRow]})").join(", "));
-    }
-    final repFile = File('$outputDir/review_report.txt');
-    repFile.writeAsStringSync(lines.join("\n"));
-    reportTxtPath = repFile.path;
-
     setState(() => status = 'اكتمل بنجاح! الإجمالي العام: ${grandSum.toStringAsFixed(2)} ج.م\n'
-        '• التقرير الرسمي: الاسكندريه $reportDate.xlsx');
+        '• التقرير الرسمي: الاسكندريه $reportDate.xlsx\n'
+        '• تم حفظ الصور المعدلة في مجلد output.');
   }
 
   Future<void> runFullPipeline() async {
@@ -917,7 +858,6 @@ class _HomePageState extends State<HomePage> {
     Directory(outputDir).createSync(recursive: true);
 
     final rawReceipts = <ReceiptItem>[];
-    final seenBatchKey = <String>{};
 
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
@@ -957,7 +897,7 @@ class _HomePageState extends State<HomePage> {
           final nameOnly = fn.contains('.') ? fn.substring(0, fn.lastIndexOf('.')) : fn;
 
           final decision = extractReceiptAmountPythonStyle(res.text);
-          final bNo = findBatchNo(res.text);
+          final bNos = findBatchNos(res.text);
 
           var tid = findTerminal(res.text);
           var how = tid != null ? "terminal" : "none";
@@ -994,12 +934,6 @@ class _HomePageState extends State<HomePage> {
             }
           }
 
-          if (bNo != null && decision.amount > 0) {
-            final bKey = '${tid ?? row}_${bNo}_${decision.amount.toStringAsFixed(2)}';
-            if (seenBatchKey.contains(bKey)) continue;
-            seenBatchKey.add(bKey);
-          }
-
           rawReceipts.add(ReceiptItem(
             fn: fn,
             path: localFile.path,
@@ -1013,7 +947,7 @@ class _HomePageState extends State<HomePage> {
             confirmed: decision.confirmed,
             how: how,
             date: findDate(res.text),
-            batchNo: bNo,
+            batchNo: bNos.isNotEmpty ? bNos.join(',') : null,
           ));
         }
       } catch (_) {}
@@ -1114,12 +1048,6 @@ class _HomePageState extends State<HomePage> {
                   icon: const Icon(Icons.share),
                   tooltip: 'مشاركة التقرير الرسمي والـ PDF',
                 ),
-                const SizedBox(width: 4),
-                IconButton.filledTonal(
-                  onPressed: busy ? null : shareAdvancedFile,
-                  icon: const Icon(Icons.table_chart),
-                  tooltip: 'مشاركة التقرير الشامل وتقرير المراجعة',
-                ),
               ],
             ),
             if (busy) ...[
@@ -1145,7 +1073,7 @@ class _HomePageState extends State<HomePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '⚠️ ماكينات ناقصة (${missingTerminals.length} من 18):',
+                      '⚠️ ماكينات ناقصة (${missingTerminals.length} من 19):',
                       style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900),
                     ),
                     const SizedBox(height: 4),
