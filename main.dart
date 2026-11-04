@@ -44,7 +44,8 @@ final Map<String, TerminalInfo> terminals = {
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50383712": const TerminalInfo(9, 4, "المنتزه"),
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // ماكينة المنتزه 2 الجديدة
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // بديل احتياطي لمنتزه 2
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -57,7 +58,24 @@ final Map<String, TerminalInfo> terminals = {
 };
 
 final Map<int, String> numToTid = {
-  for (var entry in terminals.entries) entry.value.orderNum: entry.key
+  1: "50335710",
+  2: "50335993",
+  3: "50335987",
+  4: "50325716",
+  5: "50335998",
+  6: "50335994",
+  7: "50335711",
+  8: "50382298",
+  9: "50382315", // المنتزه 2
+  10: "50382306",
+  11: "50382316",
+  12: "50382308",
+  13: "50383706",
+  14: "50382300",
+  15: "50383702",
+  16: "50382312",
+  17: "50383699",
+  18: "50383700",
 };
 
 final Map<String, String> tidFix = {
@@ -65,6 +83,7 @@ final Map<String, String> tidFix = {
   "50336711": "50335711",
   "50336998": "50335998",
   "50302316": "50382316",
+  "50382318": "50382315",
 };
 
 final Map<String, int> merchantCodeMap = {
@@ -204,60 +223,30 @@ List<double> amountsIn(String text) {
   return out;
 }
 
-double? mostFrequent(List<double> vals) {
-  if (vals.isEmpty) return null;
-  final counts = <double, int>{};
-  for (final v in vals) {
-    counts[v] = (counts[v] ?? 0) + 1;
-  }
-  double best = vals.first;
-  int mx = 0;
-  counts.forEach((k, v) {
-    if (v > mx) {
-      mx = v;
-      best = k;
-    }
-  });
-  return best;
-}
-
 double parseSingleReceiptText(String txt) {
-  final brandReg = RegExp(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", caseSensitive: false);
-  final endSplit = txt.split(RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false))[0];
-  
-  final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(endSplit);
-  final pre = gm != null ? endSplit.substring(0, gm.start) : endSplit;
-  final post = gm != null ? endSplit.substring(gm.start) : "";
-
-  final brandVals = <double>[];
-  final parts = pre.split(brandReg);
-  if (parts.length > 1) {
-    for (var i = 1; i < parts.length; i++) {
-      final secAmounts = amountsIn(parts[i]);
-      final v = mostFrequent(secAmounts);
-      if (v != null) brandVals.add(v);
+  // 1. البحث الصريح في منطقة ما بعد GRAND TOTALS أو TOTALS GRAND
+  final grandMatch = RegExp(r"(?:GRAND\s*TOTALS?|TOTALS?\s*GRAND)[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(txt);
+  if (grandMatch != null) {
+    final gAmts = amountsIn(grandMatch.group(0)!);
+    if (gAmts.isNotEmpty) {
+      return gAmts.reduce((a, b) => a > b ? a : b);
     }
   }
 
-  final grandAmounts = amountsIn(post);
-  final brandSum = brandVals.isNotEmpty
-      ? double.parse(brandVals.reduce((a, b) => a + b).toStringAsFixed(2))
-      : null;
-
-  if (brandSum != null && grandAmounts.any((g) => (g - brandSum).abs() < 0.05)) {
-    return brandSum;
+  // 2. البحث عن آخر Total Net Amount قبل نهاية الإيصال
+  final netMatches = RegExp(r"Total\s*Net\s*Amount[\s\S]*?(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})", caseSensitive: false).allMatches(txt);
+  if (netMatches.isNotEmpty) {
+    final lastNet = netMatches.last;
+    final v = double.tryParse("${lastNet.group(1)!.replaceAll(',', '')}.${lastNet.group(2)!}");
+    if (v != null && v >= 0.5) return double.parse(v.toStringAsFixed(2));
   }
 
-  if (grandAmounts.isNotEmpty) {
-    final freq = mostFrequent(grandAmounts);
-    if (freq != null && freq > 0) return freq;
-    return grandAmounts.reduce((a, b) => a > b ? a : b);
+  // 3. القاعدة الأساسية: أكبر مبلغ مسجل في الإيصال
+  final allAmts = amountsIn(txt);
+  if (allAmts.isNotEmpty) {
+    return allAmts.reduce((a, b) => a > b ? a : b);
   }
-
-  if (brandSum != null && brandSum > 0) return brandSum;
-
-  final all = amountsIn(txt);
-  return all.isNotEmpty ? all.reduce((a, b) => a > b ? a : b) : 0.0;
+  return 0.0;
 }
 
 double extractReceiptAmounts(String text) {
@@ -595,7 +584,7 @@ class _HomePageState extends State<HomePage> {
 
     final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
     if (tplFile.existsSync()) {
-      // 2. الملف الأول: طبق الأصل من التمبلت تماماً بدون أي إضافات
+      // 2. الملف الأول: طبق الأصل 100% من التمبلت الأصلي بدون أي تغيير في شكله أو أوراقه
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -627,7 +616,7 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (_) {}
 
-      // 3. الملف الثاني: التقرير الشامل بكل الميزات المتقدمة وتفاصيل الماكينات
+      // 3. الملف الثاني: تقرير شامل منفصل تماماً باسم مختلف
       try {
         final bytesAdv = tplFile.readAsBytesSync();
         final excelAdv = xl.Excel.decodeBytes(bytesAdv);
@@ -656,7 +645,6 @@ class _HomePageState extends State<HomePage> {
           cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
         }
 
-        // صف الإجمالي العام النهائي
         const rowTotalIndex = 11;
         sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value =
             xl.TextCellValue('الإجمالي العام');
@@ -669,7 +657,6 @@ class _HomePageState extends State<HomePage> {
         sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowTotalIndex)).value =
             xl.DoubleCellValue(round2(grandPos + grandCash));
 
-        // شيت ثانٍ مفصل لكل ماكينة
         final detailSheet = excelAdv['تفاصيل الماكينات'];
         final headers = ['رقم الترتيب', 'اسم الوحدة', 'TID الماكينة', 'المبلغ (ج.م)', 'حالة الإيصال'];
         for (var c = 0; c < headers.length; c++) {
@@ -782,7 +769,7 @@ class _HomePageState extends State<HomePage> {
 
     final rawReceipts = <ReceiptItem>[];
 
-    // المرحلة 1: فحص الـ OCR واستخراج المبالغ بدقة
+    // المرحلة 1: فحص الـ OCR واستخراج مبالغ الـ Grand Total الحقيقية
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
@@ -848,7 +835,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    // المرحلة 2: إعادة التسمية (تظل الصورة الواحدة حتى لو بها باتشين بملف واحد وترقيم واحد)
+    // المرحلة 2: إعادة التسمية
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
     final orderedReceipts = <ReceiptItem>[];
     for (final item in rawReceipts) {
@@ -962,7 +949,6 @@ class _HomePageState extends State<HomePage> {
               ),
               child: Text(status),
             ),
-            // شريط النواقص
             if (missingTerminals.isNotEmpty) ...[
               const SizedBox(height: 8),
               Container(
