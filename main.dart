@@ -1132,6 +1132,85 @@ class _HomePageState extends State<HomePage> {
     await shareStandardFiles();
   }
 
+  bool _isAppOutput(String path) {
+    final n = baseName(path);
+    final l = n.toLowerCase();
+    return n == 'review_report.txt' ||
+        n == 'ocr_debug.txt' ||
+        ((l.endsWith('.xlsx') || l.endsWith('.pdf')) && _normAr(n).startsWith('اسكندري'));
+  }
+
+  Future<bool> _confirm(String title, String body) async {
+    final r = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('مسح')),
+        ],
+      ),
+    );
+    return r == true;
+  }
+
+  // بيمسح بس الملفات اللي التطبيق نفسه عملها (إكسيل/PDF "الاسكندريه ..." والتقارير)
+  Future<void> clearOutput() async {
+    final files = <File>[];
+    try {
+      final d = Directory(outputDir);
+      if (d.existsSync()) {
+        for (final e in d.listSync().whereType<File>()) {
+          if (_isAppOutput(e.path)) files.add(e);
+        }
+      }
+    } catch (_) {}
+    if (files.isEmpty) {
+      setState(() => status = 'مفيش ملفات إخراج للمسح في: $outputDir');
+      return;
+    }
+    if (!await _confirm('مسح ملفات الإخراج', 'هتتمسح ${files.length} ملف من:\n$outputDir')) return;
+    var n = 0;
+    for (final f in files) {
+      try {
+        f.deleteSync();
+        n++;
+      } catch (_) {}
+    }
+    setState(() {
+      standardXlsxPath = null;
+      generatedPdfPath = null;
+      status = 'تم مسح $n ملف من الإخراج.';
+    });
+  }
+
+  Future<void> clearRawImages() async {
+    final files = <File>[];
+    try {
+      final d = Directory(rawImagesDir);
+      if (d.existsSync()) files.addAll(d.listSync().whereType<File>());
+    } catch (_) {}
+    if (files.isEmpty) {
+      setState(() => status = 'فولدر الصور المرتبة فاضي.');
+      return;
+    }
+    if (!await _confirm('مسح الصور المرتبة', 'هتتمسح ${files.length} صورة من:\n$rawImagesDir')) return;
+    var n = 0;
+    for (final f in files) {
+      try {
+        f.deleteSync();
+        n++;
+      } catch (_) {}
+    }
+    setState(() {
+      processedItems.clear();
+      missingTerminals = [];
+      warnings.clear();
+      status = 'تم مسح $n صورة من الصور المرتبة.';
+    });
+  }
+
   Future<void> openReview() async {
     final list = processedItems.where((e) => e.needsReview).toList();
     if (list.isEmpty) {
@@ -1795,32 +1874,40 @@ class _HomePageState extends State<HomePage> {
                 textDirection: TextDirection.ltr),
             Row(
               children: [
-                TextButton.icon(
-                  onPressed: busy ? null : pickFolder,
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('اختيار فولدر'),
-                ),
-                if (customDir != null)
-                  TextButton(
-                    onPressed: busy ? null : useWhatsApp,
-                    child: const Text('رجوع للواتساب'),
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    onPressed: busy ? null : pickFolder,
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('اختيار فولدر الفحص'),
                   ),
+                ),
+                if (customDir != null) ...[
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: busy ? null : useWhatsApp,
+                    child: const Text('واتساب'),
+                  ),
+                ],
               ],
             ),
             Text('الإخراج: ${customOut ?? '$defaultOutputDir (افتراضي)'}',
                 textDirection: TextDirection.ltr),
             Row(
               children: [
-                TextButton.icon(
-                  onPressed: busy ? null : pickOutFolder,
-                  icon: const Icon(Icons.drive_file_move_outline),
-                  label: const Text('مكان الإخراج'),
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    onPressed: busy ? null : pickOutFolder,
+                    icon: const Icon(Icons.drive_file_move_outline),
+                    label: const Text('اختيار مكان الإخراج'),
+                  ),
                 ),
-                if (customOut != null)
-                  TextButton(
+                if (customOut != null) ...[
+                  const SizedBox(width: 8),
+                  OutlinedButton(
                     onPressed: busy ? null : useDefaultOut,
                     child: const Text('الافتراضي'),
                   ),
+                ],
               ],
             ),
             Row(
@@ -1878,6 +1965,16 @@ class _HomePageState extends State<HomePage> {
                   avatar: const Icon(Icons.fact_check, size: 18),
                   label: Text('مراجعة (${processedItems.where((e) => e.needsReview).length})'),
                   onPressed: busy ? null : openReview,
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.delete_sweep, size: 18),
+                  label: const Text('مسح الإخراج'),
+                  onPressed: busy ? null : clearOutput,
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.delete_forever, size: 18),
+                  label: const Text('مسح الصور المرتبة'),
+                  onPressed: busy ? null : clearRawImages,
                 ),
               ],
             ),
