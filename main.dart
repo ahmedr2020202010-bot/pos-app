@@ -47,7 +47,7 @@ final Map<String, TerminalInfo> terminals = {
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
   "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الاحتياطية/القديمة
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الاحتياطية
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -122,7 +122,7 @@ String normalizeOcrText(String text) {
   return s;
 }
 
-// ───────────────────── خوارزميات الاستخراج المطابقة للبايثون ─────────────────────
+// ───────────────────── خوارزميات الاستخراج الدقيقة ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -241,8 +241,7 @@ String? findBatchNo(String text) {
   return m?.group(1);
 }
 
-final RegExp _amountRe = RegExp(r"(?<![\d,.])(\d{1,3}(?:[.,\s]\d{3})*|\d+)[.,\s](\d{2})(?!\d)");
-final RegExp _brandRe = RegExp(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", caseSensitive: false);
+final RegExp _amountRe = RegExp(r"(?<![\d,.])(\d{1,3}(?:[.,\s]\d{3})*|\d+)\s*[.,\s]\s*(\d{2})(?!\d)");
 
 List<double> amountsIn(String rawText) {
   final text = normalizeOcrText(rawText);
@@ -260,23 +259,6 @@ List<double> amountsIn(String rawText) {
   return out;
 }
 
-double? modeValue(List<double> vals) {
-  if (vals.isEmpty) return null;
-  final counts = <double, int>{};
-  for (final v in vals) {
-    counts[v] = (counts[v] ?? 0) + 1;
-  }
-  var bestVal = vals.first;
-  var bestCnt = 0;
-  for (final e in counts.entries) {
-    if (e.value > bestCnt) {
-      bestCnt = e.value;
-      bestVal = e.key;
-    }
-  }
-  return bestVal;
-}
-
 class AmountDecision {
   final double amount;
   final bool confirmed;
@@ -285,100 +267,26 @@ class AmountDecision {
 
 AmountDecision extractReceiptAmountPythonStyle(String rawText) {
   final txt = normalizeOcrText(rawText);
-
-  final stopMatch = RegExp(r"THANK\s*YOU|Hotline|App\s*Versi", caseSensitive: false).firstMatch(txt);
-  final t = stopMatch != null ? txt.substring(0, stopMatch.start) : txt;
-
-  final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(t);
-  String pre = gm != null ? t.substring(0, gm.start) : t;
-  String post = gm != null ? t.substring(gm.start) : "";
-
-  final bm = _brandRe.firstMatch(pre);
-  if (bm != null) {
-    pre = pre.substring(bm.start);
-  } else {
-    final sm = RegExp(r"SUCCESSFULL?Y|CLOSED", caseSensitive: false).firstMatch(pre);
-    if (sm != null) {
-      pre = pre.substring(sm.end);
-    }
+  final allAmts = amountsIn(txt);
+  double maxAmt = 0.0;
+  if (allAmts.isNotEmpty) {
+    maxAmt = allAmts.reduce((a, b) => a > b ? a : b);
   }
-
-  final brandMatches = _brandRe.allMatches(pre).toList();
-  final sections = <String>[];
-  if (brandMatches.isNotEmpty) {
-    for (var i = 0; i < brandMatches.length; i++) {
-      final start = brandMatches[i].end;
-      final end = (i + 1 < brandMatches.length) ? brandMatches[i + 1].start : pre.length;
-      sections.add(pre.substring(start, end));
-    }
-  } else {
-    sections.add(pre);
+  if (maxAmt > 0) {
+    return AmountDecision(maxAmt, true);
   }
-
-  final brandVals = <double>[];
-  for (final sec in sections) {
-    final mv = modeValue(amountsIn(sec));
-    if (mv != null) brandVals.add(mv);
-  }
-
-  final grand = amountsIn(post);
-  final brandSum = brandVals.isNotEmpty ? round2(brandVals.fold(0.0, (a, b) => a + b)) : null;
-
-  if (brandSum != null && grand.any((g) => (g - brandSum).abs() < 0.005)) {
-    return AmountDecision(brandSum, true);
-  }
-
-  if (brandSum != null && brandVals.length >= 2) {
-    final sb = brandSum.toStringAsFixed(2);
-    for (final g in grand) {
-      final sa = g.toStringAsFixed(2);
-      if (sa.length == sb.length) {
-        int diff = 0;
-        for (var k = 0; k < sa.length; k++) {
-          if (sa[k] != sb[k]) diff++;
-        }
-        if (diff == 1) {
-          return AmountDecision(brandSum, true);
-        }
-      }
-    }
-  }
-
-  if (grand.isNotEmpty) {
-    final counts = <double, int>{};
-    for (final g in grand) {
-      counts[g] = (counts[g] ?? 0) + 1;
-    }
-    final topGrand = counts.entries.reduce((a, b) => a.value >= b.value ? a : b);
-    if (topGrand.value >= 2) {
-      return AmountDecision(topGrand.key, brandSum == null);
-    }
-  }
-
-  if (brandSum != null && brandVals.length >= 2) {
-    return AmountDecision(brandSum, true);
-  }
-
-  final pool = <double>[...grand];
-  if (brandSum != null) pool.add(brandSum);
-  final voted = modeValue(pool);
-  if (voted != null) {
-    return AmountDecision(voted, false);
-  }
-
   return const AmountDecision(0.0, false);
 }
 
 double round2(double val) => double.parse(val.toStringAsFixed(2));
 
-// ───────────────────── مسارات المجلدات والملفات المساعدة ─────────────────────
+// ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
 final String baseDir = '$root/all';
 final String rawImagesDir = '$baseDir/raw_images';
 final String outputDir = '$baseDir/output';
 final String cfgPath = '$baseDir/.app_cfg.json';
 final String fixPath = '$baseDir/.pos_fix.json';
-final String ignorePath = '$baseDir/ignore.txt';
 
 String baseName(String path) => path.split('/').last;
 
@@ -403,19 +311,6 @@ void saveFixes(Map<String, dynamic> fixes) {
       ..createSync(recursive: true)
       ..writeAsStringSync(jsonEncode(fixes));
   } catch (_) {}
-}
-
-Set<int> loadIgnoreList() {
-  try {
-    final f = File(ignorePath);
-    if (f.existsSync()) {
-      return RegExp(r'\d+')
-          .allMatches(f.readAsStringSync())
-          .map((m) => int.parse(m.group(0)!))
-          .toSet();
-    }
-  } catch (_) {}
-  return {};
 }
 
 List<Directory> _subDirs(String path) {
@@ -486,7 +381,7 @@ void saveFolder(String? f) {
   } catch (_) {}
 }
 
-// ───────────────────── نموذج الإيصال الشامل ─────────────────────
+// ───────────────────── نموذج الإيصال ─────────────────────
 class ReceiptItem {
   String fn;
   String path;
@@ -666,10 +561,28 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
 
+      // منع التسكين العشوائي: الإيصالات المتعرف عليها بالاسم فقط تُلحق بالماكينة الأولى للوحدة
+      if (r.how == "name/merchant") {
+        final primaryEntries = terminals.entries
+            .where((kv) => kv.value.excelRow == r.row)
+            .toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+        if (primaryEntries.isNotEmpty) {
+          final primaryTid = primaryEntries.first.key;
+          if (!taken.containsKey(primaryTid)) {
+            r.tid = primaryTid;
+            r.orderNum = primaryEntries.first.value.orderNum;
+            taken[primaryTid] = r;
+            r.how = "auto-number";
+          } else {
+            giveSuffix(r, primaryTid);
+          }
+        }
+        continue;
+      }
+
       final freeEntries = terminals.entries
           .where((kv) => kv.value.excelRow == r.row && !taken.containsKey(kv.key))
-          .toList()
-        ..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+          .toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
 
       if (freeEntries.isNotEmpty) {
         final chosenTid = freeEntries.first.key;
@@ -682,8 +595,7 @@ class _HomePageState extends State<HomePage> {
       } else {
         final unitEntries = terminals.entries
             .where((kv) => kv.value.excelRow == r.row)
-            .toList()
-          ..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+            .toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
         if (unitEntries.isNotEmpty) {
           giveSuffix(r, unitEntries.last.key);
         }
@@ -862,6 +774,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
+      // 2. تحديث التقرير الرسمي مع المحافظة على هيكل الأعمدة والصفوف
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -870,8 +783,11 @@ class _HomePageState extends State<HomePage> {
 
         for (var r = 2; r <= 11; r++) {
           final tot = round2(unitTotals[r] ?? 0.0);
-          final cellD = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
-          cellD.value = xl.DoubleCellValue(tot);
+          final cnt = unitCounts[r] ?? 0;
+
+          // العمود C لعدد العمليات POS Count، العمود D لمبالغ POS amount
+          sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
+          sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
 
           final cellF = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
           cellF.value = xl.FormulaCellValue('=D$r+IF(ISBLANK(E$r),0,E$r)');
@@ -886,6 +802,7 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (_) {}
 
+      // 3. التقرير الشامل المفصل
       try {
         final bytesAdv = tplFile.readAsBytesSync();
         final excelAdv = xl.Excel.decodeBytes(bytesAdv);
@@ -896,25 +813,19 @@ class _HomePageState extends State<HomePage> {
         for (var r = 2; r <= 11; r++) {
           final tot = round2(unitTotals[r] ?? 0.0);
           grandPos += tot;
-          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value =
-              xl.DoubleCellValue(tot);
-          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1)).value =
-              xl.DoubleCellValue(tot);
+          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
+          sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
         }
 
         const rowTotalIndex = 11;
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value =
-            xl.TextCellValue('الإجمالي العام');
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value =
-            xl.IntCellValue(18);
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandPos));
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value = xl.TextCellValue('الإجمالي العام');
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value = xl.IntCellValue(18);
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value = xl.DoubleCellValue(round2(grandPos));
 
         final detailSheet = excelAdv['تفاصيل الماكينات'];
         final headers = ['رقم الترتيب', 'اسم الوحدة', 'TID الماكينة', 'المبلغ (ج.م)', 'طريقة التعرف / الحالة'];
         for (var c = 0; c < headers.length; c++) {
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).value =
-              xl.TextCellValue(headers[c]);
+          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).value = xl.TextCellValue(headers[c]);
         }
 
         var rowIdx = 1;
@@ -924,29 +835,19 @@ class _HomePageState extends State<HomePage> {
           final matched = processedItems.where((e) => !e.skip && e.orderNum == i).toList();
 
           if (matched.isEmpty) {
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value =
-                xl.TextCellValue('$i');
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value =
-                xl.TextCellValue(info.unitName);
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value =
-                xl.TextCellValue(currentTid);
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value =
-                xl.DoubleCellValue(0.0);
-            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value =
-                xl.TextCellValue('⚠️ غير وارد (مفقود)');
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value = xl.TextCellValue('$i');
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value = xl.TextCellValue(info.unitName);
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value = xl.TextCellValue(currentTid);
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value = xl.DoubleCellValue(0.0);
+            detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value = xl.TextCellValue('⚠️ غير وارد (مفقود)');
             rowIdx++;
           } else {
             for (final m in matched) {
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value =
-                  xl.TextCellValue(m.displayOrder);
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value =
-                  xl.TextCellValue(info.unitName);
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value =
-                  xl.TextCellValue(m.tid ?? currentTid);
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value =
-                  xl.DoubleCellValue(round2(m.amount));
-              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value =
-                  xl.TextCellValue('${m.confirmed ? "✓ مؤكد" : "⚠️ يحتاج مراجعة"} (${m.how})');
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value = xl.TextCellValue(m.displayOrder);
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value = xl.TextCellValue(info.unitName);
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value = xl.TextCellValue(m.tid ?? currentTid);
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value = xl.DoubleCellValue(round2(m.amount));
+              detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value = xl.TextCellValue('${m.confirmed ? "✓ مؤكد" : "⚠️ يحتاج مراجعة"} (${m.how})');
               rowIdx++;
             }
           }
@@ -962,14 +863,13 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    final ignoreSet = loadIgnoreList();
     final foundOrders = processedItems
         .where((e) => !e.skip && e.orderNum != null && e.amount > 0)
         .map((e) => e.orderNum!)
         .toSet();
     missingTerminals = [
       for (var i = 1; i <= 18; i++)
-        if (!foundOrders.contains(i) && !ignoreSet.contains(i)) i
+        if (!foundOrders.contains(i)) i
     ];
 
     final lines = <String>[
