@@ -29,7 +29,7 @@ class PosApp extends StatelessWidget {
   }
 }
 
-// ───────────────────── جداول الماكينات والوحدات ─────────────────────
+// ───────────────────── جداول الماكينات والوحدات (تم التحديث لـ 19 ماكينة) ─────────────────────
 class TerminalInfo {
   final int orderNum;
   final int excelRow;
@@ -46,8 +46,8 @@ final Map<String, TerminalInfo> terminals = {
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة
-  "50383712": const TerminalInfo(19, 4, "المنتزه"), // منتزه 3 القديمة
+  "50382315": const TerminalInfo(9, 4, "المنتزه"),
+  "50383712": const TerminalInfo(19, 4, "المنتزه"), // المنتزه 3
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -143,6 +143,7 @@ List<Directory> findWhatsAppImageDirs() {
     final d = Directory(p);
     if (d.existsSync() && !out.any((x) => x.path == d.path)) out.add(d);
   }
+
   checkAndAdd('$root/Android/media/com.whatsapp/WhatsApp/accounts/1003/Media/WhatsApp Images');
   checkAndAdd('$root/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images');
   checkAndAdd('$root/WhatsApp/Media/WhatsApp Images');
@@ -244,47 +245,39 @@ class _HomePageState extends State<HomePage> {
   String? reportTxtPath;
   List<int> missingTerminals = [];
 
-  // ───────────────────── دوال المعالجة (قص الصور والذكاء الاصطناعي) ─────────────────────
+  // ───────────────────── دوال المعالجة (تطابق البايثون في فصل الكتل) ─────────────────────
 
-  // 🎯 هذه الدالة تحاكي OpenCV في البايثون، حيث تقوم بفصل الإيصالات المتجاورة هندسياً
-  List<String> clusterBlocksToReceipts(RecognizedText recognizedText) {
+  // 🎯 هذه الدالة العبقرية تحاكي قص الصورة في البايثون! تفصل الإيصالات المتجاورة بناءً على أعمدة الـ X
+  List<String> splitReceiptsByColumns(RecognizedText recognizedText) {
     final blocks = recognizedText.blocks;
-    if (blocks.isEmpty) return [recognizedText.text];
+    if (blocks.isEmpty) return [];
 
-    final List<TextBlock> sortedBlocks = List.from(blocks);
-    sortedBlocks.sort((a, b) => a.boundingBox.center.dx.compareTo(b.boundingBox.center.dx));
+    final sortedBlocks = List<TextBlock>.from(blocks)
+      ..sort((a, b) => a.boundingBox.left.compareTo(b.boundingBox.left));
 
-    double minX = sortedBlocks.first.boundingBox.center.dx;
-    double maxX = sortedBlocks.last.boundingBox.center.dx;
-    double totalWidth = maxX - minX;
-
-    List<List<TextBlock>> columns = [[sortedBlocks.first]];
-    for (int i = 0; i < sortedBlocks.length - 1; i++) {
-      double gap = sortedBlocks[i+1].boundingBox.center.dx - sortedBlocks[i].boundingBox.center.dx;
-      // إذا كان الفراغ بين الكلمات كبيراً أفقياً، فهذا يعني أننا انتقلنا للإيصال الثاني الملتصق
-      if (totalWidth > 0 && gap > totalWidth * 0.15) {
-        columns.add([sortedBlocks[i+1]]);
-      } else {
-        columns.last.add(sortedBlocks[i+1]);
+    List<List<TextBlock>> columns = [];
+    for (var block in sortedBlocks) {
+      bool placed = false;
+      for (var col in columns) {
+        final colLeft = col.map((b) => b.boundingBox.left).reduce(min);
+        final colRight = col.map((b) => b.boundingBox.right).reduce(max);
+        final center = block.boundingBox.center.dx;
+        
+        // إذا كان منتصف الكلمة يقع ضمن العمود الحالي (أو قريب منه بـ 150 بيكسل)
+        if (center >= colLeft - 150 && center <= colRight + 150) {
+          col.add(block);
+          placed = true;
+          break;
+        }
       }
+      if (!placed) columns.add([block]);
     }
 
-    List<String> receipts = [];
-    for (var col in columns) {
-      if (col.length >= 3) {
-        // ترتيب الكلمات من أعلى لأسفل داخل الإيصال الواحد
-        col.sort((a, b) {
-          if ((a.boundingBox.top - b.boundingBox.top).abs() < 15) {
-            return a.boundingBox.left.compareTo(b.boundingBox.left);
-          }
-          return a.boundingBox.top.compareTo(b.boundingBox.top);
-        });
-        receipts.add(col.map((b) => b.text).join('\n'));
-      }
-    }
-
-    if (receipts.isEmpty) return [recognizedText.text];
-    return receipts;
+    // تجميع الكلمات داخل كل عمود (إيصال) من الأعلى للأسفل
+    return columns.map((col) {
+      col.sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
+      return col.map((b) => b.text).join('\n');
+    }).toList();
   }
 
   String normalizeOcrText(String text) {
@@ -399,7 +392,7 @@ class _HomePageState extends State<HomePage> {
     return sorted.first.key;
   }
 
-  // 🎯 استخراج المبالغ بطريقة البايثون بحذافيرها
+  // 🎯 استخراج المبالغ بطريقة البايثون بحذافيرها (للقطعة الواحدة)
   ParseResult parseReceipt(String txt) {
     final stopMatch = RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false).firstMatch(txt);
     final t = stopMatch != null ? txt.substring(0, stopMatch.start) : txt;
@@ -483,48 +476,6 @@ class _HomePageState extends State<HomePage> {
       return AmountDecision(top.key, false);
     }
     return const AmountDecision(0.0, false);
-  }
-
-  ReceiptItem _buildItem(String chunk, String filePath, String key, double amt, bool confirmed, {String? fallbackText, String? bNo}) {
-    var tid = findTerminal(chunk) ?? (fallbackText != null ? findTerminal(fallbackText) : null);
-    var how = tid != null ? "terminal" : "none";
-    int? row;
-    String? uName;
-    int? order;
-
-    final extraRow = findUnitByExtra(chunk) ?? (fallbackText != null ? findUnitByExtra(fallbackText) : null);
-    if (tid == null) {
-      tid = findTerminalFuzzy(chunk, extraRow) ?? (fallbackText != null ? findTerminalFuzzy(fallbackText, extraRow) : null);
-      if (tid != null) how = "fuzzy";
-    }
-
-    if (tid != null && terminals.containsKey(tid)) {
-      order = terminals[tid]!.orderNum;
-      row = terminals[tid]!.excelRow;
-      uName = terminals[tid]!.unitName;
-    } else if (extraRow != null) {
-      row = extraRow;
-      uName = rowNames[extraRow];
-      how = "name/merchant";
-    }
-
-    final fnNum = int.tryParse(baseName(filePath).split('.').first);
-    if (tid == null && fnNum != null && numToTid.containsKey(fnNum)) {
-      final ft = numToTid[fnNum]!;
-      if (row == null || terminals[ft]!.excelRow == row) {
-        tid = ft;
-        order = terminals[ft]!.orderNum;
-        row = terminals[ft]!.excelRow;
-        uName = terminals[ft]!.unitName;
-        how = "file-number";
-      }
-    }
-
-    return ReceiptItem(
-      fn: baseName(filePath), path: filePath, key: key, tid: tid, origTid: tid,
-      orderNum: order, row: row, unitName: uName, amount: amt, confirmed: confirmed,
-      how: how, date: findDate(chunk) ?? (fallbackText != null ? findDate(fallbackText) : null), batchNo: bNo,
-    );
   }
 
   // ───────────────────── دوال الواجهة والملفات ─────────────────────
@@ -787,6 +738,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
+      // 🎯 تعديل ملف الإكسيل مع ترك المعادلات والتنسيق
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -796,8 +748,10 @@ class _HomePageState extends State<HomePage> {
           final tot = unitTotals[r] ?? 0.0;
           final cnt = unitCounts[r] ?? 0;
           
-          sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
+          // في البايثون: العمود D للمبلغ (رقم 3)
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
+          // في البايثون: المعادلة في F
+          sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1)).value = xl.FormulaCellValue('=D$r+IF(ISBLANK(E$r),0,E$r)');
         }
 
         final excelOutBytes = excel.encode();
@@ -810,19 +764,12 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
+    // 🎯 تحديث النواقص مع التأكيد أن المنتزه 3 ماكينات
     final foundOrders = processedItems.where((e) => !e.skip && e.orderNum != null && e.amount > 0).map((e) => e.orderNum!).toSet();
-    final montazahCount = processedItems.where((e) => !e.skip && e.row == 4 && e.amount > 0).length;
     
     missingTerminals.clear();
     for (var i = 1; i <= 19; i++) {
-        if (i == 8 || i == 9 || i == 19) continue;
         if (!foundOrders.contains(i)) missingTerminals.add(i);
-    }
-    
-    if (montazahCount < 3) {
-       if (!foundOrders.contains(8)) missingTerminals.add(8);
-       if (!foundOrders.contains(9)) missingTerminals.add(9);
-       if (!foundOrders.contains(19)) missingTerminals.add(19);
     }
 
     final grandSum = unitTotals.values.fold(0.0, (a, b) => a + b);
@@ -901,36 +848,54 @@ class _HomePageState extends State<HomePage> {
 
         final res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         
-        // 🎯 فصل الإيصالات المتجاورة (Crop محاكى برمجياً)
+        // 🎯 الاستعانة بدالة فصل الأعمدة لمنع تداخل أرقام الإيصالين
         final chunks = clusterBlocksToReceipts(res);
-        List<double> chunkAmounts = [];
-        bool allChunksConfirmed = true;
-
+        
         for (var chunk in chunks) {
            final pr = parseReceipt(chunk);
            final dec = decideResult([pr]);
            
            if (dec.amount > 0) {
                final bNo = findBatchNo(chunk);
-               final bKey = bNo != null ? '${bNo}_${dec.amount}' : '${dec.amount}';
+               // إضافة الـ X و Y للمفتاح لمنع حذف الإيصالات الصحيحة التي تتشابه في المبلغ
+               final bKey = bNo != null ? '${bNo}_${dec.amount}' : '${chunk.hashCode}_${dec.amount}';
                if (!seenBatchKey.contains(bKey)) {
                    seenBatchKey.add(bKey);
-                   chunkAmounts.add(dec.amount);
+                   
+                   var tid = findTerminal(chunk);
+                   var how = tid != null ? "terminal" : "none";
+                   int? row; String? uName; int? order;
+                   
+                   final extraRow = findUnitByExtra(chunk);
+                   if (tid == null) {
+                     tid = findTerminalFuzzy(chunk, extraRow);
+                     if (tid != null) how = "fuzzy";
+                   }
+                   if (tid != null && terminals.containsKey(tid)) {
+                     order = terminals[tid]!.orderNum; row = terminals[tid]!.excelRow; uName = terminals[tid]!.unitName;
+                   } else if (extraRow != null) {
+                     row = extraRow; uName = rowNames[extraRow]; how = "name/merchant";
+                   }
+                   
+                   final fnNum = int.tryParse(baseName(f.path).split('.').first);
+                   if (tid == null && fnNum != null && numToTid.containsKey(fnNum)) {
+                     final ft = numToTid[fnNum]!;
+                     if (row == null || terminals[ft]!.excelRow == row) {
+                       tid = ft; order = terminals[ft]!.orderNum; row = terminals[ft]!.excelRow;
+                       uName = terminals[ft]!.unitName; how = "file-number";
+                     }
+                   }
+                   
+                   final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
+                   final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
+                   
+                   rawReceipts.add(ReceiptItem(
+                     fn: baseName(localFile.path), path: localFile.path, key: key, tid: tid, origTid: tid,
+                     orderNum: order, row: row, unitName: uName, amount: dec.amount,
+                     confirmed: dec.confirmed, how: how, date: findDate(chunk), batchNo: bNo,
+                   ));
                }
            }
-           allChunksConfirmed = allChunksConfirmed && dec.confirmed;
-        }
-
-        double finalAmt = 0.0;
-        if (chunkAmounts.isNotEmpty) {
-           finalAmt = round2(chunkAmounts.fold(0.0, (a, b) => a + b));
-        }
-
-        if (finalAmt > 0 || customDir == rawImagesDir) {
-          final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
-          final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
-          
-          rawReceipts.add(_buildItem(res.text, localFile.path, key, finalAmt, allChunksConfirmed, bNo: findBatchNo(res.text)));
         }
       } catch (_) {}
 
