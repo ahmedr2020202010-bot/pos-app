@@ -112,7 +112,7 @@ jobs:
                   val list = ArrayList<Intent>()
                   for (base in bases) {
                       base.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                      for (ri in packageManager.queryIntentActivities(base, 0)) {
+                      for (ri in packageManager.queryIntentActivities(base, android.content.pm.PackageManager.MATCH_ALL)) {
                           val pkg = ri.activityInfo.packageName
                           if (!seen.add(pkg)) continue
                           val i = Intent(base)
@@ -121,13 +121,32 @@ jobs:
                           list.add(i)
                       }
                   }
-                  if (list.isEmpty()) return false
-                  val chooser = Intent.createChooser(list.removeAt(0), "افتح المجلد بواسطة")
                   if (list.isNotEmpty()) {
-                      chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, list.map { it as android.os.Parcelable }.toTypedArray())
+                      try {
+                          val chooser = Intent.createChooser(list.removeAt(0), "افتح المجلد بواسطة")
+                          if (list.isNotEmpty()) {
+                              chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, list.map { it as android.os.Parcelable }.toTypedArray())
+                          }
+                          startActivity(chooser)
+                          return true
+                      } catch (e: Exception) {
+                      }
                   }
+                  // بديل 1: فتح مباشر بمتصفح ملفات النظام
+                  try {
+                      val d = Intent(Intent.ACTION_VIEW)
+                      d.setDataAndType(docUri, "vnd.android.document/directory")
+                      d.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      startActivity(d)
+                      return true
+                  } catch (e: Exception) {
+                  }
+                  // بديل 2: متصفح النظام مفتوح على الفولدر ده
                   return try {
-                      startActivity(chooser)
+                      val t = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                      t.putExtra(DocumentsContract.EXTRA_INITIAL_URI, docUri)
+                      t.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(t)
                       true
                   } catch (e: Exception) {
                       false
