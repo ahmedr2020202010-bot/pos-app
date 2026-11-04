@@ -47,7 +47,7 @@ final Map<String, TerminalInfo> terminals = {
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
   "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الاحتياطية
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 القديمة
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -68,7 +68,7 @@ final Map<int, String> numToTid = {
   6: "50335994",
   7: "50335711",
   8: "50382298",
-  9: "50382315", // منتزه 2
+  9: "50382315",
   10: "50382306",
   11: "50382316",
   12: "50382308",
@@ -114,7 +114,6 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "مجمع خدمات",
 };
 
-// ───────────────────── تنظيف نصوص OCR ─────────────────────
 String normalizeOcrText(String text) {
   var s = text;
   s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
@@ -122,7 +121,6 @@ String normalizeOcrText(String text) {
   return s;
 }
 
-// ───────────────────── خوارزميات الاستخراج الدقيقة ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -251,7 +249,7 @@ List<double> amountsIn(String rawText) {
       final whole = m.group(1)!.replaceAll(RegExp(r'[.,\s]'), '');
       final dec = m.group(2)!;
       final v = double.tryParse("$whole.$dec");
-      if (v != null && v >= 0.5 && v <= 5000000) {
+      if (v != null && v >= 10.0 && v <= 5000000) { // تجاهل المبالغ الصغيرة جداً لضمان عدم القراءة الخاطئة
         out.add(round2(v));
       }
     } catch (_) {}
@@ -267,14 +265,22 @@ class AmountDecision {
 
 AmountDecision extractReceiptAmountPythonStyle(String rawText) {
   final txt = normalizeOcrText(rawText);
+  
+  // تركيز الاستخراج على منطقة GRAND TOTALS لضمان الدقة المطلقة وعدم أخذ أرقام عشوائية
+  final grandMatch = RegExp(r"(?:GRAND\s*TOTALS?|TOTALS?\s*GRAND)[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(txt);
+  if (grandMatch != null) {
+    final gAmts = amountsIn(grandMatch.group(0)!);
+    if (gAmts.isNotEmpty) {
+      return AmountDecision(gAmts.reduce((a, b) => a > b ? a : b), true);
+    }
+  }
+
+  // إذا لم تجد الكلمة حرفياً، خذ أكبر مبلغ حقيقي في الإيصال بالكامل
   final allAmts = amountsIn(txt);
-  double maxAmt = 0.0;
   if (allAmts.isNotEmpty) {
-    maxAmt = allAmts.reduce((a, b) => a > b ? a : b);
+    return AmountDecision(allAmts.reduce((a, b) => a > b ? a : b), true);
   }
-  if (maxAmt > 0) {
-    return AmountDecision(maxAmt, true);
-  }
+
   return const AmountDecision(0.0, false);
 }
 
@@ -381,7 +387,6 @@ void saveFolder(String? f) {
   } catch (_) {}
 }
 
-// ───────────────────── نموذج الإيصال ─────────────────────
 class ReceiptItem {
   String fn;
   String path;
@@ -425,7 +430,6 @@ class ReceiptItem {
       orderNum != null ? (suffix != null ? '${orderNum}_$suffix' : '$orderNum') : '؟';
 }
 
-// ───────────────────── الشاشة الرئيسية ─────────────────────
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -532,7 +536,7 @@ class _HomePageState extends State<HomePage> {
         taken[t] = r;
       } else if (r.amount > 0 && (taken[t]!.amount - r.amount).abs() < 0.005) {
         r.skip = true;
-        warnings.add("${r.fn}: مكرر نفس الماكينة $t ونفس المبلغ ${r.amount.toStringAsFixed(2)} - تم استبعاده");
+        warnings.add("${r.fn}: مكرر نفس الماكينة $t - تم استبعاده");
       } else {
         r.origTid = r.tid;
         r.tid = null;
@@ -561,7 +565,6 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
 
-      // منع التسكين العشوائي: الإيصالات المتعرف عليها بالاسم فقط تُلحق بالماكينة الأولى للوحدة
       if (r.how == "name/merchant") {
         final primaryEntries = terminals.entries
             .where((kv) => kv.value.excelRow == r.row)
@@ -619,7 +622,7 @@ class _HomePageState extends State<HomePage> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlgState) => AlertDialog(
-          title: const Text('تعديل بيانات الإيصال (يُحفظ تلقائياً)'),
+          title: const Text('تعديل بيانات الإيصال'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -774,7 +777,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
-      // 2. تحديث التقرير الرسمي مع المحافظة على هيكل الأعمدة والصفوف
+      // 2. تحديث التقرير الرسمي بالمحافظة الحرفية على القالب الأصلي (Cols C & D)
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -785,7 +788,7 @@ class _HomePageState extends State<HomePage> {
           final tot = round2(unitTotals[r] ?? 0.0);
           final cnt = unitCounts[r] ?? 0;
 
-          // العمود C لعدد العمليات POS Count، العمود D لمبالغ POS amount
+          // عمود POS Count (index 2 / Col C) و POS amount (index 3 / Col D)
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
 
@@ -802,7 +805,7 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (_) {}
 
-      // 3. التقرير الشامل المفصل
+      // 3. التقرير الشامل
       try {
         final bytesAdv = tplFile.readAsBytesSync();
         final excelAdv = xl.Excel.decodeBytes(bytesAdv);
@@ -1269,7 +1272,6 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-// ───────────────────── متصفح الفولدرات ─────────────────────
 class FolderPicker extends StatefulWidget {
   final String start;
   const FolderPicker({super.key, required this.start});
