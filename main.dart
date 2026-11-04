@@ -9,8 +9,8 @@ import 'package:image/image.dart' as img;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:syncfusion_flutter_pdf/pdf.dart' as spdf;
 
 void main() => runApp(const PosApp());
 
@@ -1065,25 +1065,24 @@ class _HomePageState extends State<HomePage> {
     }
     todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
 
-    // الميزة المطلوبة: استخراج الصور من PDF لو لم نجد صور جديدة في الواتساب
+    // الميزة المطلوبة: معالجة الـ PDF (وتحويله لصور) لو لم نجد صور جديدة في الواتساب
     if (todo.isEmpty) {
       final dateStr = "${now.day}.${now.month}";
       final pdfFile = File('$outputDir/الاسكندريه $dateStr.pdf');
       
       if (pdfFile.existsSync()) {
-        setState(() => status = 'لا توجد صور جديدة، جاري استخراج الإيصالات من ملف الـ PDF لليوم...');
+        setState(() => status = 'لا توجد صور جديدة، جاري معالجة ملف الـ PDF لليوم...');
         try {
           final bytes = pdfFile.readAsBytesSync();
-          final doc = spdf.PdfDocument(inputBytes: bytes);
-          for (int i = 0; i < doc.pages.count; i++) {
-            final images = doc.pages[i].extractImages();
-            for (int j = 0; j < images.length; j++) {
-              final tempFile = File('$rawImagesDir/pdf_extracted_${i}_$j.jpg');
-              tempFile.writeAsBytesSync(images[j].imageBytes);
-              todo.add(tempFile);
-            }
+          int pageIndex = 0;
+          
+          await for (final page in Printing.raster(bytes, dpi: 250)) {
+            final tempFile = File('$rawImagesDir/pdf_extracted_$pageIndex.png');
+            final pngBytes = await page.toPng();
+            tempFile.writeAsBytesSync(pngBytes);
+            todo.add(tempFile);
+            pageIndex++;
           }
-          doc.dispose();
         } catch (e) {
           warnings.add('فشل قراءة الـ PDF: $e');
         }
@@ -1409,9 +1408,9 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(width: 4),
                 IconButton.filledTonal(
                   onPressed: busy ? null : shareStandardFiles,
-                  icon: const Icon(Icons.whatsapp),
+                  icon: const Icon(Icons.send),
                   color: Colors.green,
-                  tooltip: 'مشاركة للواتساب (أساسي)',
+                  tooltip: 'مشاركة (أساسي)',
                 ),
                 const SizedBox(width: 4),
                 IconButton.filledTonal(
