@@ -46,8 +46,8 @@ final Map<String, TerminalInfo> terminals = {
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"),
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // الماكينة الثالثة القديمة للمنتزه
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة الأساسية
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 القديمة
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -62,7 +62,7 @@ final Map<String, TerminalInfo> terminals = {
 final Map<int, String> numToTid = {
   1: "50335710", 2: "50335993", 3: "50335987",
   4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
-  8: "50382298", 9: "50382315", // منتزه 2 الأساسية
+  8: "50382298", 9: "50382315", 
   10: "50382306", 11: "50382316",
   12: "50382308", 13: "50383706", 14: "50382300", 15: "50383702",
   16: "50382312", 17: "50383699", 18: "50383700",
@@ -98,6 +98,189 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "مجمع خدمات",
 };
 
+// ───────────────────── تنظيف نصوص OCR ─────────────────────
+String normalizeOcrText(String text) {
+  var s = text;
+  s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
+  s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
+  return s;
+}
+
+final List<RegExp> _markers = [
+  RegExp(r'TERMINAL', caseSensitive: false),
+  RegExp(r'GRAND|TOTALS?', caseSensitive: false),
+  RegExp(r'NATIONAL\s*BANK|\bNBE\b', caseSensitive: false),
+  RegExp(r'BATCH', caseSensitive: false),
+  RegExp(r'MERCHANT', caseSensitive: false),
+  RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
+  RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
+  RegExp(r'THANK\s*YOU', caseSensitive: false),
+];
+
+int receiptScore(String rawText) {
+  final text = normalizeOcrText(rawText);
+  return _markers.where((r) => r.hasMatch(text)).length + (findTerminal(text) != null ? 1 : 0);
+}
+
+String? findTerminal(String rawText) {
+  final text = normalizeOcrText(rawText);
+  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,10}\d)", caseSensitive: false).firstMatch(text);
+  if (m != null) {
+    var clean = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
+    if (clean.length >= 8) {
+      var d = clean.substring(clean.length - 8);
+      d = tidFix[d] ?? d;
+      if (terminals.containsKey(d)) return d;
+    }
+  }
+  for (final tid in terminals.keys) {
+    if (text.contains(tid)) return tid;
+  }
+  for (final match in RegExp(r"\b([56]03\d{5})\b").allMatches(text)) {
+    var c = match.group(1)!;
+    c = tidFix[c] ?? c;
+    if (terminals.containsKey(c)) return c;
+  }
+  return null;
+}
+
+String? findTerminalFuzzy(String rawText, int? targetRow) {
+  final text = normalizeOcrText(rawText);
+  final pool = terminals.entries.where((e) => targetRow == null || e.value.excelRow == targetRow).map((e) => e.key).toList();
+  final dist = <String, int>{};
+  final runs = RegExp(r"\d[\d /]{6,14}\d").allMatches(text);
+
+  for (final run in runs) {
+    final digits = run.group(0)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
+    if (digits.length < 8) continue;
+    for (var i = 0; i <= digits.length - 8; i++) {
+      final cand = digits.substring(i, i + 8);
+      if (!cand.startsWith("50") && !cand.startsWith("60")) continue;
+      for (final tid in pool) {
+        int d = 0;
+        for (var k = 0; k < 8; k++) {
+          if (cand[k] != tid[k]) d++;
+        }
+        if (d < (dist[tid] ?? 99)) dist[tid] = d;
+      }
+    }
+  }
+  if (dist.isEmpty) return null;
+  final best = dist.values.reduce(min);
+  final winners = dist.entries.where((e) => e.value == best).map((e) => e.key).toList();
+  if (best <= 1 && winners.length == 1) return winners.first;
+  return null;
+}
+
+int? findUnitByExtra(String rawText) {
+  final text = normalizeOcrText(rawText);
+  final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,14}\d)", caseSensitive: false).firstMatch(text);
+  final cands = <String>[];
+  if (m != null) cands.add(m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
+  cands.add(text.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
+
+  for (final d in cands) {
+    final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(d);
+    if (mm != null && merchantCodeMap.containsKey(mm.group(1))) return merchantCodeMap[mm.group(1)];
+  }
+
+  final up = text.toUpperCase();
+  for (final hint in nameHints) {
+    if (hint.key.any((w) => up.contains(w))) return hint.value;
+  }
+  return null;
+}
+
+String? findDate(String text) {
+  final m = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", caseSensitive: false).firstMatch(text);
+  if (m != null) {
+    final mo = int.tryParse(m.group(2)!) ?? 0;
+    final d = int.tryParse(m.group(3)!) ?? 0;
+    if (mo > 0 && d > 0) return "$d.$mo";
+  }
+  return null;
+}
+
+// ───────────────────── استخراج المبالغ بطريقة التجميع الذكية ─────────────────────
+final RegExp _amountRe = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
+
+List<double> amountsIn(String rawText) {
+  final text = normalizeOcrText(rawText);
+  final out = <double>[];
+  for (final m in _amountRe.allMatches(text)) {
+    try {
+      final whole = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
+      final dec = m.group(2)!;
+      final v = double.tryParse("$whole.$dec");
+      // تجاهل الأرقام الصغيرة لضمان التقاط الإجماليات فقط
+      if (v != null && v >= 10.0 && v <= 5000000) {
+        out.add(double.parse(v.toStringAsFixed(2)));
+      }
+    } catch (_) {}
+  }
+  return out;
+}
+
+class AmountDecision {
+  final double amount;
+  final bool confirmed;
+  const AmountDecision(this.amount, this.confirmed);
+}
+
+// الدالة العبقرية لتخطي مشكلة قراءة الفلاتر الأفقية للصور التي تحتوي على أكثر من إيصال
+AmountDecision extractReceiptAmountPythonStyle(String rawText) {
+  final txt = normalizeOcrText(rawText);
+  final allAmts = amountsIn(txt);
+  if (allAmts.isEmpty) return const AmountDecision(0.0, false);
+
+  // 1. كم إيصال (باتش) في هذه الصورة؟
+  int batchCount = RegExp(r"BATCH", caseSensitive: false).allMatches(txt).length;
+  int termCount = RegExp(r"TERMINAL", caseSensitive: false).allMatches(txt).length;
+  int receiptCount = max(1, max(batchCount, termCount)); // أقل شيء إيصال واحد
+
+  // 2. تجميع الأرقام المتشابهة (التي تكررت في نفس الإيصال كـ Sale و Total و Net)
+  List<List<double>> groups = [];
+  for (double a in allAmts) {
+    bool added = false;
+    for (var g in groups) {
+      if ((g.first - a).abs() < 2.0) { // السماحية لتجاهل أخطاء الـ OCR البسيطة في القروش
+        g.add(a);
+        added = true;
+        break;
+      }
+    }
+    if (!added) groups.add([a]);
+  }
+
+  // 3. ترتيب المجموعات تنازلياً للحصول على المبالغ الأكبر (التي هي الـ GRAND TOTALS)
+  groups.sort((a, b) => b.first.compareTo(a.first));
+
+  double finalSum = 0.0;
+  int receiptsFound = 0;
+  bool confirmed = true;
+
+  // 4. أخذ أكبر مبالغ تكررت بناءً على عدد الإيصالات الموجودة في الصورة
+  for (var g in groups) {
+    if (receiptsFound >= receiptCount) break;
+
+    // كل إيصال يكرر مبلغه 3 مرات، إذا تكرر المبلغ 4-6 مرات فهذا يعني أن هناك إيصالين لهما نفس المبلغ بالضبط!
+    int occurrences = g.length;
+    int receiptsRepresented = (occurrences / 3).ceil();
+    if (receiptsRepresented == 0) receiptsRepresented = 1;
+
+    for (int i = 0; i < receiptsRepresented; i++) {
+      if (receiptsFound >= receiptCount) break;
+      finalSum += g.first;
+      receiptsFound++;
+      if (occurrences < 2) confirmed = false; // إذا لم يتكرر الرقم مرتين على الأقل، يحتاج مراجعة
+    }
+  }
+
+  return AmountDecision(round2(finalSum), confirmed);
+}
+
+double round2(double val) => double.parse(val.toStringAsFixed(2));
+
 // ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
 final String baseDir = '$root/all';
@@ -116,18 +299,14 @@ String fileKey(String path) {
 Map<String, dynamic> loadFixes() {
   try {
     final f = File(fixPath);
-    if (f.existsSync()) {
-      return Map<String, dynamic>.from(jsonDecode(f.readAsStringSync()) as Map);
-    }
+    if (f.existsSync()) return Map<String, dynamic>.from(jsonDecode(f.readAsStringSync()) as Map);
   } catch (_) {}
   return {};
 }
 
 void saveFixes(Map<String, dynamic> fixes) {
   try {
-    File(fixPath)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode(fixes));
+    File(fixPath)..createSync(recursive: true)..writeAsStringSync(jsonEncode(fixes));
   } catch (_) {}
 }
 
@@ -147,11 +326,9 @@ List<Directory> findWhatsAppImageDirs() {
     final d = Directory(p);
     if (d.existsSync() && !out.any((x) => x.path == d.path)) out.add(d);
   }
-
   checkAndAdd('$root/Android/media/com.whatsapp/WhatsApp/accounts/1003/Media/WhatsApp Images');
   checkAndAdd('$root/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images');
   checkAndAdd('$root/WhatsApp/Media/WhatsApp Images');
-
   final mediaDir = Directory('$root/Android/media');
   if (mediaDir.existsSync()) {
     for (final pkg in _subDirs(mediaDir.path)) {
@@ -184,9 +361,7 @@ String? loadFolder() {
 
 void saveFolder(String? f) {
   try {
-    File(cfgPath)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode({'folder': f}));
+    File(cfgPath)..createSync(recursive: true)..writeAsStringSync(jsonEncode({'folder': f}));
   } catch (_) {}
 }
 
@@ -210,27 +385,12 @@ class ReceiptItem {
   String? newName;
 
   ReceiptItem({
-    required this.fn,
-    required this.path,
-    this.key,
-    this.tid,
-    this.origTid,
-    this.orderNum,
-    this.suffix,
-    this.row,
-    this.unitName,
-    this.amount = 0.0,
-    this.confirmed = false,
-    this.how = "none",
-    this.date,
-    this.batchNo,
-    this.skip = false,
-    this.conflict = false,
-    this.newName,
+    required this.fn, required this.path, this.key, this.tid, this.origTid, this.orderNum,
+    this.suffix, this.row, this.unitName, this.amount = 0.0, this.confirmed = false,
+    this.how = "none", this.date, this.batchNo, this.skip = false, this.conflict = false, this.newName,
   });
 
-  String get displayOrder =>
-      orderNum != null ? (suffix != null ? '${orderNum}_$suffix' : '$orderNum') : '؟';
+  String get displayOrder => orderNum != null ? (suffix != null ? '${orderNum}_$suffix' : '$orderNum') : '؟';
 }
 
 class HomePage extends StatefulWidget {
@@ -254,182 +414,6 @@ class _HomePageState extends State<HomePage> {
   String? reportTxtPath;
   List<int> missingTerminals = [];
 
-  // ───────────────────── دوال المعالجة (نُقلت داخل الـ Class) ─────────────────────
-
-  String normalizeOcrText(String text) {
-    var s = text;
-    s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
-    s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
-    return s;
-  }
-
-  int receiptScore(String rawText) {
-    final text = normalizeOcrText(rawText);
-    final markers = [
-      RegExp(r'TERMINAL', caseSensitive: false),
-      RegExp(r'GRAND|TOTALS?', caseSensitive: false),
-      RegExp(r'NATIONAL\s*BANK|\bNBE\b', caseSensitive: false),
-      RegExp(r'BATCH', caseSensitive: false),
-      RegExp(r'MERCHANT', caseSensitive: false),
-      RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
-      RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
-      RegExp(r'THANK\s*YOU', caseSensitive: false),
-    ];
-    return markers.where((r) => r.hasMatch(text)).length +
-        (findTerminal(text) != null ? 1 : 0);
-  }
-
-  String? findTerminal(String rawText) {
-    final text = normalizeOcrText(rawText);
-    final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,10}\d)", caseSensitive: false).firstMatch(text);
-    if (m != null) {
-      var clean = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
-      if (clean.length >= 8) {
-        var d = clean.substring(clean.length - 8);
-        d = tidFix[d] ?? d;
-        if (terminals.containsKey(d)) return d;
-      }
-    }
-    for (final tid in terminals.keys) {
-      if (text.contains(tid)) return tid;
-    }
-    for (final match in RegExp(r"\b([56]03\d{5})\b").allMatches(text)) {
-      var c = match.group(1)!;
-      c = tidFix[c] ?? c;
-      if (terminals.containsKey(c)) return c;
-    }
-    return null;
-  }
-
-  String? findTerminalFuzzy(String rawText, int? targetRow) {
-    final text = normalizeOcrText(rawText);
-    final pool = terminals.entries
-        .where((e) => targetRow == null || e.value.excelRow == targetRow)
-        .map((e) => e.key)
-        .toList();
-
-    final dist = <String, int>{};
-    final runs = RegExp(r"\d[\d /]{6,14}\d").allMatches(text);
-
-    for (final run in runs) {
-      final digits = run.group(0)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
-      if (digits.length < 8) continue;
-      for (var i = 0; i <= digits.length - 8; i++) {
-        final cand = digits.substring(i, i + 8);
-        if (!cand.startsWith("50") && !cand.startsWith("60")) continue;
-        for (final tid in pool) {
-          int d = 0;
-          for (var k = 0; k < 8; k++) {
-            if (cand[k] != tid[k]) d++;
-          }
-          if (d < (dist[tid] ?? 99)) dist[tid] = d;
-        }
-      }
-    }
-    if (dist.isEmpty) return null;
-    final best = dist.values.reduce(min);
-    final winners = dist.entries.where((e) => e.value == best).map((e) => e.key).toList();
-    if (best <= 1 && winners.length == 1) return winners.first;
-    return null;
-  }
-
-  int? findUnitByExtra(String rawText) {
-    final text = normalizeOcrText(rawText);
-    final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,14}\d)", caseSensitive: false).firstMatch(text);
-    final cands = <String>[];
-    if (m != null) {
-      cands.add(m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
-    }
-    cands.add(text.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
-
-    for (final d in cands) {
-      final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(d);
-      if (mm != null && merchantCodeMap.containsKey(mm.group(1))) {
-        return merchantCodeMap[mm.group(1)];
-      }
-    }
-
-    final up = text.toUpperCase();
-    for (final hint in nameHints) {
-      if (hint.key.any((w) => up.contains(w))) return hint.value;
-    }
-    return null;
-  }
-
-  String? findDate(String text) {
-    final m = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", caseSensitive: false).firstMatch(text);
-    if (m != null) {
-      final mo = int.tryParse(m.group(2)!) ?? 0;
-      final d = int.tryParse(m.group(3)!) ?? 0;
-      if (mo > 0 && d > 0) return "$d.$mo";
-    }
-    return null;
-  }
-
-  List<String> findBatchNos(String text) {
-    final matches = RegExp(r"BATCH\s*NO\D{0,6}(\d{4,7})", caseSensitive: false).allMatches(text);
-    return matches.map((m) => m.group(1)!).toSet().toList();
-  }
-
-  List<double> amountsIn(String rawText) {
-    final RegExp amountRe = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
-    final text = normalizeOcrText(rawText);
-    final out = <double>[];
-    for (final m in amountRe.allMatches(text)) {
-      try {
-        final whole = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
-        final dec = m.group(2)!;
-        final v = double.tryParse("$whole.$dec");
-        if (v != null && v >= 10.0 && v <= 5000000) {
-          out.add(double.parse(v.toStringAsFixed(2)));
-        }
-      } catch (_) {}
-    }
-    return out;
-  }
-
-  double extractReceiptAmountPythonStyle(String rawText) {
-    final txt = normalizeOcrText(rawText);
-    
-    // تقسيم النص بحسب GRAND TOTALS لدعم باتشين في نفس الإيصال
-    final parts = txt.split(RegExp(r"GRAND\s*TOTALS?|TOTALS?\s*GRAND", caseSensitive: false));
-    
-    if (parts.length > 1) {
-      double totalSum = 0.0;
-      for (int i = 1; i < parts.length; i++) {
-        final postGrandText = parts[i].split(RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false)).first;
-        final gAmts = amountsIn(postGrandText);
-        
-        if (gAmts.isNotEmpty) {
-          final counts = <double, int>{};
-          for (final a in gAmts) counts[a] = (counts[a] ?? 0) + 1;
-          
-          final sorted = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
-          totalSum += sorted.first.key; 
-        }
-      }
-      if (totalSum > 0) return double.parse(totalSum.toStringAsFixed(2));
-    }
-
-    final bNos = findBatchNos(txt);
-    if (bNos.isNotEmpty) {
-       final allAmts = amountsIn(txt);
-       if (allAmts.isNotEmpty) {
-          allAmts.sort((a, b) => b.compareTo(a));
-          double sum = 0.0;
-          int count = min(bNos.length, allAmts.length);
-          for(int i = 0; i < count; i++) {
-             sum += allAmts[i];
-          }
-          return double.parse(sum.toStringAsFixed(2));
-       }
-    }
-
-    return 0.0;
-  }
-
-  // ───────────────────── باقي الدوال كما هي ─────────────────────
-
   @override
   void initState() {
     super.initState();
@@ -443,10 +427,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     if (!mounted) return;
-    final res = await Navigator.push<String>(
-      context,
-      MaterialPageRoute(builder: (_) => FolderPicker(start: customDir ?? root)),
-    );
+    final res = await Navigator.push<String>(context, MaterialPageRoute(builder: (_) => FolderPicker(start: customDir ?? root)));
     if (res != null) {
       saveFolder(res);
       setState(() => customDir = res);
@@ -462,22 +443,16 @@ class _HomePageState extends State<HomePage> {
     final files = <XFile>[];
     if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) files.add(XFile(standardXlsxPath!));
     if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) files.add(XFile(generatedPdfPath!));
-    if (files.isNotEmpty) {
-      await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')));
-    }
+    if (files.isNotEmpty) await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
+    else ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('لم يتم إنشاء ملفات بعد.')));
   }
 
   Future<void> shareAdvancedFile() async {
     final files = <XFile>[];
     if (advancedXlsxPath != null && File(advancedXlsxPath!).existsSync()) files.add(XFile(advancedXlsxPath!));
     if (reportTxtPath != null && File(reportTxtPath!).existsSync()) files.add(XFile(reportTxtPath!));
-    if (files.isNotEmpty) {
-      await Share.shareXFiles(files, text: 'تقرير إيصالات POS الشامل وتقرير المراجعة');
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')));
-    }
+    if (files.isNotEmpty) await Share.shareXFiles(files, text: 'التقرير الشامل للمراجعة');
+    else ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('التقرير الشامل غير متاح.')));
   }
 
   void assignTerminalsStage2(List<ReceiptItem> recs) {
@@ -492,16 +467,13 @@ class _HomePageState extends State<HomePage> {
     const prio = {"manual": 0, "terminal": 0, "fuzzy": 1, "file-number": 2};
     final taken = <String, ReceiptItem>{};
 
-    final withTid = recs.where((x) => x.tid != null).toList()
-      ..sort((a, b) => (prio[a.how] ?? 3).compareTo(prio[b.how] ?? 3));
+    final withTid = recs.where((x) => x.tid != null).toList()..sort((a, b) => (prio[a.how] ?? 3).compareTo(prio[b.how] ?? 3));
 
     for (final r in withTid) {
       final t = r.tid!;
-      if (!taken.containsKey(t)) {
-        taken[t] = r;
-      } else if (r.amount > 0 && (taken[t]!.amount - r.amount).abs() < 0.005) {
-        r.skip = true;
-      } else {
+      if (!taken.containsKey(t)) taken[t] = r;
+      else if (r.amount > 0 && (taken[t]!.amount - r.amount).abs() < 0.005) r.skip = true;
+      else {
         r.origTid = r.tid;
         r.tid = null;
         r.conflict = true;
@@ -511,9 +483,7 @@ class _HomePageState extends State<HomePage> {
     final usedSuffix = <String>{};
     void giveSuffix(ReceiptItem r, String targetTid) {
       var k = 2;
-      while (usedSuffix.contains('${targetTid}_$k')) {
-        k++;
-      }
+      while (usedSuffix.contains('${targetTid}_$k')) k++;
       usedSuffix.add('${targetTid}_$k');
       r.tid = targetTid;
       r.orderNum = terminals[targetTid]!.orderNum;
@@ -530,9 +500,7 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (r.how == "name/merchant") {
-        final primaryEntries = terminals.entries
-            .where((kv) => kv.value.excelRow == r.row)
-            .toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+        final primaryEntries = terminals.entries.where((kv) => kv.value.excelRow == r.row).toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
         if (primaryEntries.isNotEmpty) {
           final primaryTid = primaryEntries.first.key;
           if (!taken.containsKey(primaryTid)) {
@@ -547,10 +515,7 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
 
-      final freeEntries = terminals.entries
-          .where((kv) => kv.value.excelRow == r.row && !taken.containsKey(kv.key))
-          .toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
-
+      final freeEntries = terminals.entries.where((kv) => kv.value.excelRow == r.row && !taken.containsKey(kv.key)).toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
       if (freeEntries.isNotEmpty) {
         final chosenTid = freeEntries.first.key;
         r.tid = chosenTid;
@@ -560,12 +525,8 @@ class _HomePageState extends State<HomePage> {
       } else if (r.origTid != null) {
         giveSuffix(r, r.origTid!);
       } else {
-        final unitEntries = terminals.entries
-            .where((kv) => kv.value.excelRow == r.row)
-            .toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
-        if (unitEntries.isNotEmpty) {
-          giveSuffix(r, unitEntries.last.key);
-        }
+        final unitEntries = terminals.entries.where((kv) => kv.value.excelRow == r.row).toList()..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+        if (unitEntries.isNotEmpty) giveSuffix(r, unitEntries.last.key);
       }
     }
 
@@ -604,10 +565,7 @@ class _HomePageState extends State<HomePage> {
                   hint: const Text('اختر الماكينة (1..18)'),
                   items: [
                     for (var i = 1; i <= 18; i++)
-                      DropdownMenuItem(
-                        value: i,
-                        child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
-                      ),
+                      DropdownMenuItem(value: i, child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}')),
                   ],
                   onChanged: (v) => setDlgState(() => selectedOrder = v),
                 ),
@@ -620,7 +578,7 @@ class _HomePageState extends State<HomePage> {
               onPressed: () {
                 final newAmt = double.tryParse(amtController.text.replaceAll(',', '')) ?? item.amount;
                 setState(() {
-                  item.amount = double.parse(newAmt.toStringAsFixed(2));
+                  item.amount = round2(newAmt);
                   item.confirmed = true;
                   item.how = "manual";
                   item.skip = false;
@@ -633,12 +591,7 @@ class _HomePageState extends State<HomePage> {
                   }
                   if (item.key != null && item.row != null) {
                     final fixes = loadFixes();
-                    fixes[item.key!] = {
-                      "val": item.amount,
-                      "tid": item.tid,
-                      "row": item.row,
-                      "date": item.date,
-                    };
+                    fixes[item.key!] = {"val": item.amount, "tid": item.tid, "row": item.row, "date": item.date};
                     saveFixes(fixes);
                   }
                 });
@@ -646,7 +599,7 @@ class _HomePageState extends State<HomePage> {
                 assignTerminalsStage2(processedItems);
                 rebuildFiles();
               },
-              child: const Text('حفظ وتحديث الملفات'),
+              child: const Text('حفظ وتحديث'),
             ),
           ],
         ),
@@ -659,29 +612,20 @@ class _HomePageState extends State<HomePage> {
 
     final dateCounts = <String, int>{};
     for (final r in processedItems) {
-      if (!r.skip && r.date != null) {
-        dateCounts[r.date!] = (dateCounts[r.date!] ?? 0) + 1;
-      }
+      if (!r.skip && r.date != null) dateCounts[r.date!] = (dateCounts[r.date!] ?? 0) + 1;
     }
-    String reportDate = "today";
-    if (dateCounts.isNotEmpty) {
-      reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
-    }
+    String reportDate = dateCounts.isNotEmpty ? dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key : "today";
 
     for (var k = 0; k < processedItems.length; k++) {
       final r = processedItems[k];
       final ext = r.path.split('.').last.toLowerCase();
       String targetName;
-      if (r.skip) {
-        targetName = 'dup_${baseName(r.path)}';
-      } else if (r.orderNum != null) {
-        final sfx = r.suffix != null ? '_${r.suffix}' : '';
-        targetName = '${r.orderNum}$sfx.$ext';
-      } else {
-        continue;
-      }
+      if (r.skip) targetName = 'dup_${baseName(r.path)}';
+      else if (r.orderNum != null) targetName = '${r.orderNum}${r.suffix != null ? '_${r.suffix}' : ''}.$ext';
+      else continue;
+      
       r.newName = targetName;
-      final newPath = '$outputDir/$targetName';
+      final newPath = '$outputDir/$targetName'; // الحفظ المباشر في output
       if (r.path != newPath && File(r.path).existsSync()) {
         try {
           final fTmp = File(r.path).copySync(newPath);
@@ -702,12 +646,7 @@ class _HomePageState extends State<HomePage> {
       if (File(r.path).existsSync()) {
         try {
           final imgBytes = File(r.path).readAsBytesSync();
-          pdf.addPage(
-            pw.Page(
-              pageFormat: PdfPageFormat.a4,
-              build: (pw.Context ctx) => pw.Center(child: pw.Image(pw.MemoryImage(imgBytes), fit: pw.BoxFit.contain)),
-            ),
-          );
+          pdf.addPage(pw.Page(pageFormat: PdfPageFormat.a4, build: (pw.Context ctx) => pw.Center(child: pw.Image(pw.MemoryImage(imgBytes), fit: pw.BoxFit.contain))));
         } catch (_) {}
       }
     }
@@ -720,7 +659,7 @@ class _HomePageState extends State<HomePage> {
 
     for (final item in processedItems) {
       if (!item.skip && item.row != null && item.amount > 0) {
-        unitTotals[item.row!] = double.parse(((unitTotals[item.row!] ?? 0.0) + item.amount).toStringAsFixed(2));
+        unitTotals[item.row!] = round2((unitTotals[item.row!] ?? 0.0) + item.amount);
         unitCounts[item.row!] = (unitCounts[item.row!] ?? 0) + 1;
       }
     }
@@ -728,24 +667,19 @@ class _HomePageState extends State<HomePage> {
     File? tplFile;
     for (final d in [baseDir, rawImagesDir, outputDir]) {
       final exact = File('$d/الاسكندريه 00.xlsx');
-      if (exact.existsSync()) {
-        tplFile = exact;
-        break;
-      }
+      if (exact.existsSync()) { tplFile = exact; break; }
     }
 
     if (tplFile != null) {
+      // تعديل ملف الإكسيل بحرص شديد للحفاظ على التنسيق
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
-        final defaultSheet = excel.tables.keys.first;
-        final sheet = excel[defaultSheet];
+        final sheet = excel[excel.tables.keys.first];
 
         for (var r = 2; r <= 11; r++) {
           final tot = unitTotals[r] ?? 0.0;
           final cnt = unitCounts[r] ?? 0;
-
-          // تعديل الأعمدة C للعدد و D للمبلغ، وترك المعادلات تعمل في Excel
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
         }
@@ -760,17 +694,12 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    // 🎯 التأكيد على أن المنتزه يحتوي 3 إيصالات (أو يحذر بالنواقص)
-    final foundOrders = processedItems
-        .where((e) => !e.skip && e.orderNum != null && e.amount > 0)
-        .map((e) => e.orderNum!)
-        .toSet();
-    
+    final foundOrders = processedItems.where((e) => !e.skip && e.orderNum != null && e.amount > 0).map((e) => e.orderNum!).toSet();
     final montazahCount = processedItems.where((e) => !e.skip && e.row == 4 && e.amount > 0).length;
     
     missingTerminals.clear();
     for (var i = 1; i <= 18; i++) {
-        if (i == 8 || i == 9) continue;
+        if (i == 8 || i == 9) continue; // المنتزه لها معالجة خاصة أدناه
         if (!foundOrders.contains(i)) missingTerminals.add(i);
     }
     
@@ -782,8 +711,7 @@ class _HomePageState extends State<HomePage> {
 
     final grandSum = unitTotals.values.fold(0.0, (a, b) => a + b);
     setState(() => status = 'اكتمل بنجاح! الإجمالي العام: ${grandSum.toStringAsFixed(2)} ج.م\n'
-        '• التقرير الرسمي: الاسكندريه $reportDate.xlsx\n'
-        '• تم وضع الصور المعدلة في مجلد الإخراج.');
+        '• تم وضع الصور المعدلة في مجلد الإخراج (output).');
   }
 
   Future<void> runFullPipeline() async {
@@ -804,17 +732,12 @@ class _HomePageState extends State<HomePage> {
 
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
     if (dirs.isEmpty) {
-      setState(() {
-        busy = false;
-        status = 'تعذر العثور على مجلد الصور.';
-      });
+      setState(() { busy = false; status = 'تعذر العثور على مجلد الصور.'; });
       return;
     }
 
     final now = DateTime.now();
-    final cutoff = days < 0
-        ? DateTime(2000)
-        : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+    final cutoff = days < 0 ? DateTime(2000) : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final todo = <File>[];
 
     for (final d in dirs) {
@@ -823,9 +746,7 @@ class _HomePageState extends State<HomePage> {
           final fn = baseName(e.path);
           if (fn.startsWith('.') || fn.startsWith('dup_')) continue;
           final lower = fn.toLowerCase();
-          if (!(lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.webp'))) {
-            continue;
-          }
+          if (!(lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.webp'))) continue;
           if (customDir == null && fileDate(e).isBefore(cutoff)) continue;
           todo.add(e);
         }
@@ -833,10 +754,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (todo.isEmpty) {
-      setState(() {
-        busy = false;
-        status = 'لا توجد صور في الفترة المحددة.';
-      });
+      setState(() { busy = false; status = 'لا توجد صور في الفترة المحددة.'; });
       return;
     }
 
@@ -844,33 +762,22 @@ class _HomePageState extends State<HomePage> {
     final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
     Directory(rawImagesDir).createSync(recursive: true);
     Directory(outputDir).createSync(recursive: true);
-
     final rawReceipts = <ReceiptItem>[];
 
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
         final key = fileKey(f.path);
-
         if (fixes.containsKey(key)) {
           final fx = Map<String, dynamic>.from(fixes[key] as Map);
           final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
           final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
           final tid = fx['tid'] as String?;
-          final row = fx['row'] as int?;
           rawReceipts.add(ReceiptItem(
-            fn: baseName(localFile.path),
-            path: localFile.path,
-            key: key,
-            tid: tid,
-            origTid: tid,
-            orderNum: tid != null ? terminals[tid]?.orderNum : null,
-            row: row,
-            unitName: row != null ? rowNames[row] : null,
-            amount: (fx['val'] as num).toDouble(),
-            confirmed: true,
-            how: "manual",
-            date: fx['date'] as String?,
+            fn: baseName(localFile.path), path: localFile.path, key: key, tid: tid, origTid: tid,
+            orderNum: tid != null ? terminals[tid]?.orderNum : null, row: fx['row'] as int?,
+            unitName: fx['row'] != null ? rowNames[fx['row']] : null, amount: (fx['val'] as num).toDouble(),
+            confirmed: true, how: "manual", date: fx['date'] as String?,
           ));
           continue;
         }
@@ -881,12 +788,9 @@ class _HomePageState extends State<HomePage> {
         if (sc >= 2 || customDir == rawImagesDir) {
           final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
           final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
-          final fn = baseName(localFile.path);
-          final nameOnly = fn.contains('.') ? fn.substring(0, fn.lastIndexOf('.')) : fn;
+          final nameOnly = baseName(localFile.path).split('.').first;
 
-          final amt = extractReceiptAmountPythonStyle(res.text);
-          final bNos = findBatchNos(res.text);
-
+          final decision = extractReceiptAmountPythonStyle(res.text);
           var tid = findTerminal(res.text);
           var how = tid != null ? "terminal" : "none";
           int? row;
@@ -900,10 +804,9 @@ class _HomePageState extends State<HomePage> {
           }
 
           if (tid != null && terminals.containsKey(tid)) {
-            final info = terminals[tid]!;
-            order = info.orderNum;
-            row = info.excelRow;
-            uName = info.unitName;
+            order = terminals[tid]!.orderNum;
+            row = terminals[tid]!.excelRow;
+            uName = terminals[tid]!.unitName;
           } else if (extraRow != null) {
             row = extraRow;
             uName = rowNames[extraRow];
@@ -923,19 +826,9 @@ class _HomePageState extends State<HomePage> {
           }
 
           rawReceipts.add(ReceiptItem(
-            fn: fn,
-            path: localFile.path,
-            key: key,
-            tid: tid,
-            origTid: tid,
-            orderNum: order,
-            row: row,
-            unitName: uName,
-            amount: amt,
-            confirmed: amt > 0,
-            how: how,
-            date: findDate(res.text),
-            batchNo: bNos.isNotEmpty ? bNos.join(',') : null,
+            fn: baseName(localFile.path), path: localFile.path, key: key, tid: tid, origTid: tid,
+            orderNum: order, row: row, unitName: uName, amount: decision.amount,
+            confirmed: decision.confirmed, how: how, date: findDate(res.text),
           ));
         }
       } catch (_) {}
@@ -950,23 +843,16 @@ class _HomePageState extends State<HomePage> {
     await recognizer.close();
 
     if (rawReceipts.isEmpty) {
-      setState(() {
-        busy = false;
-        status = 'لم يتم العثور على إيصالات مطابقة.';
-      });
+      setState(() { busy = false; status = 'لم يتم العثور على إيصالات مطابقة.'; });
       return;
     }
 
     assignTerminalsStage2(rawReceipts);
-
     processedItems.addAll(rawReceipts);
     await rebuildFiles();
 
     if (!mounted) return;
-    setState(() {
-      busy = false;
-      progress = 1.0;
-    });
+    setState(() { busy = false; progress = 1.0; });
   }
 
   @override
@@ -974,13 +860,7 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('إيصالات POS (نسخة مطابقة للبايثون)'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.share),
-            tooltip: 'مشاركة الملفات الرسمية',
-            onPressed: busy ? null : shareStandardFiles,
-          ),
-        ],
+        actions: [IconButton(icon: const Icon(Icons.share), onPressed: busy ? null : shareStandardFiles)],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -989,86 +869,39 @@ class _HomePageState extends State<HomePage> {
           children: [
             Wrap(
               spacing: 8,
-              children: [
-                for (final o in const [
-                  [0, 'اليوم'],
-                  [1, 'أمس واليوم'],
-                  [3, '3 أيام'],
-                  [7, 'أسبوع'],
-                  [-1, 'الكل'],
-                ])
-                  ChoiceChip(
-                    label: Text(o[1] as String),
-                    selected: days == o[0],
-                    onSelected: busy ? null : (_) => setState(() => days = o[0] as int),
-                  ),
-              ],
+              children: [for (final o in const [[0, 'اليوم'], [1, 'أمس واليوم'], [3, '3 أيام'], [7, 'أسبوع'], [-1, 'الكل']])
+                ChoiceChip(label: Text(o[1] as String), selected: days == o[0], onSelected: busy ? null : (_) => setState(() => days = o[0] as int))],
             ),
             const SizedBox(height: 8),
             Text('المصدر: ${customDir ?? 'واتساب (تلقائي)'}', textDirection: TextDirection.ltr),
             Row(
               children: [
-                TextButton.icon(
-                  onPressed: busy ? null : pickFolder,
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('اختيار فولدر'),
-                ),
-                if (customDir != null)
-                  TextButton(
-                    onPressed: busy ? null : useWhatsApp,
-                    child: const Text('رجوع للواتساب'),
-                  ),
+                TextButton.icon(onPressed: busy ? null : pickFolder, icon: const Icon(Icons.folder_open), label: const Text('اختيار فولدر')),
+                if (customDir != null) TextButton(onPressed: busy ? null : useWhatsApp, child: const Text('رجوع للواتساب')),
               ],
             ),
             const SizedBox(height: 4),
             Row(
               children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: busy ? null : runFullPipeline,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('بدء المعالجة الشاملة'),
-                  ),
-                ),
+                Expanded(child: FilledButton.icon(onPressed: busy ? null : runFullPipeline, icon: const Icon(Icons.play_arrow), label: const Text('بدء المعالجة الشاملة'))),
                 const SizedBox(width: 8),
-                IconButton.filledTonal(
-                  onPressed: busy ? null : shareStandardFiles,
-                  icon: const Icon(Icons.share),
-                  tooltip: 'مشاركة التقرير الرسمي والـ PDF',
-                ),
+                IconButton.filledTonal(onPressed: busy ? null : shareStandardFiles, icon: const Icon(Icons.share)),
               ],
             ),
-            if (busy) ...[
-              const SizedBox(height: 8),
-              LinearProgressIndicator(value: progress > 0 ? progress : null),
-            ],
+            if (busy) ...[const SizedBox(height: 8), LinearProgressIndicator(value: progress > 0 ? progress : null)],
             const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
-              child: Text(status),
-            ),
+            Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(8)), child: Text(status)),
             if (missingTerminals.isNotEmpty) ...[
               const SizedBox(height: 8),
               Container(
                 padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.amber.shade100,
-                  border: Border.all(color: Colors.amber.shade800),
-                  borderRadius: BorderRadius.circular(8),
-                ),
+                decoration: BoxDecoration(color: Colors.amber.shade100, border: Border.all(color: Colors.amber.shade800), borderRadius: BorderRadius.circular(8)),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '⚠️ ماكينات ناقصة (${missingTerminals.length} من 19):',
-                      style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900),
-                    ),
+                    Text('⚠️ ماكينات ناقصة (${missingTerminals.length}):', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900)),
                     const SizedBox(height: 4),
-                    Text(
-                      missingTerminals.map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})').join(' ، '),
-                      style: const TextStyle(fontSize: 13),
-                    ),
+                    Text(missingTerminals.map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})').join(' ، '), style: const TextStyle(fontSize: 13)),
                   ],
                 ),
               ),
@@ -1084,24 +917,10 @@ class _HomePageState extends State<HomePage> {
                     color: item.skip ? Colors.red.shade50 : (needsReview ? Colors.orange.shade50 : null),
                     margin: const EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
-                      leading: Image.file(
-                        File(item.path),
-                        width: 48,
-                        height: 48,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const Icon(Icons.receipt_long),
-                      ),
-                      title: Text(
-                        item.skip ? 'مكرر (مستبعد) - ماكينة ${item.displayOrder}' : 'ماكينة ${item.displayOrder} - ${item.unitName ?? 'وحدة غير معروفة'}',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Text(
-                        'TID: ${item.tid ?? 'غير محدد'} (${item.how})\nالمبلغ: ${item.amount.toStringAsFixed(2)} ج.م',
-                      ),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.edit, color: Colors.teal),
-                        onPressed: () => editReceiptDialog(item),
-                      ),
+                      leading: Image.file(File(item.path), width: 48, height: 48, fit: BoxFit.cover, errorBuilder: (_, __, ___) => const Icon(Icons.receipt_long)),
+                      title: Text(item.skip ? 'مكرر (مستبعد) - ماكينة ${item.displayOrder}' : 'ماكينة ${item.displayOrder} - ${item.unitName ?? 'وحدة غير معروفة'}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text('TID: ${item.tid ?? 'غير محدد'} (${item.how})\nالمبلغ: ${item.amount.toStringAsFixed(2)} ج.م'),
+                      trailing: IconButton(icon: const Icon(Icons.edit, color: Colors.teal), onPressed: () => editReceiptDialog(item)),
                     ),
                   );
                 },
@@ -1117,45 +936,22 @@ class _HomePageState extends State<HomePage> {
 class FolderPicker extends StatefulWidget {
   final String start;
   const FolderPicker({super.key, required this.start});
-
-  @override
-  State<FolderPicker> createState() => _FolderPickerState();
+  @override State<FolderPicker> createState() => _FolderPickerState();
 }
-
 class _FolderPickerState extends State<FolderPicker> {
   late String path = widget.start;
   List<Directory> dirs = [];
   String? error;
-
-  @override
-  void initState() {
-    super.initState();
-    load();
-  }
-
+  @override void initState() { super.initState(); load(); }
   void load() {
     try {
-      final l = Directory(path)
-          .listSync()
-          .whereType<Directory>()
-          .where((d) => !baseName(d.path).startsWith('.'))
-          .toList();
+      final l = Directory(path).listSync().whereType<Directory>().where((d) => !baseName(d.path).startsWith('.')).toList();
       l.sort((a, b) => baseName(a.path).toLowerCase().compareTo(baseName(b.path).toLowerCase()));
-      dirs = l;
-      error = null;
-    } catch (_) {
-      dirs = [];
-      error = 'مش قادر أفتح الفولدر ده.';
-    }
+      dirs = l; error = null;
+    } catch (_) { dirs = []; error = 'مش قادر أفتح الفولدر ده.'; }
   }
-
-  void go(String p) => setState(() {
-        path = p;
-        load();
-      });
-
-  @override
-  Widget build(BuildContext context) {
+  void go(String p) => setState(() { path = p; load(); });
+  @override Widget build(BuildContext context) {
     final canUp = path.length > root.length;
     return Scaffold(
       appBar: AppBar(title: const Text('اختيار فولدر')),
@@ -1164,31 +960,8 @@ class _FolderPickerState extends State<FolderPicker> {
           children: [
             Padding(padding: const EdgeInsets.all(12), child: Text(path, textDirection: TextDirection.ltr)),
             if (error != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text(error!)),
-            Expanded(
-              child: ListView(
-                children: [
-                  if (canUp)
-                    ListTile(
-                      leading: const Icon(Icons.arrow_upward),
-                      title: const Text('..'),
-                      onTap: () => go(Directory(path).parent.path),
-                    ),
-                  for (final d in dirs)
-                    ListTile(
-                      leading: const Icon(Icons.folder),
-                      title: Text(baseName(d.path), textDirection: TextDirection.ltr),
-                      onTap: () => go(d.path),
-                    ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: FilledButton(
-                onPressed: () => Navigator.pop(context, path),
-                child: const Text('اختيار هذا الفولدر'),
-              ),
-            ),
+            Expanded(child: ListView(children: [if (canUp) ListTile(leading: const Icon(Icons.arrow_upward), title: const Text('..'), onTap: () => go(Directory(path).parent.path)), for (final d in dirs) ListTile(leading: const Icon(Icons.folder), title: Text(baseName(d.path), textDirection: TextDirection.ltr), onTap: () => go(d.path))])),
+            Padding(padding: const EdgeInsets.all(12), child: FilledButton(onPressed: () => Navigator.pop(context, path), child: const Text('اختيار هذا الفولدر'))),
           ],
         ),
       ),
