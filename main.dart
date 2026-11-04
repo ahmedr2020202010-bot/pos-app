@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
 
-import 'package:excel/excel.dart' as xl;
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -740,6 +740,163 @@ Future<bool> fixImageAsync(String src, String dst, int deg) =>
 Future<void> enhanceImageAsync(String src, String dst) =>
     Isolate.run(() => _enhanceImage(src, dst));
 
+
+// ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
+Future<List<int>?> loadTemplateBytes() async {
+  try {
+    final exact = File('$baseDir/الاسكندريه 00.xlsx');
+    if (exact.existsSync()) return exact.readAsBytesSync();
+    final d = Directory(baseDir);
+    if (d.existsSync()) {
+      for (final e in d.listSync().whereType<File>()) {
+        final n = baseName(e.path);
+        if (n.toLowerCase().endsWith('.xlsx') &&
+            n.contains('00') &&
+            !n.startsWith('~') &&
+            !n.startsWith('.')) {
+          return e.readAsBytesSync();
+        }
+      }
+    }
+  } catch (_) {}
+  try {
+    final data = await rootBundle.load('assets/template.xlsx');
+    return data.buffer.asUint8List();
+  } catch (_) {}
+  return null;
+}
+
+String _firstSheetPath(Archive arc) {
+  String? text(String n) {
+    for (final f in arc.files) {
+      if (f.name == n) return utf8.decode(f.content as List<int>, allowMalformed: true);
+    }
+    return null;
+  }
+
+  final wb = text('xl/workbook.xml');
+  final rels = text('xl/_rels/workbook.xml.rels');
+  if (wb != null && rels != null) {
+    final sm = RegExp(r'<sheet\b[^>]*?r:id="([^"]+)"').firstMatch(wb);
+    if (sm != null) {
+      for (final m in RegExp(r'<Relationship\b[^>]*>').allMatches(rels)) {
+        final tag = m.group(0)!;
+        if (tag.contains('Id="${sm.group(1)}"')) {
+          final t = RegExp(r'Target="([^"]+)"').firstMatch(tag)?.group(1);
+          if (t != null) return t.startsWith('/') ? t.substring(1) : 'xl/$t';
+        }
+      }
+    }
+  }
+  return 'xl/worksheets/sheet1.xml';
+}
+
+final RegExp _cellRe = RegExp(r'<c\b[^>]*?/>|<c\b[^>]*?>.*?</c>', dotAll: true);
+
+int _colNum(String c) {
+  var n = 0;
+  for (final ch in c.codeUnits) {
+    n = n * 26 + (ch - 64);
+  }
+  return n;
+}
+
+RegExpMatch? _findRow(String xml, int row) => RegExp(
+        '<row\\b[^>]*\\br="$row"[^>]*?(?:/>|>.*?</row>)',
+        dotAll: true)
+    .firstMatch(xml);
+
+double _readNum(String xml, String col, int row) {
+  final rm = _findRow(xml, row);
+  if (rm == null) return 0.0;
+  for (final m in _cellRe.allMatches(rm.group(0)!)) {
+    final cell = m.group(0)!;
+    final open = RegExp(r'<c\b[^>]*?>').firstMatch(cell)!.group(0)!;
+    final r = RegExp(r'\br="([A-Z]+)\d+"').firstMatch(open);
+    if (r == null || r.group(1) != col) continue;
+    final t = RegExp(r'\bt="([^"]+)"').firstMatch(open)?.group(1);
+    if (t != null && t != 'n') return 0.0;
+    final v = RegExp(r'<v>([^<]*)</v>').firstMatch(cell)?.group(1);
+    return double.tryParse(v ?? '') ?? 0.0;
+  }
+  return 0.0;
+}
+
+// بيكتب خلية واحدة محافظ على الـ style بتاعها. build(style, oldFormulaElement) -> xml الخلية
+String _setCell(String xml, String col, int row,
+    String Function(String ref, String? style, String? formula) build) {
+  final rm = _findRow(xml, row);
+  if (rm == null) throw Exception('row $row missing');
+  var rowXml = rm.group(0)!;
+  final ref = '$col$row';
+  final target = _colNum(col);
+  RegExpMatch? existing, before;
+  for (final m in _cellRe.allMatches(rowXml)) {
+    final cell = m.group(0)!;
+    final open = RegExp(r'<c\b[^>]*?>').firstMatch(cell)!.group(0)!;
+    final r = RegExp(r'\br="([A-Z]+)\d+"').firstMatch(open);
+    if (r == null) continue;
+    final cn = _colNum(r.group(1)!);
+    if (cn == target) {
+      existing = m;
+      break;
+    }
+    if (cn > target && before == null) before = m;
+  }
+  String? style, formula;
+  if (existing != null) {
+    final cell = existing.group(0)!;
+    final open = RegExp(r'<c\b[^>]*?>').firstMatch(cell)!.group(0)!;
+    style = RegExp(r'\bs="(\d+)"').firstMatch(open)?.group(1);
+    formula = RegExp(r'<f\b[^>]*?(?:/>|>.*?</f>)', dotAll: true).firstMatch(cell)?.group(0);
+  }
+  final newCell = build(ref, style, formula);
+  if (existing != null) {
+    rowXml = rowXml.replaceRange(existing.start, existing.end, newCell);
+  } else if (before != null) {
+    rowXml = rowXml.replaceRange(before.start, before.start, newCell);
+  } else if (rowXml.endsWith('/>')) {
+    rowXml = '${rowXml.substring(0, rowXml.length - 2)}>$newCell</row>';
+  } else {
+    final i = rowXml.lastIndexOf('</row>');
+    rowXml = rowXml.replaceRange(i, i, newCell);
+  }
+  return xml.replaceRange(rm.start, rm.end, rowXml);
+}
+
+List<int> fillTemplate(List<int> bytes, Map<int, double> totals) {
+  final arc = ZipDecoder().decodeBytes(bytes);
+  final sheetPath = _firstSheetPath(arc);
+  final out = Archive();
+  var found = false;
+  for (final f in arc.files) {
+    if (!f.isFile) continue;
+    final c = f.content as List<int>;
+    if (f.name == sheetPath) {
+      found = true;
+      var xml = utf8.decode(c, allowMalformed: true);
+      for (var r = 2; r <= 11; r++) {
+        final tot = round2(totals[r] ?? 0.0);
+        xml = _setCell(xml, 'D', r, (ref, st, f0) =>
+            '<c r="$ref"${st != null ? ' s="$st"' : ''}><v>$tot</v></c>');
+        final cash = _readNum(xml, 'E', r);
+        final total = round2(tot + cash);
+        xml = _setCell(xml, 'F', r, (ref, st, f0) =>
+            '<c r="$ref"${st != null ? ' s="$st"' : ''}>'
+            '${f0 ?? '<f>D$r+IF(ISBLANK(E$r),0,E$r)</f>'}<v>$total</v></c>');
+      }
+      final b = utf8.encode(xml);
+      out.addFile(ArchiveFile(f.name, b.length, b));
+    } else {
+      out.addFile(ArchiveFile(f.name, c.length, c));
+    }
+  }
+  if (!found) throw Exception('sheet not found: $sheetPath');
+  final enc = ZipEncoder().encode(out);
+  if (enc == null) throw Exception('zip encode failed');
+  return enc;
+}
+
 // ───────────────── قنوات النظام (واتساب مباشر / فتح فولدر) ─────────────────
 const MethodChannel _chan = MethodChannel('pos/native');
 
@@ -870,7 +1027,6 @@ class _HomePageState extends State<HomePage> {
   String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
   final List<ReceiptItem> processedItems = [];
   String? standardXlsxPath;
-  String? advancedXlsxPath;
   String? generatedPdfPath;
   List<int> missingTerminals = [];
   final List<String> warnings = [];
@@ -1019,14 +1175,14 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> shareAdvancedFile() async {
     final files = <XFile>[];
-    for (final p in [advancedXlsxPath, '$outputDir/review_report.txt', '$outputDir/ocr_debug.txt']) {
-      if (p != null && File(p).existsSync()) files.add(XFile(p));
+    for (final p in ['$outputDir/review_report.txt', '$outputDir/ocr_debug.txt']) {
+      if (File(p).existsSync()) files.add(XFile(p));
     }
     if (files.isNotEmpty) {
-      await Share.shareXFiles(files, text: 'التقرير الشامل + تقرير المراجعة + ملف الـ OCR');
+      await Share.shareXFiles(files, text: 'تقرير المراجعة + ملف الـ OCR');
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')),
+        const SnackBar(content: Text('ملفات المراجعة غير متاحة حالياً.')),
       );
     }
   }
@@ -1145,124 +1301,22 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
-    if (tplFile.existsSync()) {
-      // 2. الملف الأصلي: مطابق تماماً لتمبلت الاسكندريه 00.xlsx دون إضافة أو مساس بأي شيء آخر
+    // الإكسيل: نفس القالب بالظبط، بنكتب بس عمود D (مبلغ كل وحدة) و F (الإجمالي)
+    var xlsxLine = '• تم توليد الإكسيل: الاسكندريه $reportDate.xlsx';
+    standardXlsxPath = null;
+    final tpl = await loadTemplateBytes();
+    if (tpl == null) {
+      xlsxLine = '⚠️ قالب "الاسكندريه 00.xlsx" مش موجود في فولدر all (ولا مضاف للتطبيق)، فمتعملش إكسيل.';
+    } else {
       try {
-        final bytes = tplFile.readAsBytesSync();
-        final excel = xl.Excel.decodeBytes(bytes);
-        final defaultSheet = excel.tables.keys.first;
-        final sheet = excel[defaultSheet];
-
-        for (var r = 2; r <= 11; r++) {
-          final tot = round2(unitTotals[r] ?? 0.0);
-          final cellD = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
-          cellD.value = xl.DoubleCellValue(tot);
-
-          final cellE = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
-          final ev = cellE.value;
-          double cashVal = 0.0;
-          if (ev is xl.DoubleCellValue) {
-            cashVal = ev.value;
-          } else if (ev is xl.IntCellValue) {
-            cashVal = ev.value.toDouble();
-          }
-          cashVal = round2(cashVal);
-
-          final cellF = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
-          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
-        }
-
-        final excelOutBytes = excel.encode();
-        if (excelOutBytes != null) {
-          final stdFile = File('$outputDir/الاسكندريه $reportDate.xlsx');
-          stdFile.createSync(recursive: true);
-          stdFile.writeAsBytesSync(excelOutBytes);
-          standardXlsxPath = stdFile.path;
-        }
-      } catch (_) {}
-
-      // 3. التقرير الشامل المنفصل
-      try {
-        final bytesAdv = tplFile.readAsBytesSync();
-        final excelAdv = xl.Excel.decodeBytes(bytesAdv);
-        final defaultSheet = excelAdv.tables.keys.first;
-        final sheetAdv = excelAdv[defaultSheet];
-
-        double grandPos = 0.0;
-        double grandCash = 0.0;
-
-        for (var r = 2; r <= 11; r++) {
-          final tot = round2(unitTotals[r] ?? 0.0);
-          grandPos += tot;
-
-          final cellD = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
-          cellD.value = xl.DoubleCellValue(tot);
-
-          final cellE = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
-          final ev = cellE.value;
-          double cashVal = 0.0;
-          if (ev is xl.DoubleCellValue) {
-            cashVal = ev.value;
-          } else if (ev is xl.IntCellValue) {
-            cashVal = ev.value.toDouble();
-          }
-          cashVal = round2(cashVal);
-          grandCash += cashVal;
-
-          final cellF = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
-          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
-        }
-
-        const rowTotalIndex = 11;
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value =
-            xl.TextCellValue('الإجمالي العام');
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value =
-            xl.IntCellValue(19);
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandPos));
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandCash));
-        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandPos + grandCash));
-
-        final detailSheet = excelAdv['تفاصيل الماكينات'];
-        final headers = ['رقم الترتيب', 'اسم الوحدة', 'TID الماكينة', 'المبلغ (ج.م)', 'حالة الإيصال'];
-        for (var c = 0; c < headers.length; c++) {
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).value =
-              xl.TextCellValue(headers[c]);
-        }
-
-        for (var i = 1; i <= 19; i++) {
-          final currentTid = numToTid[i]!;
-          final info = terminals[currentTid]!;
-          final matched = processedItems.where((e) => e.orderNum == i).toList();
-
-          double amt = 0.0;
-          for (final m in matched) {
-            amt += m.amount;
-          }
-
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: i)).value =
-              xl.IntCellValue(i);
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: i)).value =
-              xl.TextCellValue(info.unitName);
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: i)).value =
-              xl.TextCellValue(currentTid);
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: i)).value =
-              xl.DoubleCellValue(round2(amt));
-          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: i)).value =
-              xl.TextCellValue(matched.isEmpty ? '⚠️ غير وارد (مفقود)' : (matched.any((m) => !m.ok || m.amount <= 0) ? '⚠️ يحتاج مراجعة' : 'تم الفحص بنجاح'));
-        }
-
-        final advBytes = excelAdv.encode();
-        if (advBytes != null) {
-          final advFile = File('$outputDir/تقرير_شامل_POS_$reportDate.xlsx');
-          advFile.createSync(recursive: true);
-          advFile.writeAsBytesSync(advBytes);
-          advancedXlsxPath = advFile.path;
-        }
-      } catch (_) {}
+        final outBytes = fillTemplate(tpl, unitTotals);
+        final stdFile = File('$outputDir/الاسكندريه $reportDate.xlsx');
+        stdFile.createSync(recursive: true);
+        stdFile.writeAsBytesSync(outBytes);
+        standardXlsxPath = stdFile.path;
+      } catch (e) {
+        xlsxLine = '⚠️ فشل ملء القالب: $e';
+      }
     }
 
     final ignore = <int>{};
@@ -1279,9 +1333,8 @@ class _HomePageState extends State<HomePage> {
     ];
     writeReport(reportDate);
 
-    setState(() => status = 'اكتمل بنجاح!\n'
-        '• تم توليد التقرير الأصلي: الاسكندريه $reportDate.xlsx\n'
-        '• تم توليد التقرير الشامل: تقرير_شامل_POS_$reportDate.xlsx\n'
+    setState(() => status = 'اكتمل!\n'
+        '$xlsxLine\n'
         '• تم توليد ملف الـ PDF المجمع.' +
         (sourceNote.isEmpty ? '' : '\n$sourceNote'));
   }
@@ -1799,7 +1852,7 @@ class _HomePageState extends State<HomePage> {
                 IconButton.filledTonal(
                   onPressed: busy ? null : shareAdvancedFile,
                   icon: const Icon(Icons.table_chart),
-                  tooltip: 'مشاركة التقرير الشامل المفصل',
+                  tooltip: 'مشاركة ملفات المراجعة',
                 ),
               ],
             ),
