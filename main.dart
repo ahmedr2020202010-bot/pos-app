@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:excel/excel.dart' as xl;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
 import 'package:pdf/pdf.dart';
@@ -42,17 +44,17 @@ final Map<String, TerminalInfo> terminals = {
   "50335710": const TerminalInfo(1, 2, "أبيس"),
   "50335993": const TerminalInfo(2, 2, "أبيس"),
   "50335987": const TerminalInfo(3, 2, "أبيس"),
-  "50325716": const TerminalInfo(4, 3, "برج العرب"),
-  "50335998": const TerminalInfo(5, 3, "برج العرب"),
-  "50335994": const TerminalInfo(6, 3, "برج العرب"),
-  "50335711": const TerminalInfo(7, 3, "برج العرب"),
-  "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"),
-  "50383712": const TerminalInfo(10, 4, "المنتزه"),
-  "50382306": const TerminalInfo(11, 5, "محرم بك"),
-  "50382316": const TerminalInfo(12, 5, "محرم بك"),
-  "50382308": const TerminalInfo(13, 6, "العجمي"),
-  "50383706": const TerminalInfo(14, 6, "العجمي"),
+  "50325716": const TerminalInfo(4, 3, "برج العرب"), // برج العرب 1
+  "50335998": const TerminalInfo(5, 3, "برج العرب"), // برج العرب 2
+  "50335994": const TerminalInfo(6, 3, "برج العرب"), // برج العرب 3
+  "50335711": const TerminalInfo(7, 3, "برج العرب"), // برج العرب 4
+  "50382298": const TerminalInfo(8, 4, "المنتزه"), // المنتزه 1
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // المنتزه 2
+  "50383712": const TerminalInfo(10, 4, "المنتزه"), // المنتزه 3
+  "50382306": const TerminalInfo(11, 5, "محرم بك"), // محرم بك 1
+  "50382316": const TerminalInfo(12, 5, "محرم بك"), // محرم بك 2
+  "50382308": const TerminalInfo(13, 6, "العجمي"), // العجمي 1
+  "50383706": const TerminalInfo(14, 6, "العجمي"), // العجمي 2
   "50382300": const TerminalInfo(15, 7, "القباري"),
   "50383702": const TerminalInfo(16, 8, "مصطفى كامل"),
   "50382312": const TerminalInfo(17, 9, "مديرية الأمن"),
@@ -80,6 +82,7 @@ final Map<String, String> tidFix = {
   "60382308": "50382308",
 };
 
+// (فاضي) المنتزه 3 = 50383712 ماكينة مستقلة
 final Map<String, String> tidAlias = {};
 
 final Map<String, int> merchantCodeMap = {
@@ -106,7 +109,7 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "خدمات مصر",
 };
 
-// ───────────────────── خوارزميات الاستخراج ─────────────────────
+// ───────────────────── خوارزميات الاستخراج (منقولة من نسخة البايثون) ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -122,6 +125,7 @@ final List<RegExp> _markers = [
 
 int receiptScore(String text) => _markers.where((r) => r.hasMatch(text)).length;
 
+// سطر نص مع مكانه في الصورة
 class OcrLine {
   final String text;
   final double left, right, top, bottom;
@@ -143,6 +147,7 @@ List<OcrLine> toLines(RecognizedText res) {
   return out;
 }
 
+// يرتب النص صفوف (الاسم يمين والرقم جنبه في نفس السطر) زي Tesseract بالظبط
 String rowsText(List<OcrLine> lines) {
   final ls = [...lines]..sort((a, b) => a.cy.compareTo(b.cy));
   final rows = <List<OcrLine>>[];
@@ -168,6 +173,7 @@ String rowsText(List<OcrLine> lines) {
 
 String readingText(List<OcrLine> lines) => lines.map((e) => e.text).join('\n');
 
+// صورة فيها أكتر من إيصال جنب بعض -> نقسمها لأعمدة
 List<List<OcrLine>> splitColumns(List<OcrLine> lines) {
   if (lines.length < 8) return [lines];
   final minL = lines.map((e) => e.left).reduce(math.min);
@@ -201,6 +207,7 @@ List<List<OcrLine>> splitColumns(List<OcrLine> lines) {
   return [lines];
 }
 
+// ───────────── المبالغ ─────────────
 final RegExp _amountRe =
     RegExp(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)");
 final RegExp _brandRe = RegExp(
@@ -266,16 +273,6 @@ Parsed parseReceipt(String txt) {
     if (mc != null) bvals.add(mc.key);
   }
   final grand = amountsIn(post);
-  
-  // قراءة بديلة متساهلة للأرقام كحل بديل (الميزة 1)
-  if (bvals.isEmpty && grand.isEmpty) {
-    final fallback = RegExp(r"(\d{3,6})[.,]\d{2}").allMatches(txt);
-    for(final m in fallback) {
-      final v = double.tryParse(m.group(0)!.replaceAll(',', '.'));
-      if (v != null && v > 10) grand.add(v);
-    }
-  }
-  
   final bsum = bvals.isNotEmpty ? round2(bvals.reduce((a, b) => a + b)) : null;
   return Parsed(grand, bsum, bvals);
 }
@@ -287,12 +284,14 @@ class Decision {
 }
 
 Decision decide(List<Parsed> results) {
+  // 1) تطابق تام بين مجموع الكروت و GRAND TOTALS
   for (final r in results) {
     final b = r.bsum;
     if (b != null && b > 0 && r.grand.any((g) => (g - b).abs() < 0.005)) {
       return Decision(b, true);
     }
   }
+  // 2) فرق رقم واحد
   for (final r in results) {
     final b = r.bsum;
     if (b != null && b > 0 && r.bvals.length >= 2) {
@@ -308,10 +307,12 @@ Decision decide(List<Parsed> results) {
       }
     }
   }
+  // 3) إجمالي مكرر
   for (final r in results) {
     final c = mostCommon(r.grand);
     if (c != null && c.value >= 2 && r.bsum == null) return Decision(c.key, false);
   }
+  // 4) تصويت
   final pool = <double>[];
   for (final r in results) {
     pool.addAll(r.grand);
@@ -347,6 +348,7 @@ String? batchNo(List<String> texts) {
   return mostCommon(all)?.key;
 }
 
+// ───────────── الماكينة / الوحدة / التاريخ ─────────────
 String? _tidLabeled(String t) {
   final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)",
           caseSensitive: false)
@@ -464,6 +466,7 @@ class Analysis {
       this.batches, this.date);
 }
 
+// تحليل صورة كاملة (ممكن فيها أكتر من إيصال)
 Analysis analyzeLines(List<OcrLine> all) {
   final pieces = splitColumns(all);
   final multi = pieces.length > 1;
@@ -485,7 +488,7 @@ Analysis analyzeLines(List<OcrLine> all) {
     }
     final b = batchNo(r.texts);
     final key = '$b|${r.val}';
-    if (b != null && seen.contains(key)) continue; 
+    if (b != null && seen.contains(key)) continue; // نفس الباتش اتصور مرتين
     seen.add(key);
     batches.add(r.val);
     allOk = allOk && r.ok;
@@ -493,6 +496,7 @@ Analysis analyzeLines(List<OcrLine> all) {
   var total = round2(batches.fold(0.0, (a, b) => a + b));
   var ok = allOk && batches.isNotEmpty;
 
+  // شبكة أمان: لو التقسيم مش مؤكد جرّب الصورة كلها
   if (multi && !ok) {
     final r = ocrPiece(all);
     allTexts.addAll(r.texts);
@@ -536,11 +540,65 @@ Analysis analyzeLines(List<OcrLine> all) {
 
 double round2(double val) => double.parse(val.toStringAsFixed(2));
 
+// دمج القراءة التانية (الصورة المحسّنة) في القراءة الأولى.
+// بترجع قيمة المبلغ التانية لو متعارضة مع الأولى (علشان تتراجع)، وإلا null.
+double? mergeSecondRead(Analysis a, Analysis b) {
+  if (a.tid == null && b.tid != null) {
+    a.tid = b.tid;
+    a.row = b.row;
+    a.unitName = b.unitName;
+    a.how = b.how;
+  } else if (a.row == null && b.row != null) {
+    a.row = b.row;
+    a.unitName = b.unitName;
+    a.how = b.how;
+  }
+  a.date ??= b.date;
+  if (b.val <= 0) return null;
+  if (a.val <= 0) {
+    a.val = b.val;
+    a.ok = b.ok;
+    a.batches = [...b.batches];
+    return null;
+  }
+  if ((a.val - b.val).abs() < 0.005) return null; // القراءتين متطابقتين
+  if (!a.ok && b.ok) {
+    // الأولى مش مؤكدة والتانية مؤكدة بمجموع الكروت -> نعتمد التانية
+    a.val = b.val;
+    a.ok = true;
+    a.batches = [...b.batches];
+    return null;
+  }
+  if (a.ok && !b.ok) return null; // الأولى مؤكدة، نتجاهل التانية
+  a.ok = false; // قراءتين مختلفتين: لازم مراجعة
+  return b.val;
+}
+
+// بيحوّل صفحات ملف PDF لصور PNG (بيستخدم في حالة مفيش صور)
+Future<List<File>> extractPdfPages(File pdf) async {
+  final out = <File>[];
+  try {
+    final bytes = await pdf.readAsBytes();
+    final dir = Directory('$tmpDir/pdf')..createSync(recursive: true);
+    var i = 0;
+    await for (final page in Printing.raster(bytes, dpi: 220)) {
+      i++;
+      final png = await page.toPng();
+      final f = File('${dir.path}/pdf${bytes.length}_p$i.png');
+      await f.writeAsBytes(png);
+      out.add(f);
+    }
+  } catch (_) {}
+  return out;
+}
+
 // ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
 final String baseDir = '$root/all';
 final String rawImagesDir = '$baseDir/raw_images';
-final String outputDir = '$baseDir/output';
+String outputDir = '$baseDir/output'; // ممكن المستخدم يغيّره من الشاشة
+final String defaultOutputDir = '$baseDir/output';
+final String tmpDir = '$baseDir/.tmp';
 final String cfgPath = '$baseDir/.app_cfg.json';
 
 String baseName(String path) => path.split('/').last;
@@ -605,22 +663,125 @@ DateTime fileDate(File f) {
   return f.lastModifiedSync();
 }
 
-String? loadFolder() {
+Map<String, dynamic> _readCfg() {
   try {
-    return (jsonDecode(File(cfgPath).readAsStringSync()) as Map)['folder'] as String?;
+    return Map<String, dynamic>.from(jsonDecode(File(cfgPath).readAsStringSync()) as Map);
   } catch (_) {
-    return null;
+    return <String, dynamic>{};
   }
 }
 
-void saveFolder(String? f) {
+void _writeCfg(Map<String, dynamic> m) {
   try {
     File(cfgPath)
       ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode({'folder': f}));
+      ..writeAsStringSync(jsonEncode(m));
   } catch (_) {}
 }
 
+String? loadFolder() => _readCfg()['folder'] as String?;
+
+void saveFolder(String? f) {
+  final m = _readCfg();
+  m['folder'] = f;
+  _writeCfg(m);
+}
+
+String? loadOutDir() => _readCfg()['out'] as String?;
+
+void saveOutDir(String? f) {
+  final m = _readCfg();
+  m['out'] = f;
+  _writeCfg(m);
+}
+
+// ───────────────── معالجة الصور (تدوير / تحسين) - بتشتغل في Isolate ─────────────────
+// بتصلّح اتجاه الـ EXIF وبتدوّر الصورة لو deg != 0. بترجع true لو كتبت ملف جديد.
+bool _fixImage(String src, String dst, int deg) {
+  final bytes = File(src).readAsBytesSync();
+  var im = img.decodeImage(bytes);
+  if (im == null) {
+    if (src != dst) File(src).copySync(dst);
+    return false;
+  }
+  var ori = 1;
+  try {
+    ori = im.exif.imageIfd.orientation ?? 1;
+  } catch (_) {}
+  if (deg == 0 && ori == 1) {
+    if (src != dst) File(src).copySync(dst);
+    return false;
+  }
+  im = img.bakeOrientation(im);
+  if (deg != 0) im = img.copyRotate(im, angle: deg);
+  File(dst).writeAsBytesSync(img.encodeJpg(im, quality: 92));
+  return true;
+}
+
+// نسخة محسّنة للقراءة التانية: رمادي + كونتراست + تكبير/تصغير لمقاس مناسب للـ OCR
+void _enhanceImage(String src, String dst) {
+  var im = img.decodeImage(File(src).readAsBytesSync());
+  if (im == null) throw Exception('decode failed');
+  im = img.bakeOrientation(im);
+  im = img.grayscale(im);
+  im = img.adjustColor(im, contrast: 1.6);
+  if (im.width < 1800) {
+    im = img.copyResize(im,
+        width: (im.width * 1.6).round(), interpolation: img.Interpolation.cubic);
+  } else if (im.width > 2600) {
+    im = img.copyResize(im, width: 2200, interpolation: img.Interpolation.linear);
+  }
+  File(dst).writeAsBytesSync(img.encodeJpg(im, quality: 95));
+}
+
+Future<bool> fixImageAsync(String src, String dst, int deg) =>
+    Isolate.run(() => _fixImage(src, dst, deg));
+
+Future<void> enhanceImageAsync(String src, String dst) =>
+    Isolate.run(() => _enhanceImage(src, dst));
+
+// ───────────────── قنوات النظام (واتساب مباشر / فتح فولدر) ─────────────────
+const MethodChannel _chan = MethodChannel('pos/native');
+
+String todayToken() {
+  final n = DateTime.now();
+  return '${n.day}.${n.month}';
+}
+
+String _normAr(String s) => s
+    .replaceAll(RegExp('[أإآ]'), 'ا')
+    .replaceAll('ة', 'ه')
+    .replaceAll('ى', 'ي')
+    .toLowerCase();
+
+// ملف PDF اسمه "الاسكندريه + تاريخ النهارده" (بيقبل 5.11 / 05.11 / 5-11 / 5_11)
+bool isTodayAlexPdf(String path) {
+  final name = _normAr(baseName(path));
+  if (!name.endsWith('.pdf')) return false;
+  if (!name.contains('اسكندري')) return false;
+  final n = DateTime.now();
+  final re = RegExp('(?<!\\d)0?${n.day}[._\\- ]0?${n.month}(?!\\d)');
+  return re.hasMatch(name);
+}
+
+List<File> findTodayAlexPdfs(List<String> dirs) {
+  final out = <File>[];
+  final seen = <String>{};
+  for (final d in dirs) {
+    if (d == outputDir) continue; // ما نقراش الملفات اللي التطبيق نفسه طلّعها
+    try {
+      final dir = Directory(d);
+      if (!dir.existsSync()) continue;
+      for (final e in dir.listSync().whereType<File>()) {
+        if (isTodayAlexPdf(e.path) && seen.add(e.path)) out.add(e);
+      }
+    } catch (_) {}
+  }
+  out.sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
+  return out;
+}
+
+// ───────────────────── نموذج الإيصال ─────────────────────
 class ReceiptItem {
   String path;
   String? tid;
@@ -629,15 +790,15 @@ class ReceiptItem {
   String? unitName;
   double amount;
   String? date;
-  String key; 
-  bool ok; 
-  String how; 
+  String key; // اسم الملف الأصلي + حجمه (لحفظ التصحيحات اليدوية)
+  bool ok; // المبلغ مؤكد؟
+  String how; // terminal | fuzzy | name/merchant | auto-number | conflict | extra-batch | manual
   List<double> batches;
   int? suffix;
   String? origTid;
   bool conflict;
   bool skip;
-  bool isRotated;
+  double? alt; // قراءة تانية مختلفة للمبلغ (للمراجعة)
 
   ReceiptItem({
     required this.path,
@@ -655,13 +816,19 @@ class ReceiptItem {
     this.origTid,
     this.conflict = false,
     this.skip = false,
-    this.isRotated = false,
+    this.alt,
   }) : batches = batches ?? <double>[];
 
   bool get needsReview =>
-      amount <= 0 || row == null || !ok || how == 'auto-number' || how == 'conflict';
+      amount <= 0 ||
+      row == null ||
+      !ok ||
+      alt != null ||
+      how == 'auto-number' ||
+      how == 'conflict';
 }
 
+// ───────────────────── التصحيحات اليدوية (بتفضل محفوظة) ─────────────────────
 final String fixPath = '$baseDir/.app_fix.json';
 
 Map<String, dynamic> loadFixes() {
@@ -697,6 +864,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   int days = 0;
   String? customDir;
+  String? customOut;
   bool busy = false;
   double progress = 0;
   String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
@@ -706,11 +874,15 @@ class _HomePageState extends State<HomePage> {
   String? generatedPdfPath;
   List<int> missingTerminals = [];
   final List<String> warnings = [];
+  bool autoRotate = true;
+  String sourceNote = '';
 
   @override
   void initState() {
     super.initState();
     customDir = loadFolder();
+    customOut = loadOutDir();
+    if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
   }
 
   Future<void> pickFolder() async {
@@ -727,6 +899,99 @@ class _HomePageState extends State<HomePage> {
     if (res != null) {
       saveFolder(res);
       setState(() => customDir = res);
+    }
+  }
+
+  Future<void> pickOutFolder() async {
+    final perm = await Permission.manageExternalStorage.request();
+    if (!perm.isGranted) {
+      setState(() => status = 'لازم تسمح بالوصول لكل الملفات الأول.');
+      return;
+    }
+    if (!mounted) return;
+    final res = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => FolderPicker(start: customOut ?? root)),
+    );
+    if (res != null) {
+      try {
+        final t = File('$res/.write_test')..writeAsStringSync('x');
+        t.deleteSync();
+      } catch (_) {
+        setState(() => status = 'مش قادر أكتب في الفولدر ده: $res');
+        return;
+      }
+      saveOutDir(res);
+      setState(() {
+        customOut = res;
+        outputDir = res;
+      });
+    }
+  }
+
+  void useDefaultOut() {
+    saveOutDir(null);
+    setState(() {
+      customOut = null;
+      outputDir = defaultOutputDir;
+    });
+  }
+
+  Future<void> openFolder(String path) async {
+    try {
+      Directory(path).createSync(recursive: true);
+    } catch (_) {}
+    try {
+      final ok = await _chan.invokeMethod<bool>('openFolder', {'path': path});
+      if (ok == true) return;
+    } catch (_) {}
+    await Clipboard.setData(ClipboardData(text: path));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('مقدرتش أفتح الفولدر. المسار اتنسخ: $path')),
+    );
+  }
+
+  // إرسال الإكسيل والـ PDF لواتساب مباشرة (من غير قايمة المشاركة)
+  Future<void> sendToWhatsApp() async {
+    final paths = <String>[];
+    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
+      paths.add(standardXlsxPath!);
+    }
+    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
+      paths.add(generatedPdfPath!);
+    }
+    if (paths.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
+      );
+      return;
+    }
+    try {
+      final r = await _chan.invokeMethod<String>(
+          'shareToWhatsApp', {'paths': paths, 'text': 'تقرير إيصالات الإسكندرية'});
+      if (r == 'ok') return;
+    } catch (_) {}
+    // واتساب مش موجود أو فشل الإرسال المباشر -> قايمة المشاركة العادية
+    await shareStandardFiles();
+  }
+
+  Future<void> openReview() async {
+    final list = processedItems.where((e) => e.needsReview).toList();
+    if (list.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مفيش إيصالات محتاجة مراجعة.')),
+      );
+      return;
+    }
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => ReviewPage(items: list)),
+    );
+    if (changed == true) {
+      await rebuildFiles();
+    } else if (mounted) {
+      setState(() {});
     }
   }
 
@@ -779,9 +1044,7 @@ class _HomePageState extends State<HomePage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                item.isRotated 
-                  ? Transform.rotate(angle: 3.14159, child: Image.file(File(item.path), height: 160, fit: BoxFit.contain))
-                  : Image.file(File(item.path), height: 160, fit: BoxFit.contain),
+                Image.file(File(item.path), height: 160, fit: BoxFit.contain),
                 const SizedBox(height: 8),
                 TextField(
                   controller: amtController,
@@ -813,6 +1076,7 @@ class _HomePageState extends State<HomePage> {
                   item.amount = round2(newAmt);
                   item.batches = [item.amount];
                   item.ok = true;
+                  item.alt = null;
                   item.how = 'manual';
                   if (selectedOrder != null) {
                     item.orderNum = selectedOrder;
@@ -846,6 +1110,7 @@ class _HomePageState extends State<HomePage> {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
+    // 1. بناء ملف الـ PDF المجمع
     final pdf = pw.Document();
     processedItems.sort((a, b) {
       final c = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
@@ -856,16 +1121,10 @@ class _HomePageState extends State<HomePage> {
         try {
           final imgBytes = File(r.path).readAsBytesSync();
           final imgWidget = pw.MemoryImage(imgBytes);
-          
-          pw.Widget child = pw.Image(imgWidget, fit: pw.BoxFit.contain);
-          if (r.isRotated) {
-            child = pw.Transform.rotate(angle: 3.1415926535897932, child: child);
-          }
-          
           pdf.addPage(
             pw.Page(
               pageFormat: PdfPageFormat.a4,
-              build: (pw.Context ctx) => pw.Center(child: child),
+              build: (pw.Context ctx) => pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
             ),
           );
         } catch (_) {}
@@ -875,6 +1134,7 @@ class _HomePageState extends State<HomePage> {
     await pdfOutFile.writeAsBytes(await pdf.save());
     generatedPdfPath = pdfOutFile.path;
 
+    // حساب إجماليات كل وحدة
     final unitTotals = <int, double>{};
     for (var r = 2; r <= 11; r++) {
       unitTotals[r] = 0.0;
@@ -887,6 +1147,7 @@ class _HomePageState extends State<HomePage> {
 
     final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
     if (tplFile.existsSync()) {
+      // 2. الملف الأصلي: مطابق تماماً لتمبلت الاسكندريه 00.xlsx دون إضافة أو مساس بأي شيء آخر
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -921,6 +1182,7 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (_) {}
 
+      // 3. التقرير الشامل المنفصل
       try {
         final bytesAdv = tplFile.readAsBytesSync();
         final excelAdv = xl.Excel.decodeBytes(bytesAdv);
@@ -1020,7 +1282,8 @@ class _HomePageState extends State<HomePage> {
     setState(() => status = 'اكتمل بنجاح!\n'
         '• تم توليد التقرير الأصلي: الاسكندريه $reportDate.xlsx\n'
         '• تم توليد التقرير الشامل: تقرير_شامل_POS_$reportDate.xlsx\n'
-        '• تم توليد ملف الـ PDF المجمع.');
+        '• تم توليد ملف الـ PDF المجمع.' +
+        (sourceNote.isEmpty ? '' : '\n$sourceNote'));
   }
 
   String subtitleOf(ReceiptItem item) {
@@ -1028,7 +1291,8 @@ class _HomePageState extends State<HomePage> {
     final bt = item.batches.length > 1
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt';
+    final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt';
   }
 
   String warningsText() {
@@ -1053,6 +1317,7 @@ class _HomePageState extends State<HomePage> {
           flags.add('رقم الماكينة: ${r.how}');
         }
         if (r.batches.length > 1) flags.add('${r.batches.length} باتشات');
+        if (r.alt != null) flags.add('قراءة تانية: ${r.alt!.toStringAsFixed(2)}');
         if (r.amount > 0 && r.row != null) total += r.amount;
         final mark = flags.isEmpty ? '✓' : '⚠️';
         final extra = flags.isEmpty ? '' : '   [${flags.join(' | ')}]';
@@ -1090,57 +1355,60 @@ class _HomePageState extends State<HomePage> {
     });
 
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
-    
-    // الميزة الخاصة باستخراج الصور من PDF لو مفيش صور في الواتس
+
     final now = DateTime.now();
-    final dateStr = "${now.day}.${now.month}";
+    final cutoff = days < 0
+        ? DateTime(2000)
+        : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final todo = <File>[];
-
-    if (dirs.isNotEmpty) {
-      final cutoff = days < 0
-          ? DateTime(2000)
-          : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
-      for (final d in dirs) {
-        try {
-          for (final e in d.listSync().whereType<File>()) {
-            final lower = e.path.toLowerCase();
-            if (!(lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.webp'))) continue;
-            if (baseName(e.path).startsWith('.') || baseName(e.path).startsWith('dup_')) continue;
-            if (fileDate(e).isBefore(cutoff)) continue;
-            todo.add(e);
+    for (final d in dirs) {
+      try {
+        for (final e in d.listSync().whereType<File>()) {
+          final lower = e.path.toLowerCase();
+          if (!(lower.endsWith('.jpg') ||
+              lower.endsWith('.jpeg') ||
+              lower.endsWith('.png') ||
+              lower.endsWith('.webp'))) {
+            continue;
           }
-        } catch (_) {}
-      }
+          if (baseName(e.path).startsWith('.') || baseName(e.path).startsWith('dup_')) continue;
+          if (fileDate(e).isBefore(cutoff)) continue;
+          todo.add(e);
+        }
+      } catch (_) {}
     }
+    todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
+    sourceNote = '';
 
-    // إذا لم تتوفر أي صور، حاول البحث عن ملف الـ PDF لليوم
+    // مفيش صور؟ دوّر على PDF اسمه "الاسكندريه + تاريخ النهارده"
     if (todo.isEmpty) {
-      final pdfPath = '$baseDir/الاسكندريه $dateStr.pdf';
-      final pdfFile = File(pdfPath);
-      if (pdfFile.existsSync()) {
-        setState(() => status = 'جاري تحويل صفحات الـ PDF إلى صور...');
-        try {
-          final bytes = pdfFile.readAsBytesSync();
-          int pageIndex = 0;
-          await for (final page in Printing.raster(bytes, dpi: 300)) {
-            final tempFile = File('$rawImagesDir/pdf_page_$pageIndex.png');
-            final pngBytes = await page.toPng();
-            tempFile.writeAsBytesSync(pngBytes);
-            todo.add(tempFile);
-            pageIndex++;
-          }
-        } catch (e) {
-          warnings.add('مشكلة في الـ PDF: $e');
+      setState(() => status = 'مفيش صور. بدوّر على ملف PDF اسمه "الاسكندريه ${todayToken()}"...');
+      final searchDirs = <String>[];
+      if (customDir != null) searchDirs.add(customDir!);
+      for (final d in findWhatsAppImageDirs()) {
+        final p = d.path;
+        if (p.endsWith('WhatsApp Images')) {
+          searchDirs.add(p.substring(0, p.length - 'WhatsApp Images'.length) + 'WhatsApp Documents');
+        }
+      }
+      searchDirs.addAll([baseDir, '$root/Download', '$root/Documents']);
+      final pdfs = findTodayAlexPdfs(searchDirs);
+      if (pdfs.isNotEmpty) {
+        final pages = await extractPdfPages(pdfs.first);
+        if (pages.isNotEmpty) {
+          todo.addAll(pages);
+          sourceNote = '• المصدر: ملف PDF ${baseName(pdfs.first.path)} (${pages.length} صفحة)';
         }
       }
     }
 
-    todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
-
     if (todo.isEmpty) {
       setState(() {
         busy = false;
-        status = 'لا توجد صور في الواتساب، ولم يتم العثور على ملف الاسكندريه $dateStr.pdf';
+        status = (dirs.isEmpty
+                ? 'تعذر العثور على مجلد صور الواتساب تلقائياً.'
+                : 'لا توجد صور في مجلد الواتساب بالفترة المحددة.') +
+            '\nولا يوجد ملف PDF باسم "الاسكندريه ${todayToken()}".';
       });
       return;
     }
@@ -1158,35 +1426,48 @@ class _HomePageState extends State<HomePage> {
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
-        var res = await recognizer.processImage(InputImage.fromFilePath(f.path));
-        var sc = receiptScore(res.text);
-        bool rotated = false;
+        Directory(tmpDir).createSync(recursive: true);
+        var workPath = f.path;
+        var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
+        var isReceipt = receiptScore(res.text) >= 2 || findTerminalIn([res.text]) != null;
 
-        // मيزة 6: تدوير الصورة في الذاكرة فقط دون تغيير الملف الأصلي
-        if (sc < 2 && findTerminalIn([res.text]) == null) {
-          try {
-            final bytes = f.readAsBytesSync();
-            final decoded = img.decodeImage(bytes);
-            if (decoded != null) {
-              final rotImg = img.copyRotate(decoded, angle: 180);
-              final tmpPath = '${f.path}_tmp.jpg';
-              File(tmpPath).writeAsBytesSync(img.encodeJpg(rotImg, quality: 95));
-              
-              final resRot = await recognizer.processImage(InputImage.fromFilePath(tmpPath));
-              final scRot = receiptScore(resRot.text);
-              if (scRot > sc) {
-                res = resRot;
-                sc = scRot;
-                rotated = true;
+        // صورة مقلوبة؟ جرّب EXIF ثم 90 / 270 / 180
+        if (!isReceipt && autoRotate) {
+          for (final deg in const [0, 90, 270, 180]) {
+            final tp = '$tmpDir/rot_$deg.jpg';
+            try {
+              final wrote = await fixImageAsync(f.path, tp, deg);
+              if (!wrote) continue;
+              final r2 = await recognizer.processImage(InputImage.fromFilePath(tp));
+              if (receiptScore(r2.text) >= 2 || findTerminalIn([r2.text]) != null) {
+                res = r2;
+                workPath = tp;
+                isReceipt = true;
+                break;
               }
-              File(tmpPath).deleteSync();
-            }
-          } catch (_) {}
+            } catch (_) {}
+          }
         }
 
-        if (sc >= 2 || findTerminalIn([res.text]) != null) {
+        if (isReceipt) {
           final key = '${baseName(f.path)}:${f.lengthSync()}';
           final a = analyzeLines(toLines(res));
+
+          // قراءة تانية بتنسيق مختلف (صورة محسّنة) علشان نكشف الأخطاء
+          double? alt;
+          try {
+            final ep = '$tmpDir/enh.jpg';
+            await enhanceImageAsync(workPath, ep);
+            final res2 = await recognizer.processImage(InputImage.fromFilePath(ep));
+            final a2 = analyzeLines(toLines(res2));
+            try {
+              File('$outputDir/ocr_debug.txt').writeAsStringSync(
+                  '##### ${baseName(f.path)} (2nd read) total=${a2.val} ok=${a2.ok}\n',
+                  mode: FileMode.append);
+            } catch (_) {}
+            alt = mergeSecondRead(a, a2);
+          } catch (_) {}
+
           if (a.tid == null) {
             final fnNum = int.tryParse(baseName(f.path).split('.').first);
             final ft = fnNum != null ? numToTid[fnNum] : null;
@@ -1199,15 +1480,31 @@ class _HomePageState extends State<HomePage> {
           }
           try {
             File('$outputDir/ocr_debug.txt').writeAsStringSync(
-                '##### ${baseName(f.path)} => tid=${a.tid} how=${a.how} total=${a.val} ok=${a.ok}\n'
+                '##### ${baseName(f.path)} => tid=${a.tid} how=${a.how} total=${a.val} ok=${a.ok} alt=$alt rotated=${workPath != f.path}\n'
                 '${a.debug}\n--- raw ML Kit ---\n${res.text}\n\n',
                 mode: FileMode.append);
           } catch (_) {}
 
+          // نسخة الصورة اللي هتدخل الـ PDF (متظبطة الاتجاه)
           final inRaw = f.path.startsWith('$rawImagesDir/');
           final dst = inRaw ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
-          final localFile =
-              (inRaw || File(dst).existsSync()) ? File(dst) : f.copySync(dst);
+          File localFile;
+          if (workPath != f.path) {
+            final noExt = dst.contains('.') ? dst.substring(0, dst.lastIndexOf('.')) : dst;
+            final jd = '$noExt.jpg';
+            File(workPath).copySync(jd);
+            if (jd != dst && inRaw) {
+              try {
+                File(dst).deleteSync();
+              } catch (_) {}
+            }
+            localFile = File(jd);
+          } else if (inRaw || File(dst).existsSync()) {
+            localFile = File(dst);
+          } else {
+            await fixImageAsync(f.path, dst, 0); // نسخ + تصحيح EXIF لو لازم
+            localFile = File(dst);
+          }
 
           final item = ReceiptItem(
             path: localFile.path,
@@ -1221,9 +1518,10 @@ class _HomePageState extends State<HomePage> {
             ok: a.ok,
             how: a.how,
             batches: a.batches,
-            isRotated: rotated, // تخزين حالة التدوير هنا لاستخدامها في الـ PDF
+            alt: alt,
           );
 
+          // تصحيح يدوي محفوظ من مرة سابقة
           final fx = fixes[key];
           if (fx is Map) {
             final v = fx['val'];
@@ -1241,6 +1539,7 @@ class _HomePageState extends State<HomePage> {
               item.unitName = info.unitName;
             }
             item.ok = true;
+            item.alt = null;
             item.how = 'manual';
           }
           rawReceipts.add(item);
@@ -1284,7 +1583,7 @@ class _HomePageState extends State<HomePage> {
       } else if (r.amount > 0 &&
           (prev.amount - r.amount).abs() < 0.005 &&
           sameDay(prev, r)) {
-        r.skip = true; 
+        r.skip = true; // نفس الماكينة ونفس المبلغ = إيصال مكرر
         warnings.add('${baseName(r.path)}: نفس الماكينة $n ونفس المبلغ '
             '${r.amount.toStringAsFixed(2)} (إيصال مكرر) - تم استبعاده');
       } else {
@@ -1309,7 +1608,7 @@ class _HomePageState extends State<HomePage> {
     for (final r in rawReceipts) {
       if (r.skip || r.tid != null || r.row == null) continue;
       if (r.conflict && (r.how == 'terminal' || r.how == 'fuzzy')) {
-        giveSuffix(r); 
+        giveSuffix(r); // نفس الماكينة بمبلغ مختلف = باتش إضافي
         continue;
       }
       final free = <int>[];
@@ -1333,6 +1632,7 @@ class _HomePageState extends State<HomePage> {
 
     final kept = rawReceipts.where((r) => !r.skip).toList();
 
+    // التاريخ الأكثر تكراراً + تحذيرات
     final dateVotes = <String, int>{};
     for (final r in kept) {
       if (r.date != null) dateVotes[r.date!] = (dateVotes[r.date!] ?? 0) + 1;
@@ -1346,6 +1646,9 @@ class _HomePageState extends State<HomePage> {
       }
       if (r.row != null && r.amount > 0) {
         if (!r.ok) warnings.add('$nm: ${r.unitName} = ${r.amount.toStringAsFixed(2)} (راجع المبلغ يدوياً)');
+        if (r.alt != null) {
+          warnings.add('$nm: القراءة التانية للمبلغ ${r.alt!.toStringAsFixed(2)} مختلفة عن ${r.amount.toStringAsFixed(2)} - راجع الصورة');
+        }
         if (r.how == 'extra-batch') {
           warnings.add('$nm: الماكينة ${r.orderNum} ظهرت في صورة تانية بمبلغ مختلف - اتحسبت كباتش إضافي ${r.suffix}');
         } else if (r.how == 'auto-number' || r.how == 'conflict') {
@@ -1358,7 +1661,7 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    // ═════════ المرحلة 3: إعادة التسمية ═════════
+    // ═════════ المرحلة 3: إعادة التسمية (على مرحلتين عشان التعارض) ═════════
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
     final moves = <ReceiptItem>[];
     final newNames = <ReceiptItem, String>{};
@@ -1389,6 +1692,9 @@ class _HomePageState extends State<HomePage> {
 
     processedItems.addAll(kept);
     await rebuildFiles();
+    try {
+      Directory(tmpDir).deleteSync(recursive: true);
+    } catch (_) {}
 
     if (!mounted) return;
     setState(() {
@@ -1402,6 +1708,13 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('إيصالات POS'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.share),
+            tooltip: 'مشاركة الملفات الرسمية',
+            onPressed: busy ? null : shareStandardFiles,
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -1441,6 +1754,31 @@ class _HomePageState extends State<HomePage> {
                   ),
               ],
             ),
+            Text('الإخراج: ${customOut ?? '$defaultOutputDir (افتراضي)'}',
+                textDirection: TextDirection.ltr),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: busy ? null : pickOutFolder,
+                  icon: const Icon(Icons.drive_file_move_outline),
+                  label: const Text('مكان الإخراج'),
+                ),
+                if (customOut != null)
+                  TextButton(
+                    onPressed: busy ? null : useDefaultOut,
+                    child: const Text('الافتراضي'),
+                  ),
+              ],
+            ),
+            Row(
+              children: [
+                const Expanded(child: Text('تدوير تلقائي للصور المقلوبة')),
+                Switch(
+                  value: autoRotate,
+                  onChanged: busy ? null : (v) => setState(() => autoRotate = v),
+                ),
+              ],
+            ),
             const SizedBox(height: 4),
             Row(
               children: [
@@ -1448,29 +1786,45 @@ class _HomePageState extends State<HomePage> {
                   child: FilledButton.icon(
                     onPressed: busy ? null : runFullPipeline,
                     icon: const Icon(Icons.play_arrow),
-                    label: const Text('بدء المعالجة'),
+                    label: const Text('بدء المعالجة الشاملة'),
                   ),
                 ),
-                const SizedBox(width: 4),
+                const SizedBox(width: 8),
                 IconButton.filledTonal(
-                  onPressed: busy ? null : () async {
-                    // ميزة 3: شاشة المراجعة السريعة
-                    final doubtful = processedItems.where((i) => i.needsReview).toList();
-                    final changed = await Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => ReviewScreen(doubtfulItems: doubtful)),
-                    );
-                    if (changed == true) rebuildFiles();
-                  },
-                  icon: const Icon(Icons.fact_check),
-                  tooltip: 'شاشة المراجعة',
+                  onPressed: busy ? null : shareStandardFiles,
+                  icon: const Icon(Icons.share),
+                  tooltip: 'مشاركة التقرير الرسمي والـ PDF',
                 ),
                 const SizedBox(width: 4),
                 IconButton.filledTonal(
-                  onPressed: busy ? null : shareStandardFiles,
-                  icon: const Icon(Icons.send),
-                  color: Colors.green,
-                  tooltip: 'مشاركة (أساسي)',
+                  onPressed: busy ? null : shareAdvancedFile,
+                  icon: const Icon(Icons.table_chart),
+                  tooltip: 'مشاركة التقرير الشامل المفصل',
+                ),
+              ],
+            ),
+            Wrap(
+              spacing: 8,
+              children: [
+                ActionChip(
+                  avatar: const Icon(Icons.chat, size: 18),
+                  label: const Text('إرسال واتساب'),
+                  onPressed: busy ? null : sendToWhatsApp,
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.folder_special, size: 18),
+                  label: const Text('فتح مجلد all'),
+                  onPressed: () => openFolder(baseDir),
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.folder_open, size: 18),
+                  label: const Text('فتح الإخراج'),
+                  onPressed: () => openFolder(outputDir),
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.fact_check, size: 18),
+                  label: Text('مراجعة (${processedItems.where((e) => e.needsReview).length})'),
+                  onPressed: busy ? null : openReview,
                 ),
               ],
             ),
@@ -1541,9 +1895,12 @@ class _HomePageState extends State<HomePage> {
                   return Card(
                     margin: const EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
-                      leading: item.isRotated 
-                        ? Transform.rotate(angle: 3.14159, child: Image.file(File(item.path), width: 48, height: 48, fit: BoxFit.cover))
-                        : Image.file(File(item.path), width: 48, height: 48, fit: BoxFit.cover),
+                      leading: Image.file(
+                        File(item.path),
+                        width: 48,
+                        height: 48,
+                        fit: BoxFit.cover,
+                      ),
                       title: Text(
                         'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
                         style: const TextStyle(fontWeight: FontWeight.bold),
@@ -1663,103 +2020,226 @@ class _FolderPickerState extends State<FolderPicker> {
   }
 }
 
-// ───────────────────── شاشة المراجعة السريعة ─────────────────────
-class ReviewScreen extends StatefulWidget {
-  final List<ReceiptItem> doubtfulItems;
-  const ReviewScreen({super.key, required this.doubtfulItems});
+
+// ───────────────────── شاشة المراجعة ─────────────────────
+class ReviewPage extends StatefulWidget {
+  final List<ReceiptItem> items;
+  const ReviewPage({super.key, required this.items});
 
   @override
-  State<ReviewScreen> createState() => _ReviewScreenState();
+  State<ReviewPage> createState() => _ReviewPageState();
 }
 
-class _ReviewScreenState extends State<ReviewScreen> {
-  final PageController _pageController = PageController();
+class _ReviewPageState extends State<ReviewPage> {
+  int idx = 0;
+  bool changed = false;
+  int rev = 0; // بيتغير لما الصورة تتدوّر علشان تتحدّث
+  final done = <ReceiptItem>{};
+  late TextEditingController amt;
+  int? order;
+
+  ReceiptItem get item => widget.items[idx];
+
+  @override
+  void initState() {
+    super.initState();
+    amt = TextEditingController();
+    load();
+  }
+
+  @override
+  void dispose() {
+    amt.dispose();
+    super.dispose();
+  }
+
+  void load() {
+    amt.text = item.amount > 0 ? item.amount.toStringAsFixed(2) : '';
+    order = item.orderNum;
+  }
+
+  void go(int i) {
+    if (i < 0 || i >= widget.items.length) return;
+    setState(() {
+      idx = i;
+      load();
+    });
+  }
+
+  void save({bool next = true}) {
+    final v = double.tryParse(amt.text.replaceAll(',', '.'));
+    if (v == null || v <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اكتب مبلغ صحيح.')),
+      );
+      return;
+    }
+    final it = item;
+    it.amount = round2(v);
+    it.batches = [it.amount];
+    it.ok = true;
+    it.alt = null;
+    it.how = 'manual';
+    if (order != null) {
+      it.orderNum = order;
+      it.tid = numToTid[order];
+      it.row = terminals[it.tid]!.excelRow;
+      it.unitName = terminals[it.tid]!.unitName;
+    }
+    saveFix(it);
+    changed = true;
+    done.add(it);
+    if (next && idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  Future<void> rotate() async {
+    try {
+      await fixImageAsync(item.path, item.path, 90);
+      await FileImage(File(item.path)).evict();
+      imageCache.clear();
+      changed = true;
+      setState(() => rev++);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مقدرتش أدوّر الصورة.')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.doubtfulItems.isEmpty) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('المراجعة')),
-        body: const Center(child: Text('لا توجد إيصالات تحتاج لمراجعة! 🎉')),
-      );
-    }
+    final it = item;
+    final image = Container(
+      color: Colors.black12,
+      child: InteractiveViewer(
+        maxScale: 6,
+        child: Center(
+          child: Image.file(File(it.path), key: ValueKey('${it.path}#$rev'), fit: BoxFit.contain),
+        ),
+      ),
+    );
 
-    return Scaffold(
-      appBar: AppBar(title: Text('مراجعة (${widget.doubtfulItems.length}) إيصال')),
-      body: PageView.builder(
-        controller: _pageController,
-        itemCount: widget.doubtfulItems.length,
-        itemBuilder: (context, index) {
-          final item = widget.doubtfulItems[index];
-          final amtController = TextEditingController(text: item.amount.toStringAsFixed(2));
-          int? selectedOrder = item.orderNum;
-
-          return Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: InteractiveViewer(
-                    child: item.isRotated 
-                      ? Transform.rotate(angle: 3.14159, child: Image.file(File(item.path), fit: BoxFit.contain, width: double.infinity))
-                      : Image.file(File(item.path), fit: BoxFit.contain, width: double.infinity),
+    final form = SingleChildScrollView(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'المقروء: ${it.amount > 0 ? it.amount.toStringAsFixed(2) : 'غير مقروء'} ج.م'
+            '${it.batches.length > 1 ? '  (= ${it.batches.map((b) => b.toStringAsFixed(2)).join(' + ')})' : ''}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          if (it.alt != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text('⚠️ القراءة التانية: ${it.alt!.toStringAsFixed(2)}',
+                        style: TextStyle(color: Colors.orange.shade900)),
                   ),
-                ),
-                const SizedBox(height: 16),
-                Expanded(
-                  flex: 1,
-                  child: ListView(
-                    children: [
-                      Text('القراءة الحالية: ${item.amount} ج.م', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.red)),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: amtController,
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        decoration: const InputDecoration(labelText: 'تعديل المبلغ', border: OutlineInputBorder()),
-                      ),
-                      const SizedBox(height: 10),
-                      DropdownButtonFormField<int>(
-                        value: selectedOrder,
-                        decoration: const InputDecoration(border: OutlineInputBorder()),
-                        hint: const Text('اختر الماكينة'),
-                        items: [
-                          for (var i = 1; i <= 19; i++)
-                            DropdownMenuItem(value: i, child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}')),
-                        ],
-                        onChanged: (v) => setState(() => selectedOrder = v),
-                      ),
-                      const SizedBox(height: 16),
-                      FilledButton.icon(
-                        icon: const Icon(Icons.check),
-                        label: const Text('حفظ والانتقال للتالي'),
-                        onPressed: () {
-                          final newAmt = double.tryParse(amtController.text) ?? item.amount;
-                          item.amount = double.parse(newAmt.toStringAsFixed(2));
-                          item.batches = [item.amount];
-                          item.ok = true;
-                          item.how = 'manual';
-                          if (selectedOrder != null) {
-                            item.orderNum = selectedOrder;
-                            item.tid = numToTid[selectedOrder];
-                            item.row = terminals[item.tid]!.excelRow;
-                            item.unitName = terminals[item.tid]!.unitName;
-                          }
-                          saveFix(item);
-                          if (index < widget.doubtfulItems.length - 1) {
-                            _pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.ease);
-                          } else {
-                            Navigator.pop(context, true);
-                          }
-                        },
-                      )
-                    ],
+                  TextButton(
+                    onPressed: () => setState(() => amt.text = it.alt!.toStringAsFixed(2)),
+                    child: const Text('استخدمها'),
                   ),
-                )
-              ],
+                ],
+              ),
             ),
-          );
-        },
+          const SizedBox(height: 8),
+          TextField(
+            controller: amt,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(
+              labelText: 'المبلغ الإجمالي',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<int>(
+            value: order,
+            isExpanded: true,
+            hint: const Text('اختر الماكينة (1..19)'),
+            items: [
+              for (var i = 1; i <= 19; i++)
+                DropdownMenuItem(
+                  value: i,
+                  child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
+                ),
+            ],
+            onChanged: (v) => setState(() => order = v),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              OutlinedButton.icon(
+                onPressed: rotate,
+                icon: const Icon(Icons.rotate_right),
+                label: const Text('تدوير'),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: FilledButton(
+                  onPressed: () => save(),
+                  child: Text(idx < widget.items.length - 1 ? 'حفظ والتالي' : 'حفظ'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) Navigator.pop(context, changed);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text('مراجعة ${idx + 1} / ${widget.items.length}'
+              '${done.contains(it) ? '  ✓' : ''}'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => Navigator.pop(context, changed),
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.navigate_before),
+              tooltip: 'السابق',
+              onPressed: idx > 0 ? () => go(idx - 1) : null,
+            ),
+            IconButton(
+              icon: const Icon(Icons.navigate_next),
+              tooltip: 'التالي',
+              onPressed: idx < widget.items.length - 1 ? () => go(idx + 1) : null,
+            ),
+          ],
+        ),
+        body: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, c) {
+              if (c.maxWidth > 600) {
+                return Row(
+                  children: [
+                    Expanded(flex: 3, child: image),
+                    Expanded(flex: 2, child: form),
+                  ],
+                );
+              }
+              return Column(
+                children: [
+                  Expanded(flex: 3, child: image),
+                  Expanded(flex: 2, child: form),
+                ],
+              );
+            },
+          ),
+        ),
       ),
     );
   }
