@@ -117,9 +117,7 @@ final Map<int, String> rowNames = {
 // ───────────────────── تنظيف نصوص OCR ─────────────────────
 String normalizeOcrText(String text) {
   var s = text;
-  // إصلاح تحول رقم 7 إلى شرطة مائلة / وسط الأرقام (مثل 50335/10 أو 14,0/1.00)
   s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
-  // إصلاح حرف B الملتبس برقم 8 في بداية المبالغ (مثل B358.69)
   s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
   return s;
 }
@@ -288,11 +286,9 @@ class AmountDecision {
 AmountDecision extractReceiptAmountPythonStyle(String rawText) {
   final txt = normalizeOcrText(rawText);
 
-  // قص النص عند نهاية الإيصال لتجاهل الأرقام المكتوبة بخط اليد في الأسفل
   final stopMatch = RegExp(r"THANK\s*YOU|Hotline|App\s*Versi", caseSensitive: false).firstMatch(txt);
   final t = stopMatch != null ? txt.substring(0, stopMatch.start) : txt;
 
-  // فصل منطقة ما قبل GRAND TOTALS وما بعدها
   final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(t);
   String pre = gm != null ? t.substring(0, gm.start) : t;
   String post = gm != null ? t.substring(gm.start) : "";
@@ -307,7 +303,6 @@ AmountDecision extractReceiptAmountPythonStyle(String rawText) {
     }
   }
 
-  // تقسيم حسب شبكات الدفع (VISA / MASTER / MEZZA)
   final brandMatches = _brandRe.allMatches(pre).toList();
   final sections = <String>[];
   if (brandMatches.isNotEmpty) {
@@ -329,12 +324,10 @@ AmountDecision extractReceiptAmountPythonStyle(String rawText) {
   final grand = amountsIn(post);
   final brandSum = brandVals.isNotEmpty ? round2(brandVals.fold(0.0, (a, b) => a + b)) : null;
 
-  // 1) تطابق تام بين مجموع الكروت والـ Grand Total
   if (brandSum != null && grand.any((g) => (g - brandSum).abs() < 0.005)) {
     return AmountDecision(brandSum, true);
   }
 
-  // 2) اختلاف رقم واحد فقط في الطباعة بين مجموع الكروت والـ Grand Total
   if (brandSum != null && brandVals.length >= 2) {
     final sb = brandSum.toStringAsFixed(2);
     for (final g in grand) {
@@ -351,7 +344,6 @@ AmountDecision extractReceiptAmountPythonStyle(String rawText) {
     }
   }
 
-  // 3) إذا كان الـ Grand Total مكرراً ومؤكداً (Sale + Total + Total Net Amount)
   if (grand.isNotEmpty) {
     final counts = <double, int>{};
     for (final g in grand) {
@@ -363,12 +355,10 @@ AmountDecision extractReceiptAmountPythonStyle(String rawText) {
     }
   }
 
-  // 4) إذا كانت منطقة الـ Grand Total مشوهة، اعتمد مجموع الشبكات الثلاثة
   if (brandSum != null && brandVals.length >= 2) {
     return AmountDecision(brandSum, true);
   }
 
-  // 5) التصويت العام
   final pool = <double>[...grand];
   if (brandSum != null) pool.add(brandSum);
   final voted = modeValue(pool);
@@ -509,7 +499,7 @@ class ReceiptItem {
   String? unitName;
   double amount;
   bool confirmed;
-  String how; // manual | terminal | fuzzy | file-number | name/merchant | auto-number | conflict | extra-batch
+  String how;
   String? date;
   String? batchNo;
   bool skip;
@@ -624,7 +614,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // ───────────────────── المرحلة 2: توزيع أرقام الماكينات وحل التعارض (مطابق للبايثون) ─────────────────────
   void assignTerminalsStage2(List<ReceiptItem> recs) {
     warnings.clear();
     for (final r in recs) {
@@ -677,7 +666,6 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
 
-      // البحث عن ماكينة فارغة في نفس الوحدة (نفس الصف)
       final freeEntries = terminals.entries
           .where((kv) => kv.value.excelRow == r.row && !taken.containsKey(kv.key))
           .toList()
@@ -692,7 +680,6 @@ class _HomePageState extends State<HomePage> {
       } else if (r.origTid != null) {
         giveSuffix(r, r.origTid!);
       } else {
-        // إذا كانت كل ماكينات الوحدة ممتلئة (مثل المنتزه 3 الإضافي)، ألحقه كباتش إضافي بآخر ماكينة في الوحدة
         final unitEntries = terminals.entries
             .where((kv) => kv.value.excelRow == r.row)
             .toList()
@@ -765,7 +752,6 @@ class _HomePageState extends State<HomePage> {
                     item.row = terminals[item.tid]!.excelRow;
                     item.unitName = terminals[item.tid]!.unitName;
                   }
-                  // حفظ التصحيح في .pos_fix.json مثل البايثون تماماً
                   if (item.key != null && item.row != null) {
                     final fixes = loadFixes();
                     fixes[item.key!] = {
@@ -803,7 +789,6 @@ class _HomePageState extends State<HomePage> {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
-    // إعادة تسمية الصور في raw_images بنظام آمن ضد التضارب (1.jpg, 9_2.jpg, dup_...)
     for (var k = 0; k < processedItems.length; k++) {
       final r = processedItems[k];
       final ext = r.path.split('.').last.toLowerCase();
@@ -831,7 +816,6 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    // ترتيب العناصر (من 1 إلى 18 ثم الباتشات الإضافية)
     processedItems.sort((a, b) {
       if (a.skip != b.skip) return a.skip ? 1 : -1;
       final c1 = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
@@ -839,7 +823,6 @@ class _HomePageState extends State<HomePage> {
       return (a.suffix ?? 0).compareTo(b.suffix ?? 0);
     });
 
-    // 1. بناء ملف الـ PDF المجمع (فقط للإيصالات المعتمدة غير المكررة)
     final pdf = pw.Document();
     for (final r in processedItems.where((x) => !x.skip && x.orderNum != null)) {
       if (File(r.path).existsSync()) {
@@ -859,7 +842,6 @@ class _HomePageState extends State<HomePage> {
     await pdfOutFile.writeAsBytes(await pdf.save());
     generatedPdfPath = pdfOutFile.path;
 
-    // حساب إجماليات كل وحدة (الصفوف 2 إلى 11)
     final unitTotals = <int, double>{for (var r = 2; r <= 11; r++) r: 0.0};
     final unitCounts = <int, int>{for (var r = 2; r <= 11; r++) r: 0};
 
@@ -870,7 +852,6 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    // البحث عن تمبلت الإكسيل
     File? tplFile;
     for (final d in [baseDir, rawImagesDir, outputDir]) {
       final exact = File('$d/الاسكندريه 00.xlsx');
@@ -881,7 +862,6 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
-      // 2. ملف الإكسيل الرسمي
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -906,7 +886,6 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (_) {}
 
-      // 3. التقرير الشامل المنفصل
       try {
         final bytesAdv = tplFile.readAsBytesSync();
         final excelAdv = xl.Excel.decodeBytes(bytesAdv);
@@ -983,7 +962,6 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    // حساب الماكينات الناقصة مع مراعاة ملف ignore.txt
     final ignoreSet = loadIgnoreList();
     final foundOrders = processedItems
         .where((e) => !e.skip && e.orderNum != null && e.amount > 0)
@@ -994,7 +972,6 @@ class _HomePageState extends State<HomePage> {
         if (!foundOrders.contains(i) && !ignoreSet.contains(i)) i
     ];
 
-    // 4. كتابة ملف review_report.txt مطابق للبايثون
     final lines = <String>[
       "Review report - $reportDate",
       "=" * 60,
@@ -1099,13 +1076,11 @@ class _HomePageState extends State<HomePage> {
     final rawReceipts = <ReceiptItem>[];
     final seenBatchKey = <String>{};
 
-    // المرحلة 1: فحص الـ OCR وتطبيق قواعد البايثون
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
         final key = fileKey(f.path);
 
-        // التحقق مما إذا كانت الصورة مصححة يدوياً من قبل (.pos_fix.json)
         if (fixes.containsKey(key)) {
           final fx = Map<String, dynamic>.from(fixes[key] as Map);
           final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
@@ -1164,7 +1139,6 @@ class _HomePageState extends State<HomePage> {
             how = "name/merchant";
           }
 
-          // إذا كان اسم الملف رقماً (1..18) مثل البايثون
           final fnNum = int.tryParse(nameOnly);
           if (tid == null && fnNum != null && numToTid.containsKey(fnNum)) {
             final ft = numToTid[fnNum]!;
@@ -1177,9 +1151,8 @@ class _HomePageState extends State<HomePage> {
             }
           }
 
-          // منع تكرار نفس الباتش ونفس المبلغ
           if (bNo != null && decision.amount > 0) {
-            final bKey = '${tid ?? row}_$bNo_${decision.amount.toStringAsFixed(2)}';
+            final bKey = '${tid ?? row}_${bNo}_${decision.amount.toStringAsFixed(2)}';
             if (seenBatchKey.contains(bKey)) continue;
             seenBatchKey.add(bKey);
           }
@@ -1219,7 +1192,6 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    // المرحلة 2: توزيع الأرقام وحل التعارض (مثل البايثون تماماً)
     assignTerminalsStage2(rawReceipts);
 
     processedItems.addAll(rawReceipts);
