@@ -33,14 +33,20 @@ jobs:
           flutter create --org com.pos --project-name pos_app --platforms android app
           cp main.dart app/lib/main.dart
           cd app
-          flutter pub add google_mlkit_text_recognition permission_handler pdf excel "archive:^3.6.1" share_plus image printing
-          sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <application|' android/app/src/main/AndroidManifest.xml
+          flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing
+          sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
           echo '-dontwarn com.google.mlkit.vision.text.**' > android/app/proguard-rules.pro
           sed -i 's|signingConfig = signingConfigs.getByName("debug")|&\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")|' android/app/build.gradle.kts
           grep -n "proguard" android/app/build.gradle.kts
           rm -rf test
+          if [ -f ../template.xlsx ]; then
+            mkdir -p assets
+            cp ../template.xlsx assets/template.xlsx
+            sed -i 's|^  uses-material-design: true|  uses-material-design: true\n  assets:\n    - assets/template.xlsx|' pubspec.yaml
+            grep -n -A2 "assets" pubspec.yaml
+          fi
 
           # ---- native: FileProvider + MainActivity (فتح فولدر / إرسال واتساب مباشر) ----
           mkdir -p android/app/src/main/res/xml
@@ -90,15 +96,38 @@ jobs:
 
               private fun openFolder(path: String): Boolean {
                   val prefix = "/storage/emulated/0/"
-                  val rel = if (path.startsWith(prefix)) path.substring(prefix.length) else return false
-                  val uri = DocumentsContract.buildDocumentUri(
+                  if (!path.startsWith(prefix)) return false
+                  val rel = path.substring(prefix.length)
+                  val bases = ArrayList<Intent>()
+                  val docUri = DocumentsContract.buildDocumentUri(
                       "com.android.externalstorage.documents", "primary:" + rel
                   )
-                  val intent = Intent(Intent.ACTION_VIEW)
-                  intent.setDataAndType(uri, "vnd.android.document/directory")
-                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  bases.add(Intent(Intent.ACTION_VIEW).setDataAndType(docUri, "vnd.android.document/directory"))
+                  try {
+                      val fpUri = FileProvider.getUriForFile(this, packageName + ".pos_fileprovider", File(path))
+                      bases.add(Intent(Intent.ACTION_VIEW).setDataAndType(fpUri, "resource/folder"))
+                  } catch (e: Exception) {
+                  }
+                  val seen = HashSet<String>()
+                  val list = ArrayList<Intent>()
+                  for (base in bases) {
+                      base.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      for (ri in packageManager.queryIntentActivities(base, 0)) {
+                          val pkg = ri.activityInfo.packageName
+                          if (!seen.add(pkg)) continue
+                          val i = Intent(base)
+                          i.setClassName(pkg, ri.activityInfo.name)
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          list.add(i)
+                      }
+                  }
+                  if (list.isEmpty()) return false
+                  val chooser = Intent.createChooser(list.removeAt(0), "افتح المجلد بواسطة")
+                  if (list.isNotEmpty()) {
+                      chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, list.map { it as android.os.Parcelable }.toTypedArray())
+                  }
                   return try {
-                      startActivity(intent)
+                      startActivity(chooser)
                       true
                   } catch (e: Exception) {
                       false
