@@ -7,6 +7,7 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
 
 void main() => runApp(const PosApp());
 
@@ -26,7 +27,7 @@ class PosApp extends StatelessWidget {
   }
 }
 
-// ───────────────────── جداول الماكينات ─────────────────────
+// ───────────────────── جداول الماكينات والوحدات ─────────────────────
 class TerminalInfo {
   final int orderNum;
   final int excelRow;
@@ -55,6 +56,10 @@ final Map<String, TerminalInfo> terminals = {
   "50383700": const TerminalInfo(18, 11, "مجمع خدمات"),
 };
 
+final Map<int, String> numToTid = {
+  for (var entry in terminals.entries) entry.value.orderNum: entry.key
+};
+
 final Map<String, String> tidFix = {
   "50336994": "50335994",
   "50336711": "50335711",
@@ -62,7 +67,31 @@ final Map<String, String> tidFix = {
   "50302316": "50382316",
 };
 
-// ───────────────────── خوارزميات الاستخراج المماثلة لبايثون ─────────────────────
+final Map<String, int> merchantCodeMap = {
+  "22": 2, "23": 3, "24": 4, "25": 5, "26": 6,
+  "27": 7, "28": 8, "29": 9, "30": 10, "31": 11,
+};
+
+final List<MapEntry<List<String>, int>> nameHints = [
+  MapEntry(["ABYSS", "ABIS"], 2),
+  MapEntry(["BURJ", "BORG"], 3),
+  MapEntry(["MONTZAH", "TOSUN"], 4),
+  MapEntry(["MUHRAM", "MOHARAM"], 5),
+  MapEntry(["AJAMI", "AGAMI"], 6),
+  MapEntry(["KABBARY", "KABARY"], 7),
+  MapEntry(["MUSTAFA", "KAMEL"], 8),
+  MapEntry(["MODRYT", "MODERYT"], 9),
+  MapEntry(["ALEXANDRIA PORT", "ESMAT"], 10),
+  MapEntry(["EC ESC", "ELZREA", "ESC ALEX", "KHADAMAT"], 11),
+];
+
+final Map<int, String> rowNames = {
+  2: "أبيس", 3: "برج العرب", 4: "المنتزه", 5: "محرم بك",
+  6: "العجمي", 7: "القباري", 8: "مصطفى كامل", 9: "مديرية الأمن",
+  10: "ميناء الإسكندرية", 11: "مجمع خدمات",
+};
+
+// ───────────────────── خوارزميات الاستخراج ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -96,6 +125,54 @@ String? findTerminal(String text) {
     var c = match.group(1)!;
     c = tidFix[c] ?? c;
     if (terminals.containsKey(c)) return c;
+  }
+  return null;
+}
+
+String? findTerminalFuzzy(String text, int? targetRow) {
+  final pool = terminals.entries
+      .where((e) => targetRow == null || e.value.excelRow == targetRow)
+      .map((e) => e.key)
+      .toList();
+
+  final runs = RegExp(r"\d[\d ]{6,14}\d").allMatches(text);
+  String? bestTid;
+  int minDiff = 99;
+
+  for (final run in runs) {
+    final digits = run.group(0)!.replaceAll(RegExp(r'\D'), '');
+    if (digits.length < 8) continue;
+    for (var i = 0; i <= digits.length - 8; i++) {
+      final cand = digits.substring(i, i + 8);
+      if (!cand.startsWith("50")) continue;
+      for (final tid in pool) {
+        int d = 0;
+        for (var k = 0; k < 8; k++) {
+          if (cand[k] != tid[k]) d++;
+        }
+        if (d < minDiff) {
+          minDiff = d;
+          bestTid = tid;
+        }
+      }
+    }
+  }
+  if (minDiff <= 1) return bestTid;
+  return null;
+}
+
+int? findUnitByExtra(String text) {
+  final m = RegExp(r"MERCHANT\s*ID\D{0,15}?(\d[\d\s]{8,13}\d)", caseSensitive: false).firstMatch(text);
+  final digits = m != null ? m.group(1)!.replaceAll(RegExp(r'\D'), '') : text.replaceAll(RegExp(r'\D'), '');
+  final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(digits);
+  if (mm != null && merchantCodeMap.containsKey(mm.group(1))) {
+    return merchantCodeMap[mm.group(1)];
+  }
+  final up = text.toUpperCase();
+  for (final hint in nameHints) {
+    if (hint.key.any((w) => up.contains(w))) {
+      return hint.value;
+    }
   }
   return null;
 }
@@ -167,12 +244,10 @@ double parseSingleReceiptText(String txt) {
       ? double.parse(brandVals.reduce((a, b) => a + b).toStringAsFixed(2))
       : null;
 
-  // 1. التطابق التام بين مجموع البطاقات والإجمالي العام
   if (brandSum != null && grandAmounts.any((g) => (g - brandSum).abs() < 0.05)) {
     return brandSum;
   }
 
-  // 2. إذا وجد إجمالي مكرر في خانة الـ Grand Totals
   if (grandAmounts.isNotEmpty) {
     final freq = mostFrequent(grandAmounts);
     if (freq != null && freq > 0) return freq;
@@ -186,7 +261,6 @@ double parseSingleReceiptText(String txt) {
 }
 
 double extractReceiptAmounts(String text) {
-  // فحص ما إذا كانت الصورة تحتوي على أكثر من إيصال (مثل إيصالين بجانب بعضهما)
   final batchMatches = RegExp(r"BATCH\s*CLOSED|SUCCESSFULLY", caseSensitive: false).allMatches(text).toList();
   if (batchMatches.length > 1) {
     double totalCombined = 0.0;
@@ -312,7 +386,7 @@ void saveFolder(String? f) {
 
 // ───────────────────── نموذج الإيصال ─────────────────────
 class ReceiptItem {
-  final String path;
+  String path;
   String? tid;
   int? orderNum;
   int? row;
@@ -346,6 +420,10 @@ class _HomePageState extends State<HomePage> {
   double progress = 0;
   String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
   final List<ReceiptItem> processedItems = [];
+  String? standardXlsxPath;
+  String? advancedXlsxPath;
+  String? generatedPdfPath;
+  List<int> missingTerminals = [];
 
   @override
   void initState() {
@@ -382,6 +460,265 @@ class _HomePageState extends State<HomePage> {
     setState(() => status = 'اتمسحت ذاكرة الفحص، الفحص القادم سيبدأ من الأول.');
   }
 
+  Future<void> shareStandardFiles() async {
+    final files = <XFile>[];
+    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
+      files.add(XFile(standardXlsxPath!));
+    }
+    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
+      files.add(XFile(generatedPdfPath!));
+    }
+    if (files.isNotEmpty) {
+      await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
+      );
+    }
+  }
+
+  Future<void> shareAdvancedFile() async {
+    if (advancedXlsxPath != null && File(advancedXlsxPath!).existsSync()) {
+      await Share.shareXFiles([XFile(advancedXlsxPath!)], text: 'تقرير إيصالات POS الشامل بالتفاصيل');
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('التقرير الشامل غير متاح حالياً.')),
+      );
+    }
+  }
+
+  Future<void> editReceiptDialog(ReceiptItem item) async {
+    final amtController = TextEditingController(text: item.amount.toStringAsFixed(2));
+    int? selectedOrder = item.orderNum;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => AlertDialog(
+          title: const Text('تعديل بيانات الإيصال'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Image.file(File(item.path), height: 160, fit: BoxFit.contain),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: amtController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: 'المبلغ الإجمالي'),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<int>(
+                  value: selectedOrder,
+                  hint: const Text('اختر الماكينة (1..18)'),
+                  items: [
+                    for (var i = 1; i <= 18; i++)
+                      DropdownMenuItem(
+                        value: i,
+                        child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
+                      ),
+                  ],
+                  onChanged: (v) => setDlgState(() => selectedOrder = v),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+            FilledButton(
+              onPressed: () {
+                final newAmt = double.tryParse(amtController.text) ?? item.amount;
+                setState(() {
+                  item.amount = round2(newAmt);
+                  if (selectedOrder != null) {
+                    item.orderNum = selectedOrder;
+                    item.tid = numToTid[selectedOrder];
+                    item.row = terminals[item.tid]!.excelRow;
+                    item.unitName = terminals[item.tid]!.unitName;
+                  }
+                });
+                Navigator.pop(ctx);
+                rebuildFiles();
+              },
+              child: const Text('حفظ وتحديث الملفات'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> rebuildFiles() async {
+    setState(() => status = 'جاري توليد الملفات وتحديث الشيتات...');
+    final dateCounts = <String, int>{};
+    for (final r in processedItems) {
+      if (r.date != null) {
+        dateCounts[r.date!] = (dateCounts[r.date!] ?? 0) + 1;
+      }
+    }
+    String reportDate = "اليوم";
+    if (dateCounts.isNotEmpty) {
+      reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
+    }
+
+    // 1. بناء ملف الـ PDF المجمع
+    final pdf = pw.Document();
+    processedItems.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
+    for (final r in processedItems) {
+      if (File(r.path).existsSync()) {
+        try {
+          final imgBytes = File(r.path).readAsBytesSync();
+          final imgWidget = pw.MemoryImage(imgBytes);
+          pdf.addPage(
+            pw.Page(
+              pageFormat: PdfPageFormat.a4,
+              build: (pw.Context ctx) => pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+            ),
+          );
+        } catch (_) {}
+      }
+    }
+    final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
+    await pdfOutFile.writeAsBytes(await pdf.save());
+    generatedPdfPath = pdfOutFile.path;
+
+    // حساب إجماليات الوحدات
+    final unitTotals = <int, double>{};
+    for (var r = 2; r <= 11; r++) {
+      unitTotals[r] = 0.0;
+    }
+    for (final item in processedItems) {
+      if (item.row != null && item.amount > 0) {
+        unitTotals[item.row!] = (unitTotals[item.row!] ?? 0.0) + item.amount;
+      }
+    }
+
+    final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
+    if (tplFile.existsSync()) {
+      // 2. الملف الأول: طبق الأصل من التمبلت تماماً بدون أي إضافات
+      try {
+        final bytes = tplFile.readAsBytesSync();
+        final excel = xl.Excel.decodeBytes(bytes);
+        final defaultSheet = excel.tables.keys.first;
+        final sheet = excel[defaultSheet];
+
+        for (var r = 2; r <= 11; r++) {
+          final tot = round2(unitTotals[r] ?? 0.0);
+          final cellD = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
+          cellD.value = xl.DoubleCellValue(tot);
+
+          final cellE = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
+          double cashVal = 0.0;
+          if (cellE.value != null && cellE.value is xl.DoubleCellValue) {
+            cashVal = (cellE.value as xl.DoubleCellValue).value;
+          }
+          cashVal = round2(cashVal);
+
+          final cellF = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
+          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
+        }
+
+        final excelOutBytes = excel.encode();
+        if (excelOutBytes != null) {
+          final stdFile = File('$outputDir/الاسكندريه $reportDate.xlsx');
+          stdFile.createSync(recursive: true);
+          stdFile.writeAsBytesSync(excelOutBytes);
+          standardXlsxPath = stdFile.path;
+        }
+      } catch (_) {}
+
+      // 3. الملف الثاني: التقرير الشامل بكل الميزات المتقدمة وتفاصيل الماكينات
+      try {
+        final bytesAdv = tplFile.readAsBytesSync();
+        final excelAdv = xl.Excel.decodeBytes(bytesAdv);
+        final defaultSheet = excelAdv.tables.keys.first;
+        final sheetAdv = excelAdv[defaultSheet];
+
+        double grandPos = 0.0;
+        double grandCash = 0.0;
+
+        for (var r = 2; r <= 11; r++) {
+          final tot = round2(unitTotals[r] ?? 0.0);
+          grandPos += tot;
+
+          final cellD = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
+          cellD.value = xl.DoubleCellValue(tot);
+
+          final cellE = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
+          double cashVal = 0.0;
+          if (cellE.value != null && cellE.value is xl.DoubleCellValue) {
+            cashVal = (cellE.value as xl.DoubleCellValue).value;
+          }
+          cashVal = round2(cashVal);
+          grandCash += cashVal;
+
+          final cellF = sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
+          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
+        }
+
+        // صف الإجمالي العام النهائي
+        const rowTotalIndex = 11;
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value =
+            xl.TextCellValue('الإجمالي العام');
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value =
+            xl.IntCellValue(18);
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value =
+            xl.DoubleCellValue(round2(grandPos));
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowTotalIndex)).value =
+            xl.DoubleCellValue(round2(grandCash));
+        sheetAdv.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowTotalIndex)).value =
+            xl.DoubleCellValue(round2(grandPos + grandCash));
+
+        // شيت ثانٍ مفصل لكل ماكينة
+        final detailSheet = excelAdv['تفاصيل الماكينات'];
+        final headers = ['رقم الترتيب', 'اسم الوحدة', 'TID الماكينة', 'المبلغ (ج.م)', 'حالة الإيصال'];
+        for (var c = 0; c < headers.length; c++) {
+          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).value =
+              xl.TextCellValue(headers[c]);
+        }
+
+        for (var i = 1; i <= 18; i++) {
+          final currentTid = numToTid[i]!;
+          final info = terminals[currentTid]!;
+          final matched = processedItems.where((e) => e.orderNum == i).toList();
+
+          double amt = 0.0;
+          for (final m in matched) {
+            amt += m.amount;
+          }
+
+          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: i)).value =
+              xl.IntCellValue(i);
+          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: i)).value =
+              xl.TextCellValue(info.unitName);
+          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: i)).value =
+              xl.TextCellValue(currentTid);
+          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: i)).value =
+              xl.DoubleCellValue(round2(amt));
+          detailSheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: i)).value =
+              xl.TextCellValue(matched.isNotEmpty ? 'تم الفحص بنجاح' : '⚠️ غير وارد (مفقود)');
+        }
+
+        final advBytes = excelAdv.encode();
+        if (advBytes != null) {
+          final advFile = File('$outputDir/تقرير_شامل_POS_$reportDate.xlsx');
+          advFile.createSync(recursive: true);
+          advFile.writeAsBytesSync(advBytes);
+          advancedXlsxPath = advFile.path;
+        }
+      } catch (_) {}
+    }
+
+    // حساب النواقص
+    final foundOrders = processedItems.map((e) => e.orderNum).whereType<int>().toSet();
+    missingTerminals = [for (var i = 1; i <= 18; i++) if (!foundOrders.contains(i)) i];
+
+    setState(() => status = 'اكتمل بنجاح!\n'
+        '• تم توليد التقرير الأصلي: الاسكندريه $reportDate.xlsx\n'
+        '• تم توليد التقرير الشامل: تقرير_شامل_POS_$reportDate.xlsx\n'
+        '• تم توليد ملف الـ PDF المجمع.');
+  }
+
   Future<void> runFullPipeline() async {
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
@@ -393,6 +730,7 @@ class _HomePageState extends State<HomePage> {
       busy = true;
       progress = 0;
       processedItems.clear();
+      missingTerminals.clear();
       status = 'جاري البحث عن مجلدات الصور...';
     });
 
@@ -400,7 +738,7 @@ class _HomePageState extends State<HomePage> {
     if (dirs.isEmpty) {
       setState(() {
         busy = false;
-        status = 'تعذر العثور على مجلد صور الواتساب تلقائياً، يمكنك اختياره من زر "اختيار فولدر".';
+        status = 'تعذر العثور على مجلد صور الواتساب تلقائياً.';
       });
       return;
     }
@@ -433,7 +771,7 @@ class _HomePageState extends State<HomePage> {
     if (todo.isEmpty) {
       setState(() {
         busy = false;
-        status = 'لا توجد صور إيصالات جديدة في مجلد الواتساب بالفترة المحددة.';
+        status = 'لا توجد صور إيصالات جديدة في الفترة المحددة.';
       });
       return;
     }
@@ -456,19 +794,29 @@ class _HomePageState extends State<HomePage> {
           final dst = '$rawImagesDir/wa_${baseName(f.path)}';
           final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
 
-          final tid = findTerminal(res.text);
-          final amt = extractReceiptAmounts(res.text);
-          final d = findDate(res.text);
-
-          int? order;
+          var tid = findTerminal(res.text);
           int? row;
           String? uName;
+          int? order;
+
+          final extraRow = findUnitByExtra(res.text);
+
+          if (tid == null) {
+            tid = findTerminalFuzzy(res.text, extraRow);
+          }
+
           if (tid != null && terminals.containsKey(tid)) {
             final info = terminals[tid]!;
             order = info.orderNum;
             row = info.excelRow;
             uName = info.unitName;
+          } else if (extraRow != null) {
+            row = extraRow;
+            uName = rowNames[extraRow];
           }
+
+          final amt = extractReceiptAmounts(res.text);
+          final d = findDate(res.text);
 
           rawReceipts.add(ReceiptItem(
             path: localFile.path,
@@ -500,7 +848,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    // المرحلة 2: إعادة التسمية حسب رقم الماكينة (1..18)
+    // المرحلة 2: إعادة التسمية (تظل الصورة الواحدة حتى لو بها باتشين بملف واحد وترقيم واحد)
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
     final orderedReceipts = <ReceiptItem>[];
     for (final item in rawReceipts) {
@@ -509,141 +857,35 @@ class _HomePageState extends State<HomePage> {
         final newPath = '$rawImagesDir/${item.orderNum}.$ext';
         try {
           final renFile = File(item.path).renameSync(newPath);
-          orderedReceipts.add(ReceiptItem(
-            path: renFile.path,
-            tid: item.tid,
-            orderNum: item.orderNum,
-            row: item.row,
-            unitName: item.unitName,
-            amount: item.amount,
-            date: item.date,
-          ));
-        } catch (_) {
-          orderedReceipts.add(item);
-        }
-      } else {
-        orderedReceipts.add(item);
-      }
-    }
-
-    orderedReceipts.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
-
-    // تحديد تاريخ التقرير
-    final dateCounts = <String, int>{};
-    for (final r in orderedReceipts) {
-      if (r.date != null) {
-        dateCounts[r.date!] = (dateCounts[r.date!] ?? 0) + 1;
-      }
-    }
-    String reportDate = "اليوم";
-    if (dateCounts.isNotEmpty) {
-      reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
-    }
-
-    // المرحلة 3: توليد ملف الـ PDF
-    setState(() => status = 'توليد ملف الـ PDF المجمع...');
-    final pdf = pw.Document();
-    for (final r in orderedReceipts) {
-      if (File(r.path).existsSync()) {
-        try {
-          final imgBytes = File(r.path).readAsBytesSync();
-          final imgWidget = pw.MemoryImage(imgBytes);
-          pdf.addPage(
-            pw.Page(
-              pageFormat: PdfPageFormat.a4,
-              build: (pw.Context ctx) => pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
-            ),
-          );
+          item.path = renFile.path;
         } catch (_) {}
       }
-    }
-    final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
-    await pdfOutFile.writeAsBytes(await pdf.save());
-
-    // المرحلة 4: كتابة المبالغ الدقيقة في الإكسيل
-    setState(() => status = 'تحديث شيت الإكسيل...');
-    final unitTotals = <int, double>{};
-    for (var r = 2; r <= 11; r++) {
-      unitTotals[r] = 0.0;
-    }
-    for (final item in orderedReceipts) {
-      if (item.row != null && item.amount > 0) {
-        unitTotals[item.row!] = (unitTotals[item.row!] ?? 0.0) + item.amount;
-      }
+      orderedReceipts.add(item);
     }
 
-    final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
-    if (tplFile.existsSync()) {
-      try {
-        final bytes = tplFile.readAsBytesSync();
-        final excel = xl.Excel.decodeBytes(bytes);
-        final defaultSheet = excel.tables.keys.first;
-        final sheet = excel[defaultSheet];
-
-        double grandPosTotal = 0.0;
-        double grandCashTotal = 0.0;
-
-        for (var r = 2; r <= 11; r++) {
-          final tot = round2(unitTotals[r] ?? 0.0);
-          grandPosTotal += tot;
-
-          // العمود D (مبلغ POS)
-          final cellD = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
-          cellD.value = xl.DoubleCellValue(tot);
-
-          // قراءة عمود الكاش (العمود E)
-          final cellE = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
-          double cashVal = 0.0;
-          if (cellE.value != null && cellE.value is xl.DoubleCellValue) {
-            cashVal = (cellE.value as xl.DoubleCellValue).value;
-          }
-          cashVal = round2(cashVal);
-          grandCashTotal += cashVal;
-
-          // العمود F (الإجمالي الكلي = POS + Cash)
-          final cellF = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
-          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
-        }
-
-        // صف الإجمالي العام النهائي أسفل الجدول (الصف 12)
-        const rowTotalIndex = 11;
-        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value =
-            xl.TextCellValue('الإجمالي العام');
-        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value =
-            xl.IntCellValue(18);
-        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandPosTotal));
-        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandCashTotal));
-        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowTotalIndex)).value =
-            xl.DoubleCellValue(round2(grandPosTotal + grandCashTotal));
-
-        final excelOutBytes = excel.encode();
-        if (excelOutBytes != null) {
-          File('$outputDir/الاسكندريه $reportDate.xlsx')
-            ..createSync(recursive: true)
-            ..writeAsBytesSync(excelOutBytes);
-        }
-      } catch (_) {}
-    }
+    processedItems.addAll(orderedReceipts);
+    await rebuildFiles();
 
     if (!mounted) return;
     setState(() {
       busy = false;
       progress = 1.0;
-      processedItems.addAll(orderedReceipts);
-      status = 'اكتمل بنجاح!\n'
-          '• تم سحب وترقيم ${orderedReceipts.length} إيصال.\n'
-          '• حُفظ الـ PDF: الاسكندريه $reportDate.pdf\n'
-          '• حُفظ الإكسيل: الاسكندريه $reportDate.xlsx\n'
-          'المسار: all/output';
     });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('إيصالات POS')),
+      appBar: AppBar(
+        title: const Text('إيصالات POS'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.share),
+            tooltip: 'مشاركة الملفات الرسمية',
+            onPressed: busy ? null : shareStandardFiles,
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -683,10 +925,28 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
             const SizedBox(height: 4),
-            FilledButton.icon(
-              onPressed: busy ? null : runFullPipeline,
-              icon: const Icon(Icons.play_arrow),
-              label: const Text('بدء المعالجة الشاملة (PDF + إكسيل)'),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: busy ? null : runFullPipeline,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('بدء المعالجة الشاملة'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  onPressed: busy ? null : shareStandardFiles,
+                  icon: const Icon(Icons.share),
+                  tooltip: 'مشاركة التقرير الرسمي والـ PDF',
+                ),
+                const SizedBox(width: 4),
+                IconButton.filledTonal(
+                  onPressed: busy ? null : shareAdvancedFile,
+                  icon: const Icon(Icons.table_chart),
+                  tooltip: 'مشاركة التقرير الشامل المفصل',
+                ),
+              ],
             ),
             TextButton(
               onPressed: busy ? null : resetSeen,
@@ -702,6 +962,37 @@ class _HomePageState extends State<HomePage> {
               ),
               child: Text(status),
             ),
+            // شريط النواقص
+            if (missingTerminals.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade100,
+                  border: Border.all(color: Colors.amber.shade800),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '⚠️ ماكينات ناقصة (${missingTerminals.length} من 18):',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.amber.shade900,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      missingTerminals
+                          .map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})')
+                          .join(' ، '),
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             Expanded(
               child: ListView.builder(
@@ -722,9 +1013,12 @@ class _HomePageState extends State<HomePage> {
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       subtitle: Text(
-                        'TID: ${item.tid ?? '—'} | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م',
+                        'TID: ${item.tid ?? 'غير محدد'} | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م',
                       ),
-                      trailing: Text(item.path.split('/').last),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.edit, color: Colors.teal),
+                        onPressed: () => editReceiptDialog(item),
+                      ),
                     ),
                   );
                 },
