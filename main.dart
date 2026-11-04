@@ -44,6 +44,24 @@ final String seenPath = '$root/all/.app_seen.json';
 
 String baseName(String path) => path.split('/').last;
 
+final String cfgPath = '$root/all/.app_cfg.json';
+
+String? loadFolder() {
+  try {
+    return (jsonDecode(File(cfgPath).readAsStringSync()) as Map)['folder'] as String?;
+  } catch (_) {
+    return null;
+  }
+}
+
+void saveFolder(String? f) {
+  try {
+    File(cfgPath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode({'folder': f}));
+  } catch (_) {}
+}
+
 List<Directory> _subDirs(String path) {
   try {
     return Directory(path).listSync().whereType<Directory>().toList();
@@ -118,11 +136,41 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  int days = 0; // 0 = today
+  int days = 0; // 0 = today, -1 = all
+  String? customDir;
+  int pdfSkipped = 0;
   bool busy = false;
   double progress = 0;
   String status = 'اضغط "فحص الواتساب" لسحب إيصالات الفترة المختارة.';
   final List<Found> found = [];
+
+  @override
+  void initState() {
+    super.initState();
+    customDir = loadFolder();
+  }
+
+  Future<void> pickFolder() async {
+    final perm = await Permission.manageExternalStorage.request();
+    if (!perm.isGranted) {
+      setState(() => status = 'لازم تسمح بالوصول لكل الملفات الأول.');
+      return;
+    }
+    if (!mounted) return;
+    final res = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => FolderPicker(start: customDir ?? root)),
+    );
+    if (res != null) {
+      saveFolder(res);
+      setState(() => customDir = res);
+    }
+  }
+
+  void useWhatsApp() {
+    saveFolder(null);
+    setState(() => customDir = null);
+  }
 
   Future<void> scan() async {
     setState(() {
@@ -141,24 +189,30 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    final dirs = findWhatsAppImageDirs();
+    pdfSkipped = 0;
+    final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
     if (dirs.isEmpty) {
       setState(() {
         busy = false;
-        status = 'مش لاقي فولدر صور الواتساب.';
+        status = customDir != null ? 'الفولدر ده مش موجود.' : 'مش لاقي فولدر صور الواتساب.';
       });
       return;
     }
 
     final now = DateTime.now();
-    final cutoff =
-        DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+    final cutoff = days < 0
+        ? DateTime(2000)
+        : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final seen = loadSeen();
     final todo = <File>[];
     for (final d in dirs) {
       try {
         for (final e in d.listSync().whereType<File>()) {
           final lower = e.path.toLowerCase();
+          if (lower.endsWith('.pdf')) {
+            pdfSkipped++;
+            continue;
+          }
           if (!(lower.endsWith('.jpg') ||
               lower.endsWith('.jpeg') ||
               lower.endsWith('.png') ||
@@ -206,7 +260,8 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       busy = false;
       status = 'خلص: ${todo.length} صورة اتفحصت، ${found.length} إيصال، '
-          '$copied اتنسخ لـ all/raw_images (مفيش حاجة اتمسحت من الواتساب).';
+          '$copied اتنسخ لـ all/raw_images (الأصول ما اتمسحتش).'
+          '${pdfSkipped > 0 ? '\n$pdfSkipped ملف PDF اتجاهل (دعم PDF لسه جاي).' : ''}';
     });
   }
 
@@ -233,6 +288,7 @@ class _HomePageState extends State<HomePage> {
                   [0, 'اليوم'],
                   [3, '3 أيام'],
                   [7, 'أسبوع'],
+                  [-1, 'الكل'],
                 ])
                   ChoiceChip(
                     label: Text(o[1] as String),
@@ -241,7 +297,24 @@ class _HomePageState extends State<HomePage> {
                   ),
               ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
+            Text('المصدر: ${customDir ?? 'واتساب (تلقائي)'}',
+                textDirection: TextDirection.ltr),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: busy ? null : pickFolder,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('اختيار فولدر'),
+                ),
+                if (customDir != null)
+                  TextButton(
+                    onPressed: busy ? null : useWhatsApp,
+                    child: const Text('رجوع للواتساب'),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 4),
             FilledButton.icon(
               onPressed: busy ? null : scan,
               icon: const Icon(Icons.search),
@@ -267,6 +340,98 @@ class _HomePageState extends State<HomePage> {
                     subtitle: Text('علامات الإيصال: ${f.score}'),
                   );
                 },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+// ───────────── simple folder browser ─────────────
+class FolderPicker extends StatefulWidget {
+  final String start;
+  const FolderPicker({super.key, required this.start});
+
+  @override
+  State<FolderPicker> createState() => _FolderPickerState();
+}
+
+class _FolderPickerState extends State<FolderPicker> {
+  late String path = widget.start;
+  List<Directory> dirs = [];
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  void load() {
+    try {
+      final l = Directory(path)
+          .listSync()
+          .whereType<Directory>()
+          .where((d) => !baseName(d.path).startsWith('.'))
+          .toList();
+      l.sort((a, b) =>
+          baseName(a.path).toLowerCase().compareTo(baseName(b.path).toLowerCase()));
+      dirs = l;
+      error = null;
+    } catch (_) {
+      dirs = [];
+      error = 'مش قادر أفتح الفولدر ده.';
+    }
+  }
+
+  void go(String p) => setState(() {
+        path = p;
+        load();
+      });
+
+  @override
+  Widget build(BuildContext context) {
+    final canUp = path.length > root.length;
+    return Scaffold(
+      appBar: AppBar(title: const Text('اختيار فولدر')),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(path, textDirection: TextDirection.ltr),
+            ),
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Text(error!),
+              ),
+            Expanded(
+              child: ListView(
+                children: [
+                  if (canUp)
+                    ListTile(
+                      leading: const Icon(Icons.arrow_upward),
+                      title: const Text('..'),
+                      onTap: () => go(Directory(path).parent.path),
+                    ),
+                  for (final d in dirs)
+                    ListTile(
+                      leading: const Icon(Icons.folder),
+                      title: Text(baseName(d.path), textDirection: TextDirection.ltr),
+                      onTap: () => go(d.path),
+                    ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: FilledButton(
+                onPressed: () => Navigator.pop(context, path),
+                child: const Text('اختيار هذا الفولدر'),
               ),
             ),
           ],
