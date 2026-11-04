@@ -46,8 +46,8 @@ final Map<String, TerminalInfo> terminals = {
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة الأساسية
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 القديمة
+  "50382315": const TerminalInfo(9, 4, "المنتزه"),
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // الماكينة الثالثة للمنتزه
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -62,7 +62,7 @@ final Map<String, TerminalInfo> terminals = {
 final Map<int, String> numToTid = {
   1: "50335710", 2: "50335993", 3: "50335987",
   4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
-  8: "50382298", 9: "50382315", 
+  8: "50382298", 9: "50382315", // منتزه 2 الأساسية
   10: "50382306", 11: "50382316",
   12: "50382308", 13: "50383706", 14: "50382300", 15: "50383702",
   16: "50382312", 17: "50383699", 18: "50383700",
@@ -97,189 +97,6 @@ final Map<int, String> rowNames = {
   6: "العجمي", 7: "القباري", 8: "مصطفى كامل", 9: "مديرية الأمن",
   10: "ميناء الإسكندرية", 11: "مجمع خدمات",
 };
-
-// ───────────────────── تنظيف نصوص OCR ─────────────────────
-String normalizeOcrText(String text) {
-  var s = text;
-  s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
-  s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
-  return s;
-}
-
-final List<RegExp> _markers = [
-  RegExp(r'TERMINAL', caseSensitive: false),
-  RegExp(r'GRAND|TOTALS?', caseSensitive: false),
-  RegExp(r'NATIONAL\s*BANK|\bNBE\b', caseSensitive: false),
-  RegExp(r'BATCH', caseSensitive: false),
-  RegExp(r'MERCHANT', caseSensitive: false),
-  RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
-  RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
-  RegExp(r'THANK\s*YOU', caseSensitive: false),
-];
-
-int receiptScore(String rawText) {
-  final text = normalizeOcrText(rawText);
-  return _markers.where((r) => r.hasMatch(text)).length + (findTerminal(text) != null ? 1 : 0);
-}
-
-String? findTerminal(String rawText) {
-  final text = normalizeOcrText(rawText);
-  final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,10}\d)", caseSensitive: false).firstMatch(text);
-  if (m != null) {
-    var clean = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
-    if (clean.length >= 8) {
-      var d = clean.substring(clean.length - 8);
-      d = tidFix[d] ?? d;
-      if (terminals.containsKey(d)) return d;
-    }
-  }
-  for (final tid in terminals.keys) {
-    if (text.contains(tid)) return tid;
-  }
-  for (final match in RegExp(r"\b([56]03\d{5})\b").allMatches(text)) {
-    var c = match.group(1)!;
-    c = tidFix[c] ?? c;
-    if (terminals.containsKey(c)) return c;
-  }
-  return null;
-}
-
-String? findTerminalFuzzy(String rawText, int? targetRow) {
-  final text = normalizeOcrText(rawText);
-  final pool = terminals.entries.where((e) => targetRow == null || e.value.excelRow == targetRow).map((e) => e.key).toList();
-  final dist = <String, int>{};
-  final runs = RegExp(r"\d[\d /]{6,14}\d").allMatches(text);
-
-  for (final run in runs) {
-    final digits = run.group(0)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
-    if (digits.length < 8) continue;
-    for (var i = 0; i <= digits.length - 8; i++) {
-      final cand = digits.substring(i, i + 8);
-      if (!cand.startsWith("50") && !cand.startsWith("60")) continue;
-      for (final tid in pool) {
-        int d = 0;
-        for (var k = 0; k < 8; k++) {
-          if (cand[k] != tid[k]) d++;
-        }
-        if (d < (dist[tid] ?? 99)) dist[tid] = d;
-      }
-    }
-  }
-  if (dist.isEmpty) return null;
-  final best = dist.values.reduce(min);
-  final winners = dist.entries.where((e) => e.value == best).map((e) => e.key).toList();
-  if (best <= 1 && winners.length == 1) return winners.first;
-  return null;
-}
-
-int? findUnitByExtra(String rawText) {
-  final text = normalizeOcrText(rawText);
-  final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,14}\d)", caseSensitive: false).firstMatch(text);
-  final cands = <String>[];
-  if (m != null) cands.add(m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
-  cands.add(text.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
-
-  for (final d in cands) {
-    final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(d);
-    if (mm != null && merchantCodeMap.containsKey(mm.group(1))) return merchantCodeMap[mm.group(1)];
-  }
-
-  final up = text.toUpperCase();
-  for (final hint in nameHints) {
-    if (hint.key.any((w) => up.contains(w))) return hint.value;
-  }
-  return null;
-}
-
-String? findDate(String text) {
-  final m = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", caseSensitive: false).firstMatch(text);
-  if (m != null) {
-    final mo = int.tryParse(m.group(2)!) ?? 0;
-    final d = int.tryParse(m.group(3)!) ?? 0;
-    if (mo > 0 && d > 0) return "$d.$mo";
-  }
-  return null;
-}
-
-// ───────────────────── استخراج المبالغ بطريقة التجميع الذكية ─────────────────────
-final RegExp _amountRe = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
-
-List<double> amountsIn(String rawText) {
-  final text = normalizeOcrText(rawText);
-  final out = <double>[];
-  for (final m in _amountRe.allMatches(text)) {
-    try {
-      final whole = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
-      final dec = m.group(2)!;
-      final v = double.tryParse("$whole.$dec");
-      // تجاهل الأرقام الصغيرة لضمان التقاط الإجماليات فقط
-      if (v != null && v >= 10.0 && v <= 5000000) {
-        out.add(double.parse(v.toStringAsFixed(2)));
-      }
-    } catch (_) {}
-  }
-  return out;
-}
-
-class AmountDecision {
-  final double amount;
-  final bool confirmed;
-  const AmountDecision(this.amount, this.confirmed);
-}
-
-// الدالة العبقرية لتخطي مشكلة قراءة الفلاتر الأفقية للصور التي تحتوي على أكثر من إيصال
-AmountDecision extractReceiptAmountPythonStyle(String rawText) {
-  final txt = normalizeOcrText(rawText);
-  final allAmts = amountsIn(txt);
-  if (allAmts.isEmpty) return const AmountDecision(0.0, false);
-
-  // 1. كم إيصال (باتش) في هذه الصورة؟
-  int batchCount = RegExp(r"BATCH", caseSensitive: false).allMatches(txt).length;
-  int termCount = RegExp(r"TERMINAL", caseSensitive: false).allMatches(txt).length;
-  int receiptCount = max(1, max(batchCount, termCount)); // أقل شيء إيصال واحد
-
-  // 2. تجميع الأرقام المتشابهة (التي تكررت في نفس الإيصال كـ Sale و Total و Net)
-  List<List<double>> groups = [];
-  for (double a in allAmts) {
-    bool added = false;
-    for (var g in groups) {
-      if ((g.first - a).abs() < 2.0) { // السماحية لتجاهل أخطاء الـ OCR البسيطة في القروش
-        g.add(a);
-        added = true;
-        break;
-      }
-    }
-    if (!added) groups.add([a]);
-  }
-
-  // 3. ترتيب المجموعات تنازلياً للحصول على المبالغ الأكبر (التي هي الـ GRAND TOTALS)
-  groups.sort((a, b) => b.first.compareTo(a.first));
-
-  double finalSum = 0.0;
-  int receiptsFound = 0;
-  bool confirmed = true;
-
-  // 4. أخذ أكبر مبالغ تكررت بناءً على عدد الإيصالات الموجودة في الصورة
-  for (var g in groups) {
-    if (receiptsFound >= receiptCount) break;
-
-    // كل إيصال يكرر مبلغه 3 مرات، إذا تكرر المبلغ 4-6 مرات فهذا يعني أن هناك إيصالين لهما نفس المبلغ بالضبط!
-    int occurrences = g.length;
-    int receiptsRepresented = (occurrences / 3).ceil();
-    if (receiptsRepresented == 0) receiptsRepresented = 1;
-
-    for (int i = 0; i < receiptsRepresented; i++) {
-      if (receiptsFound >= receiptCount) break;
-      finalSum += g.first;
-      receiptsFound++;
-      if (occurrences < 2) confirmed = false; // إذا لم يتكرر الرقم مرتين على الأقل، يحتاج مراجعة
-    }
-  }
-
-  return AmountDecision(round2(finalSum), confirmed);
-}
-
-double round2(double val) => double.parse(val.toStringAsFixed(2));
 
 // ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
@@ -393,6 +210,12 @@ class ReceiptItem {
   String get displayOrder => orderNum != null ? (suffix != null ? '${orderNum}_$suffix' : '$orderNum') : '؟';
 }
 
+class AmountDecision {
+  final double amount;
+  final bool confirmed;
+  const AmountDecision(this.amount, this.confirmed);
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -413,6 +236,206 @@ class _HomePageState extends State<HomePage> {
   String? generatedPdfPath;
   String? reportTxtPath;
   List<int> missingTerminals = [];
+
+  // ───────────────────── دوال المعالجة الذكية والمحدثة ─────────────────────
+
+  String normalizeOcrText(String text) {
+    var s = text;
+    s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
+    s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
+    return s;
+  }
+
+  int receiptScore(String rawText) {
+    final text = normalizeOcrText(rawText);
+    final markers = [
+      RegExp(r'TERMINAL', caseSensitive: false),
+      RegExp(r'GRAND|TOTALS?', caseSensitive: false),
+      RegExp(r'NATIONAL\s*BANK|\bNBE\b', caseSensitive: false),
+      RegExp(r'BATCH', caseSensitive: false),
+      RegExp(r'MERCHANT', caseSensitive: false),
+      RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
+      RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
+      RegExp(r'THANK\s*YOU', caseSensitive: false),
+    ];
+    return markers.where((r) => r.hasMatch(text)).length + (findTerminal(text) != null ? 1 : 0);
+  }
+
+  String? findTerminal(String rawText) {
+    final text = normalizeOcrText(rawText);
+    final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,10}\d)", caseSensitive: false).firstMatch(text);
+    if (m != null) {
+      var clean = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
+      if (clean.length >= 8) {
+        var d = clean.substring(clean.length - 8);
+        d = tidFix[d] ?? d;
+        if (terminals.containsKey(d)) return d;
+      }
+    }
+    for (final tid in terminals.keys) {
+      if (text.contains(tid)) return tid;
+    }
+    for (final match in RegExp(r"\b([56]03\d{5})\b").allMatches(text)) {
+      var c = match.group(1)!;
+      c = tidFix[c] ?? c;
+      if (terminals.containsKey(c)) return c;
+    }
+    return null;
+  }
+
+  String? findTerminalFuzzy(String rawText, int? targetRow) {
+    final text = normalizeOcrText(rawText);
+    final pool = terminals.entries.where((e) => targetRow == null || e.value.excelRow == targetRow).map((e) => e.key).toList();
+    final dist = <String, int>{};
+    final runs = RegExp(r"\d[\d /]{6,14}\d").allMatches(text);
+
+    for (final run in runs) {
+      final digits = run.group(0)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
+      if (digits.length < 8) continue;
+      for (var i = 0; i <= digits.length - 8; i++) {
+        final cand = digits.substring(i, i + 8);
+        if (!cand.startsWith("50") && !cand.startsWith("60")) continue;
+        for (final tid in pool) {
+          int d = 0;
+          for (var k = 0; k < 8; k++) {
+            if (cand[k] != tid[k]) d++;
+          }
+          if (d < (dist[tid] ?? 99)) dist[tid] = d;
+        }
+      }
+    }
+    if (dist.isEmpty) return null;
+    final best = dist.values.reduce(min);
+    final winners = dist.entries.where((e) => e.value == best).map((e) => e.key).toList();
+    if (best <= 1 && winners.length == 1) return winners.first;
+    return null;
+  }
+
+  int? findUnitByExtra(String rawText) {
+    final text = normalizeOcrText(rawText);
+    final m = RegExp(r"MERCHANT\s*(?:ID|10)\D{0,15}?(\d[\d\s/]{8,14}\d)", caseSensitive: false).firstMatch(text);
+    final cands = <String>[];
+    if (m != null) cands.add(m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
+    cands.add(text.replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''));
+
+    for (final d in cands) {
+      final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(d);
+      if (mm != null && merchantCodeMap.containsKey(mm.group(1))) return merchantCodeMap[mm.group(1)];
+    }
+
+    final up = text.toUpperCase();
+    for (final hint in nameHints) {
+      if (hint.key.any((w) => up.contains(w))) return hint.value;
+    }
+    return null;
+  }
+
+  String? findDate(String text) {
+    final m = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", caseSensitive: false).firstMatch(text);
+    if (m != null) {
+      final mo = int.tryParse(m.group(2)!) ?? 0;
+      final d = int.tryParse(m.group(3)!) ?? 0;
+      if (mo > 0 && d > 0) return "$d.$mo";
+    }
+    return null;
+  }
+
+  // 🎯 استخراج المبالغ بشكل ذكي يدعم المسافات والفواصل المقلوبة
+  List<double> amountsIn(String rawText) {
+    final RegExp amountRe = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
+    final text = normalizeOcrText(rawText);
+    final out = <double>[];
+    for (final m in amountRe.allMatches(text)) {
+      try {
+        final whole = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
+        final dec = m.group(2)!;
+        final v = double.tryParse("$whole.$dec");
+        // تجاهل أي رقم أقل من 10 جنيهات لمنع التقاط أرقام وهمية
+        if (v != null && v >= 10.0 && v <= 5000000) {
+          out.add(double.parse(v.toStringAsFixed(2)));
+        }
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  double round2(double val) => double.parse(val.toStringAsFixed(2));
+
+  // 🎯 الخوارزمية العبقرية والنهائية لدعم الإيصالات المزدوجة بدون قص
+  AmountDecision extractReceiptAmountPythonStyle(String rawText) {
+    final txt = normalizeOcrText(rawText);
+    final grandIndex = txt.toUpperCase().indexOf("GRAND");
+    
+    // 1. إذا وجدنا كلمة GRAND، نركز حصرياً على الأرقام التي تحتها (وهي الإجماليات فقط)
+    if (grandIndex != -1) {
+      final postGrandText = txt.substring(grandIndex);
+      final gAmts = amountsIn(postGrandText);
+      
+      if (gAmts.isNotEmpty) {
+        final counts = <double, int>{};
+        for (final a in gAmts) {
+          double? matchedKey;
+          for (final k in counts.keys) {
+            if ((k - a).abs() < 2.0) { // سماحية لكسور القروش
+              matchedKey = k;
+              break;
+            }
+          }
+          if (matchedKey != null) {
+            counts[matchedKey] = counts[matchedKey]! + 1;
+          } else {
+            counts[a] = 1;
+          }
+        }
+        
+        double finalSum = 0.0;
+        bool allConfirmed = true;
+        int validReceiptsFound = 0;
+        
+        for (final entry in counts.entries) {
+          final amt = entry.key;
+          final occ = entry.value;
+          
+          // في الإيصال السليم، الإجمالي يتكرر 3 مرات. إذا تكرر مرتين على الأقل فهو صحيح 100%
+          if (occ >= 2) {
+            // حساب عدد الإيصالات التي يمثلها هذا المبلغ (مثلاً لو تكرر 6 مرات يعني إيصالين بنفس المبلغ)
+            int receiptsRepresented = (occ / 3).round();
+            if (receiptsRepresented == 0) receiptsRepresented = 1;
+            
+            finalSum += amt * receiptsRepresented;
+            validReceiptsFound += receiptsRepresented;
+          }
+        }
+        
+        if (validReceiptsFound > 0) {
+          return AmountDecision(round2(finalSum), true);
+        }
+      }
+    }
+    
+    // 2. كطريقة احتياطية (إذا لم يتم قراءة كلمة GRAND بشكل صحيح)
+    final allAmts = amountsIn(txt);
+    if (allAmts.isNotEmpty) {
+      final counts = <double, int>{};
+      for (final a in allAmts) counts[a] = (counts[a] ?? 0) + 1;
+      
+      final sorted = counts.entries.toList()..sort((a, b) => b.key.compareTo(a.key)); // الأكبر أولاً
+      
+      // نختار أكبر مبلغ متكرر
+      for (final entry in sorted) {
+        if (entry.value >= 2) {
+          return AmountDecision(entry.key, false);
+        }
+      }
+      
+      // في أسوأ الحالات، نختار أكبر مبلغ في الإيصال بالكامل
+      return AmountDecision(sorted.first.key, false);
+    }
+    
+    return const AmountDecision(0.0, false);
+  }
+
+  // ───────────────────── دوال الواجهة والملفات ─────────────────────
 
   @override
   void initState() {
@@ -625,7 +648,7 @@ class _HomePageState extends State<HomePage> {
       else continue;
       
       r.newName = targetName;
-      final newPath = '$outputDir/$targetName'; // الحفظ المباشر في output
+      final newPath = '$outputDir/$targetName'; 
       if (r.path != newPath && File(r.path).existsSync()) {
         try {
           final fTmp = File(r.path).copySync(newPath);
@@ -671,7 +694,6 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
-      // تعديل ملف الإكسيل بحرص شديد للحفاظ على التنسيق
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -680,6 +702,8 @@ class _HomePageState extends State<HomePage> {
         for (var r = 2; r <= 11; r++) {
           final tot = unitTotals[r] ?? 0.0;
           final cnt = unitCounts[r] ?? 0;
+          
+          // تحديث فقط لعمودين (العدد والمبلغ) لترك باقي الشيت كما هو تماماً
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
         }
@@ -694,12 +718,13 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
+    // 🎯 حساب الماكينات الناقصة والتأكيد على وجود 3 ماكينات للمنتزه
     final foundOrders = processedItems.where((e) => !e.skip && e.orderNum != null && e.amount > 0).map((e) => e.orderNum!).toSet();
     final montazahCount = processedItems.where((e) => !e.skip && e.row == 4 && e.amount > 0).length;
     
     missingTerminals.clear();
     for (var i = 1; i <= 18; i++) {
-        if (i == 8 || i == 9) continue; // المنتزه لها معالجة خاصة أدناه
+        if (i == 8 || i == 9) continue; // المنتزه له معالجة خاصة
         if (!foundOrders.contains(i)) missingTerminals.add(i);
     }
     
