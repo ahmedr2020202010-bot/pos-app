@@ -26,7 +26,7 @@ class PosApp extends StatelessWidget {
   }
 }
 
-// ───────────────────── بيانات الماكينات والوحدات ─────────────────────
+// ───────────────────── جداول الماكينات ─────────────────────
 class TerminalInfo {
   final int orderNum;
   final int excelRow;
@@ -62,7 +62,7 @@ final Map<String, String> tidFix = {
   "50302316": "50382316",
 };
 
-// ───────────────────── خوارزميات الاستخراج والفحص ─────────────────────
+// ───────────────────── خوارزميات الاستخراج ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -127,52 +127,31 @@ List<double> amountsIn(String text) {
   return out;
 }
 
-double? modeValue(List<double> vals) {
-  if (vals.isEmpty) return null;
-  final counts = <double, int>{};
-  for (final v in vals) {
-    counts[v] = (counts[v] ?? 0) + 1;
-  }
-  double best = vals.first;
-  int mx = 0;
-  counts.forEach((k, v) {
-    if (v > mx) {
-      mx = v;
-      best = k;
-    }
-  });
-  return best;
-}
-
-double extractAmount(String text) {
-  final brandReg = RegExp(r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b", caseSensitive: false);
-  final gm = RegExp(r"GRAND|TOTALS", caseSensitive: false).firstMatch(text);
-  final pre = gm != null ? text.substring(0, gm.start) : text;
-  final post = gm != null ? text.substring(gm.start) : "";
-
-  final brandVals = <double>[];
-  final parts = pre.split(brandReg);
-  if (parts.length > 1) {
-    for (var i = 1; i < parts.length; i++) {
-      final v = modeValue(amountsIn(parts[i]));
-      if (v != null) brandVals.add(v);
+double extractAmountAccurate(String text) {
+  final grandMatch = RegExp(r"GRAND\s*TOTALS?[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(text);
+  if (grandMatch != null) {
+    final grandText = grandMatch.group(0)!;
+    final grandAmounts = amountsIn(grandText);
+    if (grandAmounts.isNotEmpty) {
+      return grandAmounts.reduce((a, b) => a > b ? a : b);
     }
   }
 
-  final grand = amountsIn(post);
-  final brandSum = brandVals.isNotEmpty
-      ? double.parse(brandVals.reduce((a, b) => a + b).toStringAsFixed(2))
-      : null;
+  final netMatches = RegExp(r"Total\s*Net\s*Amount[\s\S]*?(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})", caseSensitive: false).allMatches(text);
+  if (netMatches.isNotEmpty) {
+    final lastNet = netMatches.last;
+    final v = double.tryParse("${lastNet.group(1)!.replaceAll(',', '')}.${lastNet.group(2)!}");
+    if (v != null && v >= 0.5) return double.parse(v.toStringAsFixed(2));
+  }
 
-  if (brandSum != null && grand.any((g) => (g - brandSum).abs() < 0.05)) {
-    return brandSum;
+  final allAmts = amountsIn(text);
+  if (allAmts.isNotEmpty) {
+    return allAmts.reduce((a, b) => a > b ? a : b);
   }
-  if (grand.isNotEmpty) {
-    return modeValue(grand) ?? 0.0;
-  }
-  if (brandSum != null) return brandSum;
   return 0.0;
 }
+
+double round2(double val) => double.parse(val.toStringAsFixed(2));
 
 // ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
@@ -186,7 +165,9 @@ String baseName(String path) => path.split('/').last;
 
 List<Directory> _subDirs(String path) {
   try {
-    return Directory(path).listSync().whereType<Directory>().toList();
+    final dir = Directory(path);
+    if (!dir.existsSync()) return [];
+    return dir.listSync().whereType<Directory>().toList();
   } catch (_) {
     return [];
   }
@@ -194,25 +175,40 @@ List<Directory> _subDirs(String path) {
 
 List<Directory> findWhatsAppImageDirs() {
   final out = <Directory>[];
-  void addImages(String mediaPath) {
-    for (final d in _subDirs(mediaPath)) {
-      if (baseName(d.path).endsWith('Images')) out.add(d);
+
+  void checkAndAdd(String p) {
+    final d = Directory(p);
+    if (d.existsSync() && !out.any((x) => x.path == d.path)) {
+      out.add(d);
     }
   }
 
-  for (final a in _subDirs('$root/Android/media')) {
-    if (!baseName(a.path).startsWith('com.whatsapp')) continue;
-    for (final w in _subDirs(a.path)) {
-      if (!baseName(w.path).startsWith('WhatsApp')) continue;
-      addImages('${w.path}/Media');
-      for (final acc in _subDirs('${w.path}/accounts')) {
-        addImages('${acc.path}/Media');
+  checkAndAdd('$root/Android/media/com.whatsapp/WhatsApp/accounts/1003/Media/WhatsApp Images');
+  checkAndAdd('$root/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images');
+  checkAndAdd('$root/WhatsApp/Media/WhatsApp Images');
+
+  final mediaDir = Directory('$root/Android/media');
+  if (mediaDir.existsSync()) {
+    for (final pkg in _subDirs(mediaDir.path)) {
+      if (baseName(pkg.path).toLowerCase().contains('whatsapp')) {
+        checkAndAdd('${pkg.path}/Media/WhatsApp Images');
+        checkAndAdd('${pkg.path}/WhatsApp/Media/WhatsApp Images');
+        for (final acc in _subDirs('${pkg.path}/WhatsApp/accounts')) {
+          checkAndAdd('${acc.path}/Media/WhatsApp Images');
+        }
+        for (final acc in _subDirs('${pkg.path}/accounts')) {
+          checkAndAdd('${acc.path}/Media/WhatsApp Images');
+        }
       }
     }
   }
-  for (final r in _subDirs(root)) {
-    if (baseName(r.path).startsWith('WhatsApp')) addImages('${r.path}/Media');
+
+  for (final d in _subDirs(root)) {
+    if (baseName(d.path).toLowerCase().startsWith('whatsapp')) {
+      checkAndAdd('${d.path}/Media/WhatsApp Images');
+    }
   }
+
   return out;
 }
 
@@ -259,7 +255,7 @@ void saveFolder(String? f) {
   } catch (_) {}
 }
 
-// ───────────────────── نموذج بيانات الإيصال ─────────────────────
+// ───────────────────── نموذج الإيصال ─────────────────────
 class ReceiptItem {
   final String path;
   String? tid;
@@ -342,14 +338,14 @@ class _HomePageState extends State<HomePage> {
       busy = true;
       progress = 0;
       processedItems.clear();
-      status = 'جاري البحث عن الصور الجديدة...';
+      status = 'جاري البحث عن مجلدات الصور...';
     });
 
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
     if (dirs.isEmpty) {
       setState(() {
         busy = false;
-        status = 'تعذر العثور على مجلد الصور.';
+        status = 'تعذر العثور على مجلد صور الواتساب تلقائياً، يمكنك اختياره من زر "اختيار فولدر".';
       });
       return;
     }
@@ -382,7 +378,7 @@ class _HomePageState extends State<HomePage> {
     if (todo.isEmpty) {
       setState(() {
         busy = false;
-        status = 'لا توجد صور إيصالات جديدة في الفترة المحددة.';
+        status = 'لا توجد صور إيصالات جديدة في مجلد الواتساب بالفترة المحددة.';
       });
       return;
     }
@@ -393,7 +389,7 @@ class _HomePageState extends State<HomePage> {
 
     final rawReceipts = <ReceiptItem>[];
 
-    // الخطوة 1: فحص الصور بالـ OCR
+    // المرحلة 1: فحص الـ OCR
     for (var i = 0; i < todo.length; i++) {
       final f = todo[i];
       try {
@@ -406,7 +402,7 @@ class _HomePageState extends State<HomePage> {
           final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
 
           final tid = findTerminal(res.text);
-          final amt = extractAmount(res.text);
+          final amt = extractAmountAccurate(res.text);
           final d = findDate(res.text);
 
           int? order;
@@ -444,12 +440,12 @@ class _HomePageState extends State<HomePage> {
     if (rawReceipts.isEmpty) {
       setState(() {
         busy = false;
-        status = 'تم فحص ${todo.length} صورة، ولم يتم العثور على إيصالات.';
+        status = 'تم فحص ${todo.length} صورة، ولم يتم العثور على إيصالات مطابقة.';
       });
       return;
     }
 
-    // الخطوة 2: ترقيم وإعادة تسمية الصور بأرقام الماكينات (1 إلى 18)
+    // المرحلة 2: إعادة التسمية حسب رقم الماكينة (1..18)
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
     final orderedReceipts = <ReceiptItem>[];
     for (final item in rawReceipts) {
@@ -477,7 +473,7 @@ class _HomePageState extends State<HomePage> {
 
     orderedReceipts.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
 
-    // استخراج تاريخ الإيصالات الأغلب
+    // تحديد تاريخ التقرير
     final dateCounts = <String, int>{};
     for (final r in orderedReceipts) {
       if (r.date != null) {
@@ -489,8 +485,8 @@ class _HomePageState extends State<HomePage> {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
-    // الخطوة 3: إنشاء ملف الـ PDF المجمع
-    setState(() => status = 'توليد ملف PDF المجمع...');
+    // المرحلة 3: توليد ملف الـ PDF
+    setState(() => status = 'توليد ملف الـ PDF المجمع...');
     final pdf = pw.Document();
     for (final r in orderedReceipts) {
       if (File(r.path).existsSync()) {
@@ -509,7 +505,7 @@ class _HomePageState extends State<HomePage> {
     final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
     await pdfOutFile.writeAsBytes(await pdf.save());
 
-    // الخطوة 4: تحديث وتعبئة شيت الإكسيل
+    // المرحلة 4: كتابة المبالغ والإجمالي المقرب بخانتين عشريتين في الإكسيل
     setState(() => status = 'تحديث شيت الإكسيل...');
     final unitTotals = <int, double>{};
     for (var r = 2; r <= 11; r++) {
@@ -529,12 +525,43 @@ class _HomePageState extends State<HomePage> {
         final defaultSheet = excel.tables.keys.first;
         final sheet = excel[defaultSheet];
 
+        double grandPosTotal = 0.0;
+        double grandCashTotal = 0.0;
+
         for (var r = 2; r <= 11; r++) {
-          final tot = unitTotals[r] ?? 0.0;
-          // العمود D يمثل الفهرس 3، والصف (r - 1)
-          final cell = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
-          cell.value = xl.DoubleCellValue(tot);
+          final tot = round2(unitTotals[r] ?? 0.0);
+          grandPosTotal += tot;
+
+          // العمود D (مبلغ POS)
+          final cellD = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1));
+          cellD.value = xl.DoubleCellValue(tot);
+
+          // قراءة عمود الكاش إن وُجد (العمود E)
+          final cellE = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: r - 1));
+          double cashVal = 0.0;
+          if (cellE.value != null && cellE.value is xl.DoubleCellValue) {
+            cashVal = (cellE.value as xl.DoubleCellValue).value;
+          }
+          cashVal = round2(cashVal);
+          grandCashTotal += cashVal;
+
+          // العمود F (الإجمالي = POS + Cash) مقرب تماماً لخانتين
+          final cellF = sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: r - 1));
+          cellF.value = xl.DoubleCellValue(round2(tot + cashVal));
         }
+
+        // صف الإجمالي العام النهائي أسفل الجدول (الصف 12)
+        final rowTotalIndex = 11; // يمثل Row 12
+        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowTotalIndex)).value =
+            xl.TextCellValue('الإجمالي العام');
+        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowTotalIndex)).value =
+            xl.IntCellValue(18);
+        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowTotalIndex)).value =
+            xl.DoubleCellValue(round2(grandPosTotal));
+        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowTotalIndex)).value =
+            xl.DoubleCellValue(round2(grandCashTotal));
+        sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowTotalIndex)).value =
+            xl.DoubleCellValue(round2(grandPosTotal + grandCashTotal));
 
         final excelOutBytes = excel.encode();
         if (excelOutBytes != null) {
@@ -551,10 +578,10 @@ class _HomePageState extends State<HomePage> {
       progress = 1.0;
       processedItems.addAll(orderedReceipts);
       status = 'اكتمل بنجاح!\n'
-          '• تم فرز وترقيم ${orderedReceipts.length} إيصال.\n'
+          '• تم سحب وترقيم ${orderedReceipts.length} إيصال.\n'
           '• حُفظ الـ PDF: الاسكندريه $reportDate.pdf\n'
-          '• حُفظ الإكسيل: الاسكندريه $reportDate.xlsx\n'
-          'المكان: مجلد all/output';
+          '• حُفظ الإكسيل بمبالغ مقربة: الاسكندريه $reportDate.xlsx\n'
+          'المسار: all/output';
     });
   }
 
