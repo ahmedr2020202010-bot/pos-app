@@ -45,9 +45,9 @@ final Map<String, TerminalInfo> terminals = {
   "50335998": const TerminalInfo(5, 3, "برج العرب"),
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
-  "50382298": const TerminalInfo(8, 4, "المنتزه"), // المنتزه 1
-  "50382315": const TerminalInfo(9, 4, "المنتزه"), // المنتزه 2 الجديدة
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // المنتزه 2 القديمة (الآن تُعامل كماكينة ثالثة إذا لزم الأمر)
+  "50382298": const TerminalInfo(8, 4, "المنتزه"),
+  "50382315": const TerminalInfo(9, 4, "المنتزه"),
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // الماكينة الثالثة القديمة للمنتزه
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -59,11 +59,10 @@ final Map<String, TerminalInfo> terminals = {
   "50383700": const TerminalInfo(18, 11, "مجمع خدمات"),
 };
 
-// تعديل numToTid ليعكس أن 9 هي المنتزه 2 الجديدة، ويمكن إضافة القديمة كـ 19 مجازياً لتتبعها
 final Map<int, String> numToTid = {
   1: "50335710", 2: "50335993", 3: "50335987",
   4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
-  8: "50382298", 9: "50382315", // المنتزه 2 الجديدة هي الأساسية هنا
+  8: "50382298", 9: "50382315", // منتزه 2 الأساسية
   10: "50382306", 11: "50382316",
   12: "50382308", 13: "50383706", 14: "50382300", 15: "50383702",
   16: "50382312", 17: "50383699", 18: "50383700",
@@ -99,11 +98,30 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "مجمع خدمات",
 };
 
+// ───────────────────── تنظيف نصوص OCR ─────────────────────
 String normalizeOcrText(String text) {
   var s = text;
   s = s.replaceAllMapped(RegExp(r'(\d)\s*/\s*(\d)'), (m) => '${m.group(1)}7${m.group(2)}');
   s = s.replaceAllMapped(RegExp(r'\bB(\d{2,3}[.,]\d{2})\b'), (m) => '8${m.group(1)}');
   return s;
+}
+
+// ───────────────────── تقييم وفحص الإيصال ─────────────────────
+final List<RegExp> _markers = [
+  RegExp(r'TERMINAL', caseSensitive: false),
+  RegExp(r'GRAND|TOTALS?', caseSensitive: false),
+  RegExp(r'NATIONAL\s*BANK|\bNBE\b', caseSensitive: false),
+  RegExp(r'BATCH', caseSensitive: false),
+  RegExp(r'MERCHANT', caseSensitive: false),
+  RegExp(r'SUCCESSF|CLOSED', caseSensitive: false),
+  RegExp(r'\bVISA\b|MASTER|MEZZA|MEEZA|MEEZ', caseSensitive: false),
+  RegExp(r'THANK\s*YOU', caseSensitive: false),
+];
+
+int receiptScore(String rawText) {
+  final text = normalizeOcrText(rawText);
+  return _markers.where((r) => r.hasMatch(text)).length +
+      (findTerminal(text) != null ? 1 : 0);
 }
 
 String? findTerminal(String rawText) {
@@ -198,7 +216,7 @@ List<String> findBatchNos(String text) {
   return matches.map((m) => m.group(1)!).toSet().toList();
 }
 
-// ريجيكس قوي جداً للتعامل مع المبالغ التي تحتوي مسافات بدلاً من الفواصل (مثل 66 259.39)
+// ريجيكس مخصص لفهم الأرقام الكبيرة حتى في وجود المسافات
 final RegExp _amountRe = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
 
 List<double> amountsIn(String rawText) {
@@ -209,7 +227,8 @@ List<double> amountsIn(String rawText) {
       final whole = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
       final dec = m.group(2)!;
       final v = double.tryParse("$whole.$dec");
-      if (v != null && v >= 0.5 && v <= 5000000) {
+      // تجاهل الأرقام الصغيرة جداً (أقل من 10 جنيهات) لمنع الأخطاء
+      if (v != null && v >= 10.0 && v <= 5000000) {
         out.add(round2(v));
       }
     } catch (_) {}
@@ -223,18 +242,17 @@ class AmountDecision {
   const AmountDecision(this.amount, this.confirmed);
 }
 
-// الدالة الأساسية لاستخراج المبالغ بطريقة البايثون، مع دعم "أكثر من باتش" في نفس الصورة
+// 🎯 استخراج المبالغ بطريقة متكررة أسفل GRAND TOTALS
 AmountDecision extractReceiptAmountPythonStyle(String rawText) {
   final txt = normalizeOcrText(rawText);
   
-  // تقسيم النص إلى أقسام بناءً على كلمة GRAND TOTALS (لأن الصورة قد تحتوي أكثر من إيصال)
+  // تقسيم النص بحسب ظهور كلمة GRAND TOTALS (لحل مشكلة إيصالين وباتشين في نفس الصورة)
   final parts = txt.split(RegExp(r"GRAND\s*TOTALS?|TOTALS?\s*GRAND", caseSensitive: false));
   
   if (parts.length > 1) {
     double totalSum = 0.0;
     bool allConfirmed = true;
     
-    // فحص كل قسم بعد GRAND TOTALS
     for (int i = 1; i < parts.length; i++) {
       final postGrandText = parts[i].split(RegExp(r"THANK\s*YOU|Hotline|App\s*Version", caseSensitive: false)).first;
       final gAmts = amountsIn(postGrandText);
@@ -245,7 +263,7 @@ AmountDecision extractReceiptAmountPythonStyle(String rawText) {
         
         final sorted = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
         final amt = sorted.first.key;
-        final conf = sorted.first.value >= 2;
+        final conf = sorted.first.value >= 2; // مؤكد إذا تكرر مرتين على الأقل
         
         totalSum += amt;
         allConfirmed = allConfirmed && conf;
@@ -255,12 +273,11 @@ AmountDecision extractReceiptAmountPythonStyle(String rawText) {
     if (totalSum > 0) return AmountDecision(round2(totalSum), allConfirmed);
   }
 
-  // طريقة احتياطية: إذا لم توجد الكلمة بوضوح، استخرج أكبر مبالغ مرتبطة بالباتشات
+  // كاحتياطي أخير: جمع أكبر مبلغ مالي متوفر
   final bNos = findBatchNos(txt);
   if (bNos.isNotEmpty) {
      final allAmts = amountsIn(txt);
      if (allAmts.isNotEmpty) {
-        // ترتيب المبالغ تنازلياً وجمع أكبر مبالغ بعدد الباتشات الموجودة
         allAmts.sort((a, b) => b.compareTo(a));
         double sum = 0.0;
         int count = min(bNos.length, allAmts.length);
@@ -670,7 +687,7 @@ class _HomePageState extends State<HomePage> {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
-    // نقل وتسمية الصور بناءً على الترتيب النهائي، وحفظها في output
+    // نقل وتسمية الصور وتجهيزها بـ output
     for (var k = 0; k < processedItems.length; k++) {
       final r = processedItems[k];
       final ext = r.path.split('.').last.toLowerCase();
@@ -684,10 +701,10 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
       r.newName = targetName;
-      final newPath = '$outputDir/$targetName'; // حفظ النتيجة النهائية في output
+      final newPath = '$outputDir/$targetName'; // حفظها في فولدر output
       if (r.path != newPath && File(r.path).existsSync()) {
         try {
-          final fTmp = File(r.path).copySync(newPath); // نسخ وليس نقل للاحتفاظ بالأصل في raw
+          final fTmp = File(r.path).copySync(newPath); // نسخ الصورة إلى مجلد المخرجات باسمها الجديد
           r.path = fTmp.path;
         } catch (_) {}
       }
@@ -738,6 +755,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (tplFile != null) {
+      // 2. تحديث التقرير الرسمي بالمحافظة الحرفية على القالب الأصلي (عدم مسح أي تنسيقات)
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -748,10 +766,9 @@ class _HomePageState extends State<HomePage> {
           final tot = round2(unitTotals[r] ?? 0.0);
           final cnt = unitCounts[r] ?? 0;
 
-          // تعديل عمود POS Count (العمود C) و POS amount (العمود D) فقط
+          // تعديل عمود POS Count (C) و POS amount (D) وترك الباقي كما هو في القالب
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
-          // لا يتم المساس بالمعادلات أو الألوان الموجودة في الأعمدة الأخرى
         }
 
         final excelOutBytes = excel.encode();
@@ -764,38 +781,31 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    // تحديد النواقص، مع التأكد من أن المنتزه يتطلب 3 ماكينات الآن (8، 9، و 9 الإضافية التي ستأخذ رقم 19 مجازاً)
+    // 🎯 تحديد النواقص مع التأكيد على أن المنتزه يحتوي 3 ماكينات الآن
     final foundOrders = processedItems
         .where((e) => !e.skip && e.orderNum != null && e.amount > 0)
         .map((e) => e.orderNum!)
         .toSet();
     
-    // عدد الإيصالات التي تم العثور عليها للمنتزه (صف رقم 4)
     final montazahCount = processedItems.where((e) => !e.skip && e.row == 4 && e.amount > 0).length;
     
     missingTerminals.clear();
     for (var i = 1; i <= 18; i++) {
-        // إذا كان الرقم 8 أو 9 (المنتزه) نعتمد على العدد الإجمالي لإيصالات المنتزه
-        if (i == 8 || i == 9) {
-            continue;
-        }
+        if (i == 8 || i == 9) continue;
         if (!foundOrders.contains(i)) missingTerminals.add(i);
     }
     
-    // المنتزه يجب أن يحتوي على 3 إيصالات (أو أكثر)
+    // إذا كان إيصالات المنتزه أقل من 3، سيتم إعلامك فوراً بأن هناك ماكينة للمنتزه ناقصة
     if (montazahCount < 3) {
-       // إضافة ماكينة وهمية برقم 19 للإشارة إلى نقص في المنتزه
        missingTerminals.add(19); 
-       // إضافة الاسم مجازاً للطباعة
-       numToTid[19] = "50383712"; 
+       numToTid[19] = "50383712";
        terminals["50383712"] = const TerminalInfo(19, 4, "المنتزه (ماكينة 3)");
-       rowNames[4] = "المنتزه";
     }
 
     final grandSum = unitTotals.values.fold(0.0, (a, b) => a + b);
     setState(() => status = 'اكتمل بنجاح! الإجمالي العام: ${grandSum.toStringAsFixed(2)} ج.م\n'
         '• التقرير الرسمي: الاسكندريه $reportDate.xlsx\n'
-        '• تم حفظ الصور المعدلة في مجلد output.');
+        '• تم وضع الصور المعدلة في مجلد الإخراج.');
   }
 
   Future<void> runFullPipeline() async {
