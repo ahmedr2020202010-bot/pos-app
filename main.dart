@@ -45,9 +45,9 @@ final Map<String, TerminalInfo> terminals = {
   "50335998": const TerminalInfo(5, 3, "برج العرب"),
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
-  "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"),
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // الماكينة الثالثة القديمة للمنتزه
+  "50382298": const TerminalInfo(8, 4, "المنتزه"), // ماكينة 1
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // ماكينة 2 الجديدة
+  "50383712": const TerminalInfo(19, 4, "المنتزه"), // ماكينة 3 القديمة
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -62,7 +62,7 @@ final Map<String, TerminalInfo> terminals = {
 final Map<int, String> numToTid = {
   1: "50335710", 2: "50335993", 3: "50335987",
   4: "50325716", 5: "50335998", 6: "50335994", 7: "50335711",
-  8: "50382298", 9: "50382315", // منتزه 2 الأساسية
+  8: "50382298", 9: "50382315", 19: "50383712", // المنتزه أصبحت 3 ماكينات صريحة
   10: "50382306", 11: "50382316",
   12: "50382308", 13: "50383706", 14: "50382300", 15: "50383702",
   16: "50382312", 17: "50383699", 18: "50383700",
@@ -244,7 +244,7 @@ class _HomePageState extends State<HomePage> {
   String? reportTxtPath;
   List<int> missingTerminals = [];
 
-  // ───────────────────── دوال المعالجة الذكية المطابقة للبايثون ─────────────────────
+  // ───────────────────── دوال المعالجة المطابقة للبايثون 100% ─────────────────────
 
   String normalizeOcrText(String text) {
     var s = text;
@@ -309,7 +309,6 @@ class _HomePageState extends State<HomePage> {
       final mm = RegExp(r"11470?(2[2-9]|3[01])084").firstMatch(d);
       if (mm != null && merchantCodeMap.containsKey(mm.group(1))) return merchantCodeMap[mm.group(1)];
     }
-
     final up = text.toUpperCase();
     for (final hint in nameHints) {
       if (hint.key.any((w) => up.contains(w))) return hint.value;
@@ -327,6 +326,11 @@ class _HomePageState extends State<HomePage> {
     return null;
   }
 
+  String? findBatchNo(String text) {
+    final m = RegExp(r"BATCH\s*NO\D{0,6}(\d{4,7})", caseSensitive: false).firstMatch(text);
+    return m?.group(1);
+  }
+
   List<double> amountsIn(String rawText) {
     final RegExp amountRe = RegExp(r"(?<![\d.,])(\d{1,3}(?:[\s.,]+\d{3})*|\d+)\s*[.,]\s*(\d{2})(?!\d)");
     final text = normalizeOcrText(rawText);
@@ -336,7 +340,6 @@ class _HomePageState extends State<HomePage> {
         final whole = m.group(1)!.replaceAll(RegExp(r'[^\d]'), '');
         final dec = m.group(2)!;
         final v = double.tryParse("$whole.$dec");
-        // تجاهل أرقام أقل من 0.5 كما هو بالبايثون الأصلي
         if (v != null && v >= 0.5 && v <= 5000000) {
           out.add(double.parse(v.toStringAsFixed(2)));
         }
@@ -374,9 +377,9 @@ class _HomePageState extends State<HomePage> {
       if (sm != null) pre = pre.substring(sm.end);
     }
 
+    final matches = brandRe.allMatches(pre).toList();
     final sections = <String>[];
-    if (bm != null) {
-      final matches = brandRe.allMatches(pre).toList();
+    if (matches.isNotEmpty) {
       for (int i = 0; i < matches.length; i++) {
         int start = matches[i].end;
         int end = (i + 1 < matches.length) ? matches[i + 1].start : pre.length;
@@ -442,7 +445,22 @@ class _HomePageState extends State<HomePage> {
     return const AmountDecision(0.0, false);
   }
 
-  // 🎯 بناء عنصر الإيصال من نص محدد
+  // 🎯 التقطيع الذكي للصورة التي تحتوي على أكثر من باتش لتفادي التداخل الأفقي
+  List<String> getReceiptChunks(String text) {
+    final chunks = <String>[];
+    // فصل الإيصالات بناءً على النهايات المعتادة
+    final splitRegex = RegExp(r"(THANK\s*YOU|App\s*Version|Hotline\s*\d+)", caseSensitive: false);
+    int start = 0;
+    for (final m in splitRegex.allMatches(text)) {
+      chunks.add(text.substring(start, m.end));
+      start = m.end;
+    }
+    if (start < text.length) {
+      chunks.add(text.substring(start));
+    }
+    return chunks.where((c) => c.trim().length > 50).toList();
+  }
+
   ReceiptItem _buildItem(String chunk, String filePath, String key, double amt, bool confirmed, {String? fallbackText, String? bNo}) {
     var tid = findTerminal(chunk) ?? (fallbackText != null ? findTerminal(fallbackText) : null);
     var how = tid != null ? "terminal" : "none";
@@ -479,22 +497,13 @@ class _HomePageState extends State<HomePage> {
     }
 
     return ReceiptItem(
-      fn: baseName(filePath),
-      path: filePath,
-      key: key,
-      tid: tid,
-      origTid: tid,
-      orderNum: order,
-      row: row,
-      unitName: uName,
-      amount: amt,
-      confirmed: confirmed,
-      how: how,
-      date: findDate(chunk) ?? (fallbackText != null ? findDate(fallbackText) : null),
-      batchNo: bNo,
+      fn: baseName(filePath), path: filePath, key: key, tid: tid, origTid: tid,
+      orderNum: order, row: row, unitName: uName, amount: amt, confirmed: confirmed,
+      how: how, date: findDate(chunk) ?? (fallbackText != null ? findDate(fallbackText) : null), batchNo: bNo,
     );
   }
 
+  // ───────────────────── دوال الواجهة والملفات ─────────────────────
 
   @override
   void initState() {
@@ -644,10 +653,11 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(height: 8),
                 DropdownButtonFormField<int>(
                   value: selectedOrder,
-                  hint: const Text('اختر الماكينة (1..18)'),
+                  hint: const Text('اختر الماكينة (1..19)'),
                   items: [
-                    for (var i = 1; i <= 18; i++)
-                      DropdownMenuItem(value: i, child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}')),
+                    for (var i = 1; i <= 19; i++)
+                      if (numToTid.containsKey(i))
+                        DropdownMenuItem(value: i, child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}')),
                   ],
                   onChanged: (v) => setDlgState(() => selectedOrder = v),
                 ),
@@ -761,7 +771,6 @@ class _HomePageState extends State<HomePage> {
         for (var r = 2; r <= 11; r++) {
           final tot = unitTotals[r] ?? 0.0;
           final cnt = unitCounts[r] ?? 0;
-          
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: r - 1)).value = xl.IntCellValue(cnt);
           sheet.cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: r - 1)).value = xl.DoubleCellValue(tot);
         }
@@ -776,24 +785,18 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
+    // 🎯 حساب النواقص بدقة (19 ماكينة للمنتزه)
     final foundOrders = processedItems.where((e) => !e.skip && e.orderNum != null && e.amount > 0).map((e) => e.orderNum!).toSet();
-    final montazahCount = processedItems.where((e) => !e.skip && e.row == 4 && e.amount > 0).length;
     
     missingTerminals.clear();
-    for (var i = 1; i <= 18; i++) {
-        if (i == 8 || i == 9) continue;
+    for (var i = 1; i <= 19; i++) {
         if (!foundOrders.contains(i)) missingTerminals.add(i);
-    }
-    
-    if (montazahCount < 3) {
-       missingTerminals.add(19); 
-       numToTid[19] = "50383712";
-       terminals["50383712"] = const TerminalInfo(19, 4, "المنتزه (ماكينة 3)");
     }
 
     final grandSum = unitTotals.values.fold(0.0, (a, b) => a + b);
     setState(() => status = 'اكتمل بنجاح! الإجمالي العام: ${grandSum.toStringAsFixed(2)} ج.م\n'
-        '• تم وضع الصور المعدلة في مجلد الإخراج (output).');
+        '• التقرير الرسمي: الاسكندريه $reportDate.xlsx\n'
+        '• تم وضع الصور المعدلة في مجلد الإخراج.');
   }
 
   Future<void> runFullPipeline() async {
@@ -851,6 +854,7 @@ class _HomePageState extends State<HomePage> {
       final f = todo[i];
       try {
         final key = fileKey(f.path);
+
         if (fixes.containsKey(key)) {
           final fx = Map<String, dynamic>.from(fixes[key] as Map);
           final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
@@ -867,52 +871,49 @@ class _HomePageState extends State<HomePage> {
 
         final res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         
-        final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
-        final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
-        
-        // 🎯 فصل الإيصالات الموجودة في نفس الصورة عن طريق كلمة BATCH NO (محاكاة قوية لقص الصورة في البايثون)
-        final chunks = res.text.split(RegExp(r"BATCH\s*NO", caseSensitive: false));
-        
-        if (chunks.length <= 1) {
-           // صورة تحتوي على إيصال واحد فقط
-           final dec = decide([parseReceipt(res.text)]);
-           double finalAmt = dec.amount;
+        // 🎯 معالجة البايثون المكررة والتقطيع لحل التداخل الأفقي
+        final chunks = getReceiptChunks(res.text);
+        if (chunks.isEmpty) chunks.add(res.text);
+
+        List<double> localBatches = [];
+        bool allOk = true;
+
+        for (var chunk in chunks) {
+           final pr = parseReceipt(chunk);
+           final dec = decide([pr]);
            
-           if (finalAmt == 0) { // احتياطي
-              final allAmts = amountsIn(res.text);
-              if (allAmts.isNotEmpty) finalAmt = allAmts.reduce((a,b)=>a>b?a:b);
+           if (dec.amount <= 0) {
+               allOk = false;
+               continue;
            }
+           final bNo = findBatchNo(chunk);
+           final bKey = "${bNo}_${dec.amount}";
+           if (bNo != null && seenBatchKey.contains(bKey)) continue; // تخطي المكرر
            
-           if (finalAmt > 0) {
-              final bNo = RegExp(r"\D{0,6}(\d{4,7})", caseSensitive: false).firstMatch(res.text)?.group(1);
-              final bKey = bNo != null ? '${bNo}_$finalAmt' : '$finalAmt';
-              if (!seenBatchKey.contains(bKey)) {
-                 seenBatchKey.add(bKey);
-                 rawReceipts.add(_buildItem(res.text, localFile.path, key, finalAmt, dec.confirmed, bNo: bNo));
-              }
-           }
+           seenBatchKey.add(bKey);
+           localBatches.add(dec.amount);
+           allOk = allOk && dec.confirmed;
+        }
+
+        double finalAmt = 0.0;
+        if (chunks.length > 1 && (!allOk || localBatches.isEmpty)) {
+            final pr = parseReceipt(res.text);
+            final dec = decide([pr]);
+            if (dec.amount > 0 && (dec.confirmed || localBatches.isEmpty)) {
+                finalAmt = dec.amount;
+                allOk = dec.confirmed;
+            } else {
+                finalAmt = round2(localBatches.fold(0.0, (a, b) => a + b));
+            }
         } else {
-           // صورة تحتوي على باتشين أو أكثر
-           for (int j = 1; j < chunks.length; j++) {
-              final chunk = chunks[j];
-              final dec = decide([parseReceipt(chunk)]);
-              double finalAmt = dec.amount;
-              
-              if (finalAmt == 0) { // احتياطي للقطعة
-                 final allAmts = amountsIn(chunk);
-                 if (allAmts.isNotEmpty) finalAmt = allAmts.reduce((a,b)=>a>b?a:b);
-              }
-              
-              if (finalAmt > 0) {
-                 final bNo = RegExp(r"^\D{0,6}(\d{4,7})", caseSensitive: false).firstMatch(chunk)?.group(1);
-                 final bKey = bNo != null ? '${bNo}_$finalAmt' : '$finalAmt';
-                 if (!seenBatchKey.contains(bKey)) {
-                    seenBatchKey.add(bKey);
-                    // تمرير res.text كنص احتياطي للعثور على اسم الماكينة لو كان مقطوعاً في القطعة
-                    rawReceipts.add(_buildItem(chunk, localFile.path, key, finalAmt, dec.confirmed, fallbackText: res.text, bNo: bNo));
-                 }
-              }
-           }
+            finalAmt = round2(localBatches.fold(0.0, (a, b) => a + b));
+        }
+
+        if (finalAmt > 0 || customDir == rawImagesDir) {
+          final dst = f.parent.path == rawImagesDir ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
+          final localFile = File(dst).existsSync() ? File(dst) : f.copySync(dst);
+          
+          rawReceipts.add(_buildItem(res.text, localFile.path, key, finalAmt, allOk, bNo: findBatchNo(res.text)));
         }
       } catch (_) {}
 
@@ -982,7 +983,7 @@ class _HomePageState extends State<HomePage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('⚠️ ماكينات ناقصة (${missingTerminals.length}):', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900)),
+                    Text('⚠️ ماكينات ناقصة (${missingTerminals.length} من 19):', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900)),
                     const SizedBox(height: 4),
                     Text(missingTerminals.map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})').join(' ، '), style: const TextStyle(fontSize: 13)),
                   ],
