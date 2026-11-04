@@ -44,8 +44,8 @@ final Map<String, TerminalInfo> terminals = {
   "50335994": const TerminalInfo(6, 3, "برج العرب"),
   "50335711": const TerminalInfo(7, 3, "برج العرب"),
   "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"), // ماكينة المنتزه 2 الجديدة
-  "50383712": const TerminalInfo(9, 4, "المنتزه"), // بديل احتياطي لمنتزه 2
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 الجديدة
+  "50383712": const TerminalInfo(9, 4, "المنتزه"), // منتزه 2 القديمة
   "50382306": const TerminalInfo(10, 5, "محرم بك"),
   "50382316": const TerminalInfo(11, 5, "محرم بك"),
   "50382308": const TerminalInfo(12, 6, "العجمي"),
@@ -66,7 +66,7 @@ final Map<int, String> numToTid = {
   6: "50335994",
   7: "50335711",
   8: "50382298",
-  9: "50382315", // المنتزه 2
+  9: "50382315",
   10: "50382306",
   11: "50382316",
   12: "50382308",
@@ -223,9 +223,10 @@ List<double> amountsIn(String text) {
   return out;
 }
 
-double parseSingleReceiptText(String txt) {
-  // 1. البحث الصريح في منطقة ما بعد GRAND TOTALS أو TOTALS GRAND
-  final grandMatch = RegExp(r"(?:GRAND\s*TOTALS?|TOTALS?\s*GRAND)[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(txt);
+// ───────────────────── استخراج الإجمالي العام الدقيق ─────────────────────
+double extractReceiptAmounts(String text) {
+  // فحص ما بعد منطقة GRAND TOTALS
+  final grandMatch = RegExp(r"(?:GRAND\s*TOTALS?|TOTALS?\s*GRAND)[\s\S]*?(?:THANK\s*YOU|Hotline|App\s*Version|$)", caseSensitive: false).firstMatch(text);
   if (grandMatch != null) {
     final gAmts = amountsIn(grandMatch.group(0)!);
     if (gAmts.isNotEmpty) {
@@ -233,40 +234,20 @@ double parseSingleReceiptText(String txt) {
     }
   }
 
-  // 2. البحث عن آخر Total Net Amount قبل نهاية الإيصال
-  final netMatches = RegExp(r"Total\s*Net\s*Amount[\s\S]*?(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})", caseSensitive: false).allMatches(txt);
+  // فحص أرقام Net Amount
+  final netMatches = RegExp(r"Total\s*Net\s*Amount[\s\S]*?(\d{1,3}(?:,\d{3})*|\d+)[.,\s](\d{2})", caseSensitive: false).allMatches(text);
   if (netMatches.isNotEmpty) {
     final lastNet = netMatches.last;
     final v = double.tryParse("${lastNet.group(1)!.replaceAll(',', '')}.${lastNet.group(2)!}");
     if (v != null && v >= 0.5) return double.parse(v.toStringAsFixed(2));
   }
 
-  // 3. القاعدة الأساسية: أكبر مبلغ مسجل في الإيصال
-  final allAmts = amountsIn(txt);
+  // قاعدة أعلى مبلغ مسجل
+  final allAmts = amountsIn(text);
   if (allAmts.isNotEmpty) {
     return allAmts.reduce((a, b) => a > b ? a : b);
   }
   return 0.0;
-}
-
-double extractReceiptAmounts(String text) {
-  final batchMatches = RegExp(r"BATCH\s*CLOSED|SUCCESSFULLY", caseSensitive: false).allMatches(text).toList();
-  if (batchMatches.length > 1) {
-    double totalCombined = 0.0;
-    int prev = 0;
-    for (var i = 1; i < batchMatches.length; i++) {
-      final chunk = text.substring(prev, batchMatches[i].start);
-      final amt = parseSingleReceiptText(chunk);
-      if (amt > 0) totalCombined += amt;
-      prev = batchMatches[i].start;
-    }
-    final lastChunk = text.substring(prev);
-    final lastAmt = parseSingleReceiptText(lastChunk);
-    if (lastAmt > 0) totalCombined += lastAmt;
-    if (totalCombined > 0) return double.parse(totalCombined.toStringAsFixed(2));
-  }
-
-  return parseSingleReceiptText(text);
 }
 
 double round2(double val) => double.parse(val.toStringAsFixed(2));
@@ -276,7 +257,6 @@ const String root = '/storage/emulated/0';
 final String baseDir = '$root/all';
 final String rawImagesDir = '$baseDir/raw_images';
 final String outputDir = '$baseDir/output';
-final String seenPath = '$baseDir/.app_seen.json';
 final String cfgPath = '$baseDir/.app_cfg.json';
 
 String baseName(String path) => path.split('/').last;
@@ -339,22 +319,6 @@ DateTime fileDate(File f) {
     if (d != null) return d;
   }
   return f.lastModifiedSync();
-}
-
-Map<String, dynamic> loadSeen() {
-  try {
-    return jsonDecode(File(seenPath).readAsStringSync()) as Map<String, dynamic>;
-  } catch (_) {
-    return {};
-  }
-}
-
-void saveSeen(Map<String, dynamic> seen) {
-  try {
-    File(seenPath)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode(seen));
-  } catch (_) {}
 }
 
 String? loadFolder() {
@@ -440,13 +404,6 @@ class _HomePageState extends State<HomePage> {
   void useWhatsApp() {
     saveFolder(null);
     setState(() => customDir = null);
-  }
-
-  void resetSeen() {
-    try {
-      File(seenPath).deleteSync();
-    } catch (_) {}
-    setState(() => status = 'اتمسحت ذاكرة الفحص، الفحص القادم سيبدأ من الأول.');
   }
 
   Future<void> shareStandardFiles() async {
@@ -571,7 +528,7 @@ class _HomePageState extends State<HomePage> {
     await pdfOutFile.writeAsBytes(await pdf.save());
     generatedPdfPath = pdfOutFile.path;
 
-    // حساب إجماليات الوحدات
+    // حساب إجماليات كل وحدة
     final unitTotals = <int, double>{};
     for (var r = 2; r <= 11; r++) {
       unitTotals[r] = 0.0;
@@ -584,7 +541,7 @@ class _HomePageState extends State<HomePage> {
 
     final tplFile = File('$baseDir/الاسكندريه 00.xlsx');
     if (tplFile.existsSync()) {
-      // 2. الملف الأول: طبق الأصل 100% من التمبلت الأصلي بدون أي تغيير في شكله أو أوراقه
+      // 2. الملف الأصلي: مطابق تماماً لتمبلت الاسكندريه 00.xlsx دون إضافة أو مساس بأي شيء آخر
       try {
         final bytes = tplFile.readAsBytesSync();
         final excel = xl.Excel.decodeBytes(bytes);
@@ -616,7 +573,7 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (_) {}
 
-      // 3. الملف الثاني: تقرير شامل منفصل تماماً باسم مختلف
+      // 3. التقرير الشامل المنفصل
       try {
         final bytesAdv = tplFile.readAsBytesSync();
         final excelAdv = xl.Excel.decodeBytes(bytesAdv);
@@ -696,7 +653,6 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    // حساب النواقص
     final foundOrders = processedItems.map((e) => e.orderNum).whereType<int>().toSet();
     missingTerminals = [for (var i = 1; i <= 18; i++) if (!foundOrders.contains(i)) i];
 
@@ -734,9 +690,9 @@ class _HomePageState extends State<HomePage> {
     final cutoff = days < 0
         ? DateTime(2000)
         : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
-    final seen = loadSeen();
     final todo = <File>[];
 
+    // جلب كل الصور الواقعة في الفترة المحددة فوراً ودون حظر الذاكرة
     for (final d in dirs) {
       try {
         for (final e in d.listSync().whereType<File>()) {
@@ -747,8 +703,6 @@ class _HomePageState extends State<HomePage> {
               lower.endsWith('.webp'))) {
             continue;
           }
-          final key = '${baseName(e.path)}:${e.lengthSync()}';
-          if (seen.containsKey(key)) continue;
           if (fileDate(e).isBefore(cutoff)) continue;
           todo.add(e);
         }
@@ -758,7 +712,7 @@ class _HomePageState extends State<HomePage> {
     if (todo.isEmpty) {
       setState(() {
         busy = false;
-        status = 'لا توجد صور إيصالات جديدة في الفترة المحددة.';
+        status = 'لا توجد صور في مجلد الواتساب بالفترة المحددة.';
       });
       return;
     }
@@ -775,7 +729,6 @@ class _HomePageState extends State<HomePage> {
       try {
         final res = await recognizer.processImage(InputImage.fromFilePath(f.path));
         final sc = receiptScore(res.text);
-        seen['${baseName(f.path)}:${f.lengthSync()}'] = true;
 
         if (sc >= 2) {
           final dst = '$rawImagesDir/wa_${baseName(f.path)}';
@@ -825,7 +778,6 @@ class _HomePageState extends State<HomePage> {
     }
 
     await recognizer.close();
-    saveSeen(seen);
 
     if (rawReceipts.isEmpty) {
       setState(() {
@@ -935,11 +887,10 @@ class _HomePageState extends State<HomePage> {
                 ),
               ],
             ),
-            TextButton(
-              onPressed: busy ? null : resetSeen,
-              child: const Text('إعادة الفحص من الأول'),
-            ),
-            if (busy) LinearProgressIndicator(value: progress > 0 ? progress : null),
+            if (busy) ...[
+              const SizedBox(height: 8),
+              LinearProgressIndicator(value: progress > 0 ? progress : null),
+            ],
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.all(8),
