@@ -1582,7 +1582,7 @@ Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
             ListTile(
               leading: const Icon(Icons.folder_open),
               title: Text(h['label'] ?? h['pkg'] ?? ''),
-              subtitle: Text(h['pkg'] ?? ''),
+              subtitle: Text('${h['pkg'] ?? ''}\nطريقة: ${h['kind'] ?? ''}'),
               onTap: () => Navigator.pop(c, h),
             ),
           ListTile(
@@ -3955,6 +3955,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         }
       }
     }
+    try {
+      final all = sb.toString();
+      File('$baseDir/id_debug.txt').writeAsStringSync(
+          '##### ${r.pdfName}\ntid=$tid fromUnit=$fromUnit day=${id.day}.${id.month}\n'
+          'votes=${rk.map((e) => '${e.key}:${e.value}').join(' , ')}\n'
+          '${tid == null ? all.substring(0, all.length > 2500 ? 2500 : all.length) : ''}\n\n',
+          mode: FileMode.append);
+    } catch (_) {}
     await _applyName(r, f, tid, id.day, id.month);
     if (fromUnit && r.newName != null) {
       r.idOk = false;
