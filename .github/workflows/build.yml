@@ -35,6 +35,7 @@ jobs:
           cd app
           flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing
           sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<application android:largeHeap=\"true\"|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
           echo '-dontwarn com.google.mlkit.vision.text.**' > android/app/proguard-rules.pro
@@ -253,8 +254,11 @@ jobs:
                           false
                       }
                   }
-                  for (p in folderIntents(path)) {
-                      if (p.first != kind) continue
+                  val allK = folderIntents(path)
+                  val ordered = ArrayList<Pair<String, Intent>>()
+                  for (p in allK) { if (p.first == kind) ordered.add(p) }
+                  for (p in allK) { if (p.first != kind) ordered.add(p) }
+                  for (p in ordered) {
                       val i = Intent(p.second)
                       i.setClassName(pkg, cls)
                       i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
