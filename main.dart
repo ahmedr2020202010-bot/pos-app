@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
@@ -831,6 +832,459 @@ Future<bool> fixImageAsync(String src, String dst, int deg) =>
 Future<void> enhanceImageAsync(String src, String dst) =>
     Isolate.run(() => _enhanceImage(src, dst));
 
+// ───────────────── سكانر الباتش: قص الإيصال من الصورة + تعديل المنظور + تحسين (زي كام سكانر) ─────────────────
+// الفكرة: الورقة البيضا (الباتش) أفتح من الخلفية (ترابيزة/إيد/أرضية). بنفصل الورقة بحدّ Otsu،
+// بنطلّع أكبر مكوّن، بنفرد منظوره (4 أركان)، وبعدين بنشيل الظلال ونبيّض الورقة ونغمّق الكتابة.
+int _otsu(List<int> hist, int total) {
+  var sumAll = 0;
+  for (var i = 0; i < 256; i++) {
+    sumAll += i * hist[i];
+  }
+  var wb = 0, sb = 0, th = 128;
+  var best = -1.0;
+  for (var t = 0; t < 256; t++) {
+    wb += hist[t];
+    if (wb == 0) continue;
+    final wf = total - wb;
+    if (wf == 0) break;
+    sb += t * hist[t];
+    final mb = sb / wb;
+    final mf = (sumAll - sb) / wf;
+    final v = wb.toDouble() * wf * (mb - mf) * (mb - mf);
+    if (v > best) {
+      best = v;
+      th = t;
+    }
+  }
+  return th;
+}
+
+List<double> _trimRange(List<double> v, double f) {
+  final s = List<double>.from(v)..sort();
+  final k = (s.length * f).floor();
+  return [s[k], s[s.length - 1 - k]];
+}
+
+int _ci(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
+double _cd(double v, double lo, double hi) => v < lo ? lo : (v > hi ? hi : v);
+
+// خط مستقيم q = m*p + k بأقل مربعات مع استبعاد النقط الشاردة. null لو النقط قليلة.
+List<double>? _fitLine(List<double?> qs, List<double> ps, int skip) {
+  var pp = <double>[];
+  var qq = <double>[];
+  for (var b = skip; b < qs.length - skip; b++) {
+    final q = qs[b];
+    if (q != null) {
+      pp.add(ps[b]);
+      qq.add(q);
+    }
+  }
+  if (pp.length < 4) return null;
+  var m = 0.0, k = 0.0;
+  for (var iter = 0; iter < 2; iter++) {
+    final n = pp.length;
+    var sp = 0.0, sq = 0.0, spp = 0.0, spq = 0.0;
+    for (var i = 0; i < n; i++) {
+      sp += pp[i];
+      sq += qq[i];
+      spp += pp[i] * pp[i];
+      spq += pp[i] * qq[i];
+    }
+    final d = n * spp - sp * sp;
+    if (d.abs() < 1e-9) {
+      m = 0.0;
+      k = sq / n;
+      break;
+    }
+    m = (n * spq - sp * sq) / d;
+    k = (sq - m * sp) / n;
+    final res = <double>[for (var i = 0; i < n; i++) (qq[i] - (m * pp[i] + k)).abs()]..sort();
+    final lim = math.max(1.5, 2.5 * res[res.length ~/ 2]);
+    final np = <double>[];
+    final nq = <double>[];
+    for (var i = 0; i < n; i++) {
+      if ((qq[i] - (m * pp[i] + k)).abs() <= lim) {
+        np.add(pp[i]);
+        nq.add(qq[i]);
+      }
+    }
+    if (np.length < 4) break;
+    pp = np;
+    qq = nq;
+  }
+  return [m, k];
+}
+
+// أركان الورقة [tlx,tly,trx,try,blx,bly,brx,bry] بإحداثيات الصورة الصغيرة
+List<double>? _quadOfComponent(List<int> pts, Int32List lab, int cid, int sw, int sh) {
+  final bx = <double>[];
+  final by = <double>[];
+  for (final idx in pts) {
+    final x = idx % sw, y = idx ~/ sw;
+    var edge = false;
+    if (x == 0 || x == sw - 1 || y == 0 || y == sh - 1) {
+      edge = true;
+    } else if (lab[idx - 1] != cid ||
+        lab[idx + 1] != cid ||
+        lab[idx - sw] != cid ||
+        lab[idx + sw] != cid) {
+      edge = true;
+    }
+    if (edge) {
+      bx.add(x.toDouble());
+      by.add(y.toDouble());
+    }
+  }
+  if (bx.length < 20) return null;
+
+  // أصغر مستطيل مايل يحيط بالورقة
+  var bestArea = double.infinity;
+  var bestDeg = 0;
+  for (var deg = 0; deg < 90; deg += 2) {
+    final t = deg * math.pi / 180;
+    final c = math.cos(t), s = math.sin(t);
+    final us = <double>[];
+    final vs = <double>[];
+    for (var i = 0; i < bx.length; i++) {
+      us.add(bx[i] * c + by[i] * s);
+      vs.add(-bx[i] * s + by[i] * c);
+    }
+    final ur = _trimRange(us, 0.006);
+    final vr = _trimRange(vs, 0.006);
+    final area = (ur[1] - ur[0]) * (vr[1] - vr[0]);
+    if (area < bestArea) {
+      bestArea = area;
+      bestDeg = deg;
+    }
+  }
+  final t0 = bestDeg * math.pi / 180;
+  final eu = <double>[math.cos(t0), math.sin(t0)];
+  final ev = <double>[-math.sin(t0), math.cos(t0)];
+  final cands = <List<double>>[
+    eu,
+    <double>[-eu[0], -eu[1]],
+    ev,
+    <double>[-ev[0], -ev[1]],
+  ];
+  var ex = cands[0], ey = cands[0];
+  for (final c in cands) {
+    if (c[0] > ex[0]) ex = c;
+    if (c[1] > ey[1]) ey = c;
+  }
+  final ax = <double>[];
+  final ay = <double>[];
+  for (var i = 0; i < bx.length; i++) {
+    ax.add(bx[i] * ex[0] + by[i] * ex[1]);
+    ay.add(bx[i] * ey[0] + by[i] * ey[1]);
+  }
+  final xr = _trimRange(ax, 0.006);
+  final yr = _trimRange(ay, 0.006);
+  final vertical = (yr[1] - yr[0]) >= (xr[1] - xr[0]);
+  final lp = vertical ? ay : ax; // على طول الورقة
+  final lq = vertical ? ax : ay; // عرض الورقة
+  final l0 = vertical ? yr[0] : xr[0];
+  final l1 = vertical ? yr[1] : xr[1];
+  if (l1 - l0 < 4) return null;
+  const nbins = 24;
+  final lo = List<double?>.filled(nbins, null);
+  final loP = List<double>.filled(nbins, 0.0);
+  final hi = List<double?>.filled(nbins, null);
+  final hiP = List<double>.filled(nbins, 0.0);
+  for (var i = 0; i < lp.length; i++) {
+    final p = lp[i], q = lq[i];
+    if (p < l0 || p > l1) continue;
+    final b = math.min(nbins - 1, ((p - l0) / (l1 - l0) * nbins).floor());
+    final cl = lo[b];
+    if (cl == null || q < cl) {
+      lo[b] = q;
+      loP[b] = p;
+    }
+    final ch = hi[b];
+    if (ch == null || q > ch) {
+      hi[b] = q;
+      hiP[b] = p;
+    }
+  }
+  final lowFit = _fitLine(lo, loP, 2) ?? <double>[0.0, vertical ? xr[0] : yr[0]];
+  final highFit = _fitLine(hi, hiP, 2) ?? <double>[0.0, vertical ? xr[1] : yr[1]];
+  double qLow(double p) => lowFit[0] * p + lowFit[1];
+  double qHigh(double p) => highFit[0] * p + highFit[1];
+  List<double> toImg(double a, double b) =>
+      <double>[a * ex[0] + b * ey[0], a * ex[1] + b * ey[1]];
+  final List<double> tl, tr, bl, br;
+  if (vertical) {
+    tl = toImg(qLow(l0), l0);
+    tr = toImg(qHigh(l0), l0);
+    bl = toImg(qLow(l1), l1);
+    br = toImg(qHigh(l1), l1);
+  } else {
+    tl = toImg(l0, qLow(l0));
+    bl = toImg(l0, qHigh(l0));
+    tr = toImg(l1, qLow(l1));
+    br = toImg(l1, qHigh(l1));
+  }
+  return <double>[tl[0], tl[1], tr[0], tr[1], bl[0], bl[1], br[0], br[1]];
+}
+
+double _quadArea(List<double> q) {
+  // tl, tr, br, bl
+  final xs = [q[0], q[2], q[6], q[4]];
+  final ys = [q[1], q[3], q[7], q[5]];
+  var s = 0.0;
+  for (var i = 0; i < 4; i++) {
+    final j = (i + 1) % 4;
+    s += xs[i] * ys[j] - xs[j] * ys[i];
+  }
+  return s.abs() / 2;
+}
+
+double _dist(double x1, double y1, double x2, double y2) =>
+    math.sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
+
+// بيرجّع أركان كل باتش في الصورة (بإحداثيات الصورة الأصلية). فاضي = مش عارف يلاقي ورقة.
+List<List<double>> _detectReceipts(img.Image im) {
+  final w = im.width, h = im.height;
+  final s = 480.0 / math.max(w, h);
+  final sw = math.max(16, (w * s).round());
+  final sh = math.max(16, (h * s).round());
+  final small = img.copyResize(im, width: sw, height: sh, interpolation: img.Interpolation.linear);
+  final total = sw * sh;
+  final lum = Uint8List(total);
+  final hist = List<int>.filled(256, 0);
+  for (var y = 0; y < sh; y++) {
+    for (var x = 0; x < sw; x++) {
+      final p = small.getPixel(x, y);
+      final l = _ci(((p.r * 299 + p.g * 587 + p.b * 114) ~/ 1000).toInt(), 0, 255);
+      lum[y * sw + x] = l;
+      hist[l]++;
+    }
+  }
+  final th = _otsu(hist, total);
+  final lab = Int32List(total);
+  final comps = <List<int>>[];
+  final stack = <int>[];
+  var cid = 0;
+  for (var i0 = 0; i0 < total; i0++) {
+    if (lum[i0] <= th || lab[i0] != 0) continue;
+    cid++;
+    final pts = <int>[];
+    lab[i0] = cid;
+    stack.add(i0);
+    while (stack.isNotEmpty) {
+      final i = stack.removeLast();
+      pts.add(i);
+      final x = i % sw, y = i ~/ sw;
+      if (x > 0 && lum[i - 1] > th && lab[i - 1] == 0) {
+        lab[i - 1] = cid;
+        stack.add(i - 1);
+      }
+      if (x < sw - 1 && lum[i + 1] > th && lab[i + 1] == 0) {
+        lab[i + 1] = cid;
+        stack.add(i + 1);
+      }
+      if (y > 0 && lum[i - sw] > th && lab[i - sw] == 0) {
+        lab[i - sw] = cid;
+        stack.add(i - sw);
+      }
+      if (y < sh - 1 && lum[i + sw] > th && lab[i + sw] == 0) {
+        lab[i + sw] = cid;
+        stack.add(i + sw);
+      }
+    }
+    comps.add(pts);
+  }
+  if (comps.isEmpty) return [];
+  final order = List<int>.generate(comps.length, (i) => i)
+    ..sort((a, b) => comps[b].length.compareTo(comps[a].length));
+  final mainSize = comps[order.first].length;
+  if (mainSize < total * 0.04) return [];
+  if (mainSize > total * 0.9) {
+    // الصورة كلها ورقة (سكرين/اسكانر جاهز): بس نحسّنها
+    return [
+      [0.0, 0.0, w.toDouble(), 0.0, 0.0, h.toDouble(), w.toDouble(), h.toDouble()]
+    ];
+  }
+  final out = <List<double>>[];
+  for (final oi in order) {
+    final pts = comps[oi];
+    if (out.length >= 4) break;
+    if (pts.length < mainSize * 0.3 || pts.length < total * 0.02) break;
+    final q = _quadOfComponent(pts, lab, oi + 1, sw, sh);
+    if (q == null) continue;
+    final area = _quadArea(q);
+    if (area <= 0 || pts.length / area < 0.45) continue;
+    out.add(<double>[for (final v in q) v / s]);
+  }
+  // لو في أكتر من باتش في الصورة: رتّبهم شمال ليمين (أو فوق لتحت لو فوق بعض)
+  out.sort((a, b) {
+    final acx = (a[0] + a[2] + a[4] + a[6]) / 4, bcx = (b[0] + b[2] + b[4] + b[6]) / 4;
+    final acy = (a[1] + a[3] + a[5] + a[7]) / 4, bcy = (b[1] + b[3] + b[5] + b[7]) / 4;
+    final aw = _dist(a[0], a[1], a[2], a[3]), bw = _dist(b[0], b[1], b[2], b[3]);
+    if ((acx - bcx).abs() > math.min(aw, bw) * 0.5) return acx.compareTo(bcx);
+    return acy.compareTo(bcy);
+  });
+  return out;
+}
+
+// بيفرد الورقة (تعديل منظور) ويحسّنها: يشيل الظلال، يبيّض الخلفية، يغمّق الكتابة
+img.Image? _warpAndEnhance(img.Image im, List<double> q) {
+  final wq = (_dist(q[0], q[1], q[2], q[3]) + _dist(q[4], q[5], q[6], q[7])) / 2;
+  final hq = (_dist(q[0], q[1], q[4], q[5]) + _dist(q[2], q[3], q[6], q[7])) / 2;
+  if (wq < 40 || hq < 40) return null;
+  final k = math.min(1.0, 2200.0 / math.max(wq, hq));
+  final wo = math.max(8, (wq * k).round());
+  final ho = math.max(8, (hq * k).round());
+
+  // قص المنطقة المحيطة بالورقة بس (أسرع كتير) وتصغيرها لو كبيرة
+  final xs = [q[0], q[2], q[4], q[6]];
+  final ys = [q[1], q[3], q[5], q[7]];
+  final cx0 = _ci(xs.reduce(math.min).floor() - 6, 0, im.width - 2);
+  final cy0 = _ci(ys.reduce(math.min).floor() - 6, 0, im.height - 2);
+  final cx1 = _ci(xs.reduce(math.max).ceil() + 6, cx0 + 2, im.width);
+  final cy1 = _ci(ys.reduce(math.max).ceil() + 6, cy0 + 2, im.height);
+  final cw = cx1 - cx0, ch = cy1 - cy0;
+  var crop = img.copyCrop(im, x: cx0, y: cy0, width: cw, height: ch);
+  if (k < 1.0) {
+    crop = img.copyResize(crop,
+        width: math.max(4, (cw * k).round()),
+        height: math.max(4, (ch * k).round()),
+        interpolation: img.Interpolation.linear);
+  }
+  final gw = crop.width, gh = crop.height;
+  final sx = gw / cw, sy = gh / ch;
+  final g = Uint8List(gw * gh);
+  for (var y = 0; y < gh; y++) {
+    for (var x = 0; x < gw; x++) {
+      final p = crop.getPixel(x, y);
+      g[y * gw + x] = _ci(((p.r * 299 + p.g * 587 + p.b * 114) ~/ 1000).toInt(), 0, 255);
+    }
+  }
+  final tlx = (q[0] - cx0) * sx, tly = (q[1] - cy0) * sy;
+  final trx = (q[2] - cx0) * sx, try0 = (q[3] - cy0) * sy;
+  final blx = (q[4] - cx0) * sx, bly = (q[5] - cy0) * sy;
+  final brx = (q[6] - cx0) * sx, bry = (q[7] - cy0) * sy;
+
+  // فرد المنظور (استيفاء ثنائي بين الأركان الأربعة)
+  const inset = 0.008;
+  final og = Uint8List(wo * ho);
+  for (var j = 0; j < ho; j++) {
+    final v = inset + (1 - 2 * inset) * (j / (ho - 1));
+    for (var i = 0; i < wo; i++) {
+      final u = inset + (1 - 2 * inset) * (i / (wo - 1));
+      final x = (1 - v) * ((1 - u) * tlx + u * trx) + v * ((1 - u) * blx + u * brx);
+      final y = (1 - v) * ((1 - u) * tly + u * try0) + v * ((1 - u) * bly + u * bry);
+      final x0 = _ci(x.floor(), 0, gw - 2);
+      final y0 = _ci(y.floor(), 0, gh - 2);
+      final fx = _cd(x - x0, 0.0, 1.0);
+      final fy = _cd(y - y0, 0.0, 1.0);
+      final a = g[y0 * gw + x0], b = g[y0 * gw + x0 + 1];
+      final c = g[(y0 + 1) * gw + x0], d = g[(y0 + 1) * gw + x0 + 1];
+      og[j * wo + i] =
+          ((a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy).round();
+    }
+  }
+
+  // تحسين: نقدّر لون الورقة (أعلى قيمة في كل مربع) ونقسم عليه = شيل الظلال وتبييض الخلفية
+  const bs = 12;
+  final hb = (ho + bs - 1) ~/ bs, wb = (wo + bs - 1) ~/ bs;
+  var bg = List<double>.filled(hb * wb, 0.0);
+  for (var by = 0; by < hb; by++) {
+    for (var bx = 0; bx < wb; bx++) {
+      var mx = 0;
+      final y1 = math.min(ho, (by + 1) * bs), x1 = math.min(wo, (bx + 1) * bs);
+      for (var y = by * bs; y < y1; y++) {
+        for (var x = bx * bs; x < x1; x++) {
+          final vv = og[y * wo + x];
+          if (vv > mx) mx = vv;
+        }
+      }
+      bg[by * wb + bx] = mx.toDouble();
+    }
+  }
+  for (var pass = 0; pass < 2; pass++) {
+    final nbg = List<double>.filled(hb * wb, 0.0);
+    for (var by = 0; by < hb; by++) {
+      for (var bx = 0; bx < wb; bx++) {
+        var sum = 0.0;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            sum += bg[_ci(by + dy, 0, hb - 1) * wb + _ci(bx + dx, 0, wb - 1)];
+          }
+        }
+        nbg[by * wb + bx] = sum / 9;
+      }
+    }
+    bg = nbg;
+  }
+  final res = img.Image(width: wo, height: ho);
+  for (var y = 0; y < ho; y++) {
+    final gy = _cd((y + 0.5) / bs - 0.5, 0.0, (hb - 1).toDouble());
+    final by0 = gy.floor();
+    final by1 = math.min(hb - 1, by0 + 1);
+    final fy = gy - by0;
+    for (var x = 0; x < wo; x++) {
+      final gx = _cd((x + 0.5) / bs - 0.5, 0.0, (wb - 1).toDouble());
+      final bx0 = gx.floor();
+      final bx1 = math.min(wb - 1, bx0 + 1);
+      final fx = gx - bx0;
+      final top = bg[by0 * wb + bx0] * (1 - fx) + bg[by0 * wb + bx1] * fx;
+      final bot = bg[by1 * wb + bx0] * (1 - fx) + bg[by1 * wb + bx1] * fx;
+      final bgv = top * (1 - fy) + bot * fy;
+      final n = _cd(og[y * wo + x] / math.max(bgv, 40.0) * 255.0, 0.0, 255.0);
+      // منحنى أغمق للكتابة (gamma) علشان الأرقام تفضل تقيلة وواضحة
+      final o = math.pow(_cd((n - 30.0) / (240.0 - 30.0), 0.0, 1.0), 1.6).toDouble();
+      final c = (o * 255).round();
+      res.setPixelRgb(x, y, c, c, c);
+    }
+  }
+  return res;
+}
+
+// بتشتغل في Isolate. بترجّع مسارات الصفحات (صفحة لكل باتش). فاضي = استخدم الصورة الأصلية.
+List<String> _scanToPages(String src, String base) {
+  final cached = <String>[];
+  var ci = 0;
+  while (File('${base}_$ci.jpg').existsSync()) {
+    cached.add('${base}_$ci.jpg');
+    ci++;
+  }
+  if (cached.isNotEmpty) return cached;
+  if (File('${base}_none').existsSync()) return <String>[];
+  final out = <String>[];
+  try {
+    var im = img.decodeImage(File(src).readAsBytesSync());
+    if (im != null) {
+      im = img.bakeOrientation(im);
+      final quads = _detectReceipts(im);
+      for (final q in quads) {
+        final o = _warpAndEnhance(im, q);
+        if (o == null) continue;
+        final p = '${base}_${out.length}.jpg';
+        File(p).writeAsBytesSync(img.encodeJpg(o, quality: 90));
+        out.add(p);
+      }
+    }
+  } catch (_) {}
+  if (out.isEmpty) {
+    try {
+      File('${base}_none').writeAsStringSync('1');
+    } catch (_) {}
+  }
+  return out;
+}
+
+Future<List<String>> scanReceiptAsync(String src) async {
+  try {
+    final st = File(src).statSync();
+    Directory('$baseDir/.scans').createSync(recursive: true);
+    final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+    final base = '$baseDir/.scans/v2_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    return await Isolate.run(() => _scanToPages(src, base));
+  } catch (_) {
+    return <String>[];
+  }
+}
+
 
 // ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
 Future<List<int>?> loadTemplateBytes() async {
@@ -1332,6 +1786,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         n++;
       } catch (_) {}
     }
+    try {
+      Directory('$baseDir/.scans').deleteSync(recursive: true);
+    } catch (_) {}
     setState(() {
       processedItems.clear();
       missingTerminals = [];
@@ -1482,15 +1939,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final c = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
       return c != 0 ? c : (a.suffix ?? 1).compareTo(b.suffix ?? 1);
     });
+    var pageNo = 0;
     for (final r in processedItems) {
-      if (File(r.path).existsSync()) {
+      pageNo++;
+      if (!File(r.path).existsSync()) continue;
+      setState(() => status = 'جاري تجهيز صفحات الـ PDF ($pageNo / ${processedItems.length})...');
+      // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
+      var srcs = <String>[];
+      try {
+        srcs = await scanReceiptAsync(r.path);
+      } catch (_) {}
+      if (srcs.isEmpty) srcs = <String>[r.path];
+      for (final p in srcs) {
         try {
-          final imgBytes = File(r.path).readAsBytesSync();
-          final imgWidget = pw.MemoryImage(imgBytes);
+          final imgWidget = pw.MemoryImage(File(p).readAsBytesSync());
           pdf.addPage(
             pw.Page(
               pageFormat: PdfPageFormat.a4,
-              build: (pw.Context ctx) => pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+              margin: const pw.EdgeInsets.all(20),
+              build: (pw.Context ctx) =>
+                  pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
             ),
           );
         } catch (_) {}
@@ -2888,6 +3356,8 @@ class MResult {
   String detail = '';
   final List<String> idNotes = [];
   final List<String> cntNotes = [];
+  List<String> altTids = []; // مرشحين تانيين للماكينة (مش بيتحفظوا)
+  String? tidUsed, dayUsed, monthUsed;
   bool idOk = true;
   bool cntOk = true;
   final TextEditingController ctl = TextEditingController();
@@ -2904,6 +3374,7 @@ class MResult {
         'size': size,
         'openPath': openPath,
         'orderNum': orderNum,
+        'tidUsed': tidUsed,
         'newName': newName,
         'count': count,
         'tries': tries,
@@ -2921,6 +3392,7 @@ class MResult {
     r.size = (j['size'] as num?)?.toInt() ?? 0;
     r.openPath = j['openPath'] as String?;
     r.orderNum = (j['orderNum'] as num?)?.toInt();
+    r.tidUsed = j['tidUsed'] as String?;
     r.newName = j['newName'] as String?;
     r.count = (j['count'] as num?)?.toInt() ?? -1;
     r.tries = (j['tries'] as num?)?.toInt() ?? 0;
@@ -2987,6 +3459,75 @@ MIdent _identify(String all) {
   return r;
 }
 
+// ───────── تعريف الماكينة من جوه الـ PDF: تصويت بين كل الصفحات + مطابقة اسم الملف الأصلي ─────────
+class NameHint {
+  final int row;
+  final int? k;
+  NameHint(this.row, this.k);
+}
+
+// الاسم الأصلي زي "2.أبيس 2.يوم.5.11.pdf" -> الوحدة (أبيس) ورقم الماكينة جواها (2)
+NameHint? _nameHint(String pdfName) {
+  final n = _normAr(pdfName.replaceAll(RegExp(r'\.pdf$', caseSensitive: false), ''))
+      .replaceAll('١', '1')
+      .replaceAll('٢', '2')
+      .replaceAll('٣', '3')
+      .replaceAll('٤', '4');
+  int? bestRow;
+  var bestIdx = -1;
+  var bestLen = 0;
+  for (final e in rowNames.entries) {
+    final u = _normAr(e.value);
+    final i = n.indexOf(u);
+    if (i >= 0 && u.length > bestLen) {
+      bestRow = e.key;
+      bestIdx = i;
+      bestLen = u.length;
+    }
+  }
+  if (bestRow == null) return null;
+  final rest = n.substring(bestIdx + bestLen);
+  final m = RegExp(r'^[^\d]{0,3}(\d)(?!\d)').firstMatch(rest);
+  return NameHint(bestRow, m == null ? null : int.tryParse(m.group(1)!));
+}
+
+String? _hintTid(NameHint? h) {
+  if (h == null) return null;
+  final same = terminals.entries.where((e) => e.value.excelRow == h.row).toList()
+    ..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
+  if (same.isEmpty) return null;
+  if (h.k != null && h.k! >= 1 && h.k! <= same.length) return same[h.k! - 1].key;
+  if (same.length == 1) return same.first.key;
+  return null;
+}
+
+// أصوات صفحة واحدة: "TERMINAL ID" بوزن 3، أي رقم 8 خانات معروف بوزن 1، وتقريبي (غلطة رقم) بوزن 0.5
+Map<String, double> _tidVotes(String text) {
+  final v = <String, double>{};
+  final lab = _tidLabeled(text);
+  if (lab != null) v[lab] = (v[lab] ?? 0) + 3;
+  for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(text)) {
+    final c0 = m.group(1)!;
+    final c = tidFix[c0] ?? c0;
+    if (terminals.containsKey(c)) v[c] = (v[c] ?? 0) + 1;
+  }
+  if (v.isEmpty) {
+    final f = findTerminalFuzzyIn([text], null);
+    if (f != null) v[f] = 0.5;
+  }
+  return v;
+}
+
+List<MapEntry<String, double>> _rankVotes(Map<String, double> votes) {
+  final l = votes.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+  return l;
+}
+
+int _cmpM(MResult a, MResult b) {
+  final c = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
+  return c != 0 ? c : (a.newName ?? a.pdfName).compareTo(b.newName ?? b.pdfName);
+}
+
 class MachinesPage extends StatefulWidget {
   const MachinesPage({super.key});
 
@@ -3012,7 +3553,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     WidgetsBinding.instance.addObserver(this);
     pdfDir = loadPdfDir();
     results.addAll(loadMState());
-    results.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
+    results.sort(_cmpM);
     final pend = results.where((r) => r.pending).length;
     if (results.isNotEmpty) {
       status = pend > 0
@@ -3239,13 +3780,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (!resumeOnly) idle = await _identifyAll(rec);
       // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف، وبتتحفظ بعد كل ملف
       await _countAll(rec);
+      _flagDuplicates();
     } finally {
       await rec.close();
       try {
         Directory(tmpDir).deleteSync(recursive: true);
       } catch (_) {}
     }
-    results.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
+    results.sort(_cmpM);
     saveMState(results);
     final pend = results.where((r) => r.pending).length;
     final total = results.fold<int>(0, (a, r) => a + (r.count > 0 ? r.count : 0));
@@ -3298,6 +3840,21 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           ? 'كل الملفات في الفترة دي اتفحصت قبل كده ($skipped ملف).'
           : 'مفيش ملفات PDF في الفترة دي.';
     }
+    // امسح كل النتايج/النسخ القديمة للملفات اللي هنفحصها دلوقتي *قبل* التسمية،
+    // علشان أسماء قديمة متعملش تضارب وتطلّع "_2" من غير ما يكون فيه ملف مكرر.
+    for (final pf in pdfs) {
+      final pn = baseName(pf.path);
+      final ps = pf.lengthSync();
+      for (final o in results.where((x) => x.key == '$pn:$ps' || x.srcPath == pf.path).toList()) {
+        try {
+          if (o.newName != null && o.openPath != null && o.openPath != o.srcPath) {
+            File(o.openPath!).deleteSync();
+          }
+        } catch (_) {}
+        o.ctl.dispose();
+        results.remove(o);
+      }
+    }
     for (var i = 0; i < pdfs.length; i++) {
       if (stopReq) break;
       final f = pdfs[i];
@@ -3327,17 +3884,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (!mounted) return null;
       setState(() => progressValue = (i + 1) / pdfs.length);
     }
-    results.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
+    await _resolveDuplicates();
+    _flagDuplicates();
+    results.sort(_cmpM);
     saveMState(results);
     return null;
   }
 
-  // قراءة أول صفحة (أو التانية والتالتة لو لسه مش لاقي الماكينة) بس: سريع
+  // قراءة صفحات الـ PDF (لحد 6) وتصويت على Terminal ID، وبعدين مطابقتها باسم الملف الأصلي
   Future<void> _identifyOne(MResult r, File f, TextRecognizer rec) async {
     final bytes = await f.readAsBytes();
     final sb = StringBuffer();
+    final votes = <String, double>{};
     var id = MIdent();
-    for (var pi = 0; pi < 3; pi++) {
+    for (var pi = 0; pi < 6; pi++) {
       var got = false;
       await for (final page in Printing.raster(bytes, pages: [pi], dpi: 200)) {
         got = true;
@@ -3347,6 +3907,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         try {
           final res = await rec.processImage(InputImage.fromFilePath(tp.path));
           sb.writeln(res.text);
+          _tidVotes(res.text).forEach((k, v) => votes[k] = (votes[k] ?? 0) + v);
         } catch (_) {}
         try {
           tp.deleteSync();
@@ -3354,14 +3915,130 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       if (!got) break;
       id = _identify(sb.toString());
-      if (id.tid != null && id.day != null) break;
+      final rk = _rankVotes(votes);
+      // وقف بدري لو الماكينة واضحة (Terminal ID مقروء بوضوح) واليوم معروف
+      if (id.day != null &&
+          rk.isNotEmpty &&
+          rk.first.value >= 3 &&
+          (rk.length < 2 || rk.first.value >= rk[1].value * 2)) {
+        break;
+      }
     }
-    await _applyName(r, f, id.tid, id.day, id.month);
+    final rk = _rankVotes(votes);
+    r.altTids = rk.map((e) => e.key).toList();
+    var tid = rk.isNotEmpty ? rk.first.key : id.tid;
+    var fromName = false;
+    if (tid == null) {
+      // الـ PDF مفيهوش Terminal ID مقروء: نستعين باسم الملف الأصلي (ونعلّم للمراجعة)
+      tid = _hintTid(_nameHint(r.pdfName));
+      fromName = tid != null;
+    }
+    await _applyName(r, f, tid, id.day, id.month);
+    if (fromName && r.newName != null) {
+      r.idOk = false;
+      r.idNotes.add('Terminal ID مش واضح في الـ PDF، اتسمّى من اسم الملف الأصلي');
+    }
+    _noteMismatch(r);
+  }
+
+  // لو اسم الملف الأصلي بيقول وحدة غير اللي اتعرفت من جوه الـ PDF: نعلّم للمراجعة
+  void _noteMismatch(MResult r) {
+    final h = _nameHint(r.pdfName);
+    final tid = r.tidUsed;
+    if (h == null || tid == null || !terminals.containsKey(tid)) return;
+    final info = terminals[tid]!;
+    if (info.excelRow != h.row) {
+      r.idOk = false;
+      r.idNotes.add('اسم الملف الأصلي بيقول ${rowNames[h.row]} بس الـ PDF فيه ماكينة ${info.orderNum} ${info.unitName}');
+    }
+  }
+
+  // لو ملفين اتعرفوا على نفس الماكينة: نحاول نوزّعهم (اسم الملف الأصلي / المرشح التاني)
+  Future<void> _resolveDuplicates() async {
+    final groups = <String, List<MResult>>{};
+    for (final r in results) {
+      if (r.tidUsed != null && r.newName != null) {
+        groups.putIfAbsent(r.tidUsed!, () => <MResult>[]).add(r);
+      }
+    }
+    for (final e in groups.entries) {
+      final g = e.value;
+      if (g.length < 2) continue;
+      MResult? winner;
+      for (final r in g) {
+        if (_hintTid(_nameHint(r.pdfName)) == e.key) {
+          winner = r;
+          break;
+        }
+      }
+      winner ??= g.first;
+      for (final r in g) {
+        if (identical(r, winner)) continue;
+        if (!File(r.srcPath).existsSync()) continue;
+        final claimed = results.map((x) => x.tidUsed).whereType<String>().toSet();
+        final h = _nameHint(r.pdfName);
+        String? alt;
+        final ht = _hintTid(h);
+        if (ht != null && !claimed.contains(ht)) alt = ht;
+        if (alt == null) {
+          for (final c in r.altTids) {
+            if (c == e.key || claimed.contains(c)) continue;
+            if (h == null || terminals[c]!.excelRow == h.row) {
+              alt = c;
+              break;
+            }
+          }
+        }
+        if (alt == null) continue;
+        await _applyName(r, File(r.srcPath), alt, r.dayUsed, r.monthUsed);
+        if (r.newName != null) {
+          r.idOk = false;
+          r.idNotes.add('الـ PDF اتعرّف على نفس ماكينة ملف تاني، اتسمّى ماكينة ${terminals[alt]!.orderNum} حسب اسم الملف الأصلي، راجع');
+        }
+      }
+    }
+  }
+
+  // بيعلّم الملفات اللي لسه واخدة نفس الماكينة (مفيش حل تلقائي)
+  void _flagDuplicates() {
+    const tag = 'نفس الماكينة';
+    for (final r in results) {
+      final had = r.idNotes.any((n) => n.startsWith(tag));
+      r.idNotes.removeWhere((n) => n.startsWith(tag));
+      if (had && r.idNotes.isEmpty && r.newName != null) r.idOk = true;
+    }
+    final groups = <String, List<MResult>>{};
+    for (final r in results) {
+      if (r.tidUsed != null && r.newName != null) {
+        groups.putIfAbsent(r.tidUsed!, () => <MResult>[]).add(r);
+      }
+    }
+    for (final e in groups.entries) {
+      if (e.value.length < 2) continue;
+      final info = terminals[e.key];
+      for (final r in e.value) {
+        final others = e.value.where((x) => !identical(x, r)).map((x) => x.pdfName).join(' ، ');
+        r.idOk = false;
+        r.idNotes.add('$tag (${info?.orderNum ?? ''} ${info?.unitName ?? ''}) اتعرفت كمان في: $others — راجع');
+      }
+    }
   }
 
   Future<void> _applyName(MResult r, File f, String? tid, String? day, String? month) async {
     r.idOk = true;
     r.idNotes.clear();
+    // نسخة قديمة متسمية للملف ده: نمسحها قبل ما نسمّي من جديد
+    if (r.newName != null &&
+        r.openPath != null &&
+        r.openPath != r.srcPath &&
+        r.openPath != f.path &&
+        r.openPath!.startsWith(destDir)) {
+      try {
+        File(r.openPath!).deleteSync();
+      } catch (_) {}
+    }
+    r.newName = null;
+    r.tidUsed = tid;
     if (tid == null || !terminals.containsKey(tid)) {
       r.idOk = false;
       r.idNotes.add('مش قادر أعرف الماكينة من الـ PDF');
@@ -3381,18 +4058,26 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.idNotes.add('مش قادر أعرف التاريخ');
       return;
     }
+    r.dayUsed = day;
+    r.monthUsed = month;
     final name = machineNewName(info, day, month);
     var final0 = name;
+    // "_2" بس لو فعلاً ملف تاني (من نفس الفحص) واخد نفس الاسم؛ أي ملف قديم في الفولدر بنكتب فوقه
     var k = 2;
-    while (results.any((x) => x != r && x.newName == final0) ||
-        File('$destDir/$final0.pdf').existsSync()) {
+    while (results.any((x) => x != r && x.newName == final0)) {
       final0 = '${name}_$k';
       k++;
     }
     Directory(destDir).createSync(recursive: true);
-    await f.copy('$destDir/$final0.pdf');
+    final dst = File('$destDir/$final0.pdf');
+    if (dst.path != f.path) {
+      try {
+        if (dst.existsSync()) dst.deleteSync();
+      } catch (_) {}
+      await f.copy(dst.path);
+    }
     r.newName = final0;
-    r.openPath = '$destDir/$final0.pdf';
+    r.openPath = dst.path;
   }
 
   Future<void> _countAll(TextRecognizer rec) async {
@@ -3473,6 +4158,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (r.newName == null && sc.tid != null) {
       // التعريف السريع فشل: نسمّي من نتيجة العد الكاملة
       await _applyName(r, src, sc.tid, sc.day, sc.month);
+      _noteMismatch(r);
     } else if (sc.tid != null && terminals[sc.tid] != null && r.orderNum != null &&
         terminals[sc.tid]!.orderNum != r.orderNum) {
       r.cntOk = false;
