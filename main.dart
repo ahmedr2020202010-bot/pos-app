@@ -41,6 +41,27 @@ Future<double> _safeDpi(Uint8List bytes, int pageIdx, double wanted) async {
   return wanted;
 }
 
+bool _hasPdfHeader(File f) {
+  try {
+    final raf = f.openSync();
+    final h = raf.readSync(5);
+    raf.closeSync();
+    return String.fromCharCodes(h) == '%PDF-';
+  } catch (_) {
+    return false;
+  }
+}
+
+// تاريخ إيصال في المستقبل = قراءة غلط
+bool _plausibleDay(String? d, String? m) {
+  if (d == null || m == null) return true;
+  final di = int.tryParse(d), mi = int.tryParse(m);
+  if (di == null || mi == null) return false;
+  final n = DateTime.now();
+  final dt = DateTime(n.year, mi, di);
+  return !dt.isAfter(DateTime(n.year, n.month, n.day).add(const Duration(days: 1)));
+}
+
 bool _pageEnd(Object e) => e.toString().contains('Invalid page index');
 
 // سجل تشخيصي بيتكتب في id_debug.txt (بيساعد نعرف ليه ملف اتخطّى أو التطبيق خرج)
@@ -1671,6 +1692,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final List<ReceiptItem> processedItems = [];
   String? standardXlsxPath;
   String? generatedPdfPath;
+  List<String> extraPdfPaths = [];
   List<int> missingTerminals = [];
   final List<String> warnings = [];
   final List<String> excludedPay = [];
@@ -1891,6 +1913,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       warnings.clear();
       standardXlsxPath = null;
       generatedPdfPath = null;
+      extraPdfPaths = [];
       status = 'تم مسح $n ملف.';
     });
   }
@@ -1927,6 +1950,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
       files.add(XFile(generatedPdfPath!));
     }
+    for (final p in extraPdfPaths) {
+      if (File(p).existsSync()) files.add(XFile(p));
+    }
     if (files.isNotEmpty) {
       await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
     } else {
@@ -1942,7 +1968,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (File(p).existsSync()) files.add(XFile(p));
     }
     if (files.isNotEmpty) {
-      await Share.shareXFiles(files, text: 'تقرير المراجعة + ملف الـ OCR');
+      await Share.shareXFiles(files, text: 'لوج التقفيل (تقرير المراجعة + OCR)');
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('ملفات المراجعة غير متاحة حالياً.')),
@@ -2029,47 +2055,68 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
-    // 1. بناء ملف الـ PDF المجمع
-    final pdf = pw.Document();
+    // 1. ملفات الـ PDF المجمعة: واحد ليوم التقفيل، وواحد لكل يوم تاني لو فيه إيصالات بتاريخ مختلف
     processedItems.sort((a, b) {
       final c = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
       return c != 0 ? c : (a.suffix ?? 1).compareTo(b.suffix ?? 1);
     });
-    var pageNo = 0;
+    final mainItems =
+        processedItems.where((r) => r.date == null || r.date == reportDate).toList();
+    final otherByDate = <String, List<ReceiptItem>>{};
     for (final r in processedItems) {
-      pageNo++;
-      if (!File(r.path).existsSync()) continue;
-      setState(() => status = 'جاري تجهيز صفحات الـ PDF ($pageNo / ${processedItems.length})...');
-      // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
-      var srcs = <String>[];
-      try {
-        srcs = await scanReceiptAsync(r.path);
-      } catch (_) {}
-      if (srcs.isEmpty) srcs = <String>[r.path];
-      for (final p in srcs) {
-        try {
-          final imgWidget = pw.MemoryImage(File(p).readAsBytesSync());
-          pdf.addPage(
-            pw.Page(
-              pageFormat: PdfPageFormat.a4,
-              margin: const pw.EdgeInsets.all(20),
-              build: (pw.Context ctx) =>
-                  pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
-            ),
-          );
-        } catch (_) {}
+      if (r.date != null && r.date != reportDate) {
+        otherByDate.putIfAbsent(r.date!, () => <ReceiptItem>[]).add(r);
       }
     }
+    var pageNo = 0;
+    Future<bool> buildPdf(List<ReceiptItem> items, File out) async {
+      final pdf = pw.Document();
+      var pages = 0;
+      for (final r in items) {
+        pageNo++;
+        if (!File(r.path).existsSync()) continue;
+        setState(() => status = 'جاري تجهيز صفحات الـ PDF ($pageNo / ${processedItems.length})...');
+        // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
+        var srcs = <String>[];
+        try {
+          srcs = await scanReceiptAsync(r.path);
+        } catch (_) {}
+        if (srcs.isEmpty) srcs = <String>[r.path];
+        for (final p in srcs) {
+          try {
+            final imgWidget = pw.MemoryImage(File(p).readAsBytesSync());
+            pdf.addPage(
+              pw.Page(
+                pageFormat: PdfPageFormat.a4,
+                margin: const pw.EdgeInsets.all(20),
+                build: (pw.Context ctx) =>
+                    pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+              ),
+            );
+            pages++;
+          } catch (_) {}
+        }
+      }
+      if (pages == 0) return false;
+      await out.writeAsBytes(await pdf.save());
+      return true;
+    }
+
     final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
-    await pdfOutFile.writeAsBytes(await pdf.save());
+    await buildPdf(mainItems, pdfOutFile);
     generatedPdfPath = pdfOutFile.path;
+    extraPdfPaths = [];
+    for (final e in otherByDate.entries) {
+      final f = File('$outputDir/الاسكندريه ${e.key}.pdf');
+      if (await buildPdf(e.value, f)) extraPdfPaths.add(f.path);
+    }
 
     // حساب إجماليات كل وحدة
     final unitTotals = <int, double>{};
     for (var r = 2; r <= 11; r++) {
       unitTotals[r] = 0.0;
     }
-    for (final item in processedItems) {
+    for (final item in mainItems) {
       if (item.row != null && item.amount > 0) {
         unitTotals[item.row!] = (unitTotals[item.row!] ?? 0.0) + item.amount;
       }
@@ -2100,7 +2147,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     } catch (_) {}
     final foundOrders =
-        processedItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
+        mainItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
     missingTerminals = [
       for (var i = 1; i <= 19; i++)
         if (!foundOrders.contains(i) && !ignore.contains(i)) i
@@ -2110,6 +2157,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => status = 'اكتمل!\n'
         '$xlsxLine\n'
         '• تم توليد ملف الـ PDF المجمع.' +
+        (extraPdfPaths.isEmpty
+            ? ''
+            : '\n• فيه إيصالات بتواريخ تانية (${otherByDate.keys.join(' ، ')}): اتعمل لها PDF منفصل لكل يوم، ومش داخلة في إجماليات يوم $reportDate.') +
         (sourceNote.isEmpty ? '' : '\n$sourceNote'));
   }
 
@@ -2174,10 +2224,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           {'title': 'A2R POS', 'text': 'جاري فحص الإيصالات...'});
     } catch (_) {}
     try {
+      await _chan.invokeMethod('keepScreenOn', {'on': true});
+    } catch (_) {}
+    try {
       await _runPipelineInner();
     } finally {
       try {
         await _chan.invokeMethod('stopKeepAlive');
+      } catch (_) {}
+      try {
+        await _chan.invokeMethod('keepScreenOn', {'on': false});
       } catch (_) {}
       if (_life != AppLifecycleState.resumed) {
         final rv = processedItems.where((e) => e.needsReview).length;
@@ -2605,8 +2661,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               children: [
                 for (final o in const [
                   [0, 'اليوم'],
-                  [3, '3 أيام'],
-                  [7, 'أسبوع'],
+                  [1, 'يومين'],
+                  [2, '3 أيام'],
                   [-1, 'الكل'],
                 ])
                   ChoiceChip(
@@ -2756,6 +2812,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: shareAdvancedFile,
+            icon: const Icon(Icons.bug_report_outlined),
+            label: const Text('مشاركة اللوج'),
           ),
           if (missingTerminals.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -3410,15 +3472,25 @@ void _collect(RecognizedText res, double x0, double scale, MCollector col) {
 }
 
 // قراءة الصفحة كلها + قراءة شرائح مكبّرة، وبعدين دمج النتايج (نفس الإيصال بيتعدّ مرة)
+int _tmStrips = 0, _tmOcr = 0; // تشخيص: مجموع الوقت (ms) لعمل الشرائح وللـ OCR
+
 Future<void> ocrPageStrips(
     TextRecognizer rec, String pngPath, String prefix, MCollector col) async {
-  final info = await Isolate.run(() => _makeStrips(pngPath, prefix));
+  final sw = Stopwatch()..start();
+  // تقطيع الشرائح (Dart صرف وبطيء) بيشتغل في isolate بالتوازي مع OCR الصفحة الكاملة
+  final stripsF = Isolate.run(() => _makeStrips(pngPath, prefix))
+      .then<List<int>>((v) => v, onError: (_) => <int>[]);
+  RecognizedText? whole;
+  try {
+    whole = await rec.processImage(InputImage.fromFilePath(pngPath));
+  } catch (_) {}
+  final tWhole = sw.elapsedMilliseconds;
+  final info = await stripsF;
+  _tmStrips += sw.elapsedMilliseconds - tWhole;
   col.pageH = info.length >= 2 ? info[1].toDouble() : 3000;
   col.pages.add(<Anchor>[]);
-  try {
-    final res = await rec.processImage(InputImage.fromFilePath(pngPath));
-    _collect(res, 0, 1, col);
-  } catch (_) {}
+  if (whole != null) _collect(whole, 0, 1, col);
+  final t1 = sw.elapsedMilliseconds;
   for (var i = 2; i < info.length; i++) {
     final fp = '${prefix}_${i - 2}.jpg';
     try {
@@ -3429,6 +3501,7 @@ Future<void> ocrPageStrips(
       File(fp).deleteSync();
     } catch (_) {}
   }
+  _tmOcr += tWhole + (sw.elapsedMilliseconds - t1);
 }
 
 // ───────── حالة فحص إيصالات الدفع: بتتحفظ بعد كل ملف علشان لو التطبيق اتقفل يكمّل من مكانه ─────────
@@ -3596,8 +3669,9 @@ class MachinesPage extends StatefulWidget {
 
 class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver {
   String? pdfDir; // null = مستندات واتساب (تلقائي)
-  int days = 3;
+  int days = 0;
   bool skipDone = true;
+  bool reviewOnly = false;
   bool busy = false;
   bool stopReq = false;
   double progressValue = 0;
@@ -3804,10 +3878,16 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           'startKeepAlive', {'title': 'A2R POS', 'text': 'جاري فحص إيصالات الدفع...'});
     } catch (_) {}
     try {
+      await _chan.invokeMethod('keepScreenOn', {'on': true});
+    } catch (_) {}
+    try {
       await _run(resumeOnly);
     } finally {
       try {
         await _chan.invokeMethod('stopKeepAlive');
+      } catch (_) {}
+      try {
+        await _chan.invokeMethod('keepScreenOn', {'on': false});
       } catch (_) {}
       if (_life != AppLifecycleState.resumed) {
         final total = results.fold<int>(0, (a, r) => a + (r.count > 0 ? r.count : 0));
@@ -3836,6 +3916,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     String? idle;
     try {
       // المرحلة 1 (سريعة): تعريف الوحدة وتسمية كل الملفات
+      try {
+        final lf = File('$baseDir/id_debug.txt');
+        if (!resumeOnly && lf.existsSync() && lf.lengthSync() > 300000) lf.deleteSync();
+      } catch (_) {}
       _dbg('PHASE1 start resumeOnly=$resumeOnly');
       if (!resumeOnly) idle = await _identifyAll(rec);
       _dbg('PHASE1 done');
@@ -3887,7 +3971,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         for (final e in d.listSync().whereType<File>()) {
           final n = baseName(e.path);
           final fd = fileDate(e);
-          if (!n.toLowerCase().trim().endsWith('.pdf')) {
+          var isPdf = n.toLowerCase().trim().endsWith('.pdf');
+          if (!isPdf && !fd.isBefore(cutoff) && !n.substring(n.lastIndexOf('.') + 1).contains(RegExp(r'[A-Za-z0-9]'))) {
+            isPdf = _hasPdfHeader(e); // ملفات واتساب DOC-... من غير امتداد
+          }
+          if (!isPdf) {
             if (!fd.isBefore(cutoff)) _dbg('SKIP(مش PDF) $n  size=${e.lengthSync()}');
             continue;
           }
@@ -4039,6 +4127,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           '${tid == null ? all.substring(0, all.length > 2500 ? 2500 : all.length) : ''}\n\n',
           mode: FileMode.append);
     } catch (_) {}
+    final top = rk.isNotEmpty ? rk.first.value : 0.0;
+    final weak = tid != null &&
+        ((!fromUnit && top < 2) || !_plausibleDay(id.day, id.month));
+    if (weak) {
+      // مش واضح إنه إيصال ماكينة (توكيل / ملف تاني): تحت المراجعة، من غير تسمية ولا عد
+      r.tidUsed = null;
+      r.newName = null;
+      r.idOk = false;
+      r.idNotes.add('الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه');
+      r.count = 0;
+      r.cntOk = true;
+      r.detail = 'للمراجعة (مش معدود)';
+      return;
+    }
     await _applyName(r, f, tid, id.day, id.month);
     if (fromUnit && r.newName != null) {
       r.idOk = false;
@@ -4205,14 +4307,22 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     final bytes = await src.readAsBytes();
     final col = MCollector();
+    _tmStrips = 0;
+    _tmOcr = 0;
+    var nPages = 0, tRaster = 0;
+    final swAll = Stopwatch()..start();
+    double? dpiCache; // مقاس الصفحات في الملف الممسوح واحد: نقيس مرة بس
     // صفحة صفحة (مش الملف كله مرة واحدة) علشان الذاكرة ما تخلصش والتطبيق ما يقفلش
     for (var pg = 1; pg <= 400; pg++) {
       var got = false;
       try {
-        final dpi = await _safeDpi(bytes, pg - 1, 220);
+        final t0 = swAll.elapsedMilliseconds;
+        final dpi = dpiCache ??= await _safeDpi(bytes, pg - 1, 220);
         await for (final page in Printing.raster(bytes, pages: [pg - 1], dpi: dpi)) {
           got = true;
+          nPages++;
           final png = await page.toPng();
+          tRaster += swAll.elapsedMilliseconds - t0;
           final tp = File('$tmpDir/m_$pg.png');
           await tp.writeAsBytes(png);
           await ocrPageStrips(rec, tp.path, '$tmpDir/m_${pg}_s', col);
@@ -4226,6 +4336,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (!got) break;
       await Future.delayed(const Duration(milliseconds: 40));
     }
+    _dbg('PAGES ${r.pdfName}: $nPages صفحة، المجموع ${swAll.elapsedMilliseconds ~/ 1000}ث '
+        '(raster+png ${tRaster ~/ 1000}ث، شرائح ${_tmStrips ~/ 1000}ث، OCR ${_tmOcr ~/ 1000}ث)');
     final sc = col.finish();
     r.count = sc.count;
     r.detail = 'RRN كامل ${sc.full} • ناقص القراءة ${sc.partial}${sc.rangeText}';
@@ -4266,9 +4378,37 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     return out;
   }
 
+  Future<void> shareLog() async {
+    final f = File('$baseDir/id_debug.txt');
+    if (!f.existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مفيش لوج لسه. شغّل الفحص الأول.')),
+      );
+      return;
+    }
+    await Share.shareXFiles([XFile(f.path, mimeType: 'text/plain')], text: 'لوج إيصالات الدفع');
+  }
+
   @override
   Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !busy,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (!didPop && busy) {
+          // الفحص شغال: ما نقفلش الشاشة، نرجّع التطبيق للخلفية بس علشان الفحص يكمّل
+          _dbg('BACK while busy -> moveToBack');
+          try {
+            await _chan.invokeMethod('moveToBack');
+          } catch (_) {}
+        }
+      },
+      child: _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     final missing = results.isEmpty ? <String>[] : missingMachines();
+    final reviewN = results.where((r) => !r.ok).length;
     final pendCount = results.where((r) => r.pending).length;
     final named = results.where((r) => r.newName != null).length;
     return Scaffold(
@@ -4290,8 +4430,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                     children: [
                       for (final o in const [
                         [0, 'اليوم'],
-                        [3, '3 أيام'],
-                        [7, 'أسبوع'],
+                        [1, 'يومين'],
+                        [2, '3 أيام'],
                         [-1, 'الكل'],
                       ])
                         ChoiceChip(
@@ -4425,10 +4565,32 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             ],
           ),
           const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: reviewN == 0 && !reviewOnly
+                      ? null
+                      : () => setState(() => reviewOnly = !reviewOnly),
+                  icon: Icon(reviewOnly ? Icons.list : Icons.fact_check),
+                  label: Text(reviewOnly ? 'عرض الكل' : 'مراجعة ($reviewN)'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: busy ? null : clearAll,
+                  icon: const Icon(Icons.delete_sweep),
+                  label: const Text('مسح الكل'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
           OutlinedButton.icon(
-            onPressed: busy ? null : clearAll,
-            icon: const Icon(Icons.delete_sweep),
-            label: const Text('مسح الكل'),
+            onPressed: shareLog,
+            icon: const Icon(Icons.bug_report_outlined),
+            label: const Text('مشاركة اللوج'),
           ),
           if (missing.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -4444,7 +4606,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             ),
           ],
           const SizedBox(height: 10),
-          for (final r in results)
+          for (final r in results.where((r) => !reviewOnly || !r.ok))
             Builder(builder: (context) {
               final e = int.tryParse(r.ctl.text.trim());
               final match = (e == null || r.pending) ? null : e == r.count;
