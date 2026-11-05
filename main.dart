@@ -22,7 +22,7 @@ class PosApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'إيصالات POS',
+      title: 'A2R POS',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
       builder: (context, child) =>
@@ -1018,7 +1018,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+  AppLifecycleState _life = AppLifecycleState.resumed;
   int days = 0;
   String? customDir;
   String? customOut;
@@ -1036,9 +1037,21 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     customDir = loadFolder();
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _life = state;
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> pickFolder() async {
@@ -1108,28 +1121,57 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // إرسال الإكسيل والـ PDF لواتساب مباشرة (من غير قايمة المشاركة)
+  // إرسال الإكسيل والـ PDF (المستخدم بيختار واتساب من قايمة المشاركة)
   Future<void> sendToWhatsApp() async {
-    final paths = <String>[];
-    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
-      paths.add(standardXlsxPath!);
-    }
-    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
-      paths.add(generatedPdfPath!);
-    }
-    if (paths.isEmpty) {
+    final x = latestOutput('.xlsx');
+    final p = latestOutput('.pdf');
+    final files = <XFile>[if (x != null) XFile(x), if (p != null) XFile(p)];
+    if (files.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
       );
       return;
     }
+    await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية');
+  }
+
+  // أحدث ملف إخراج (إكسيل/PDF): من آخر معالجة، أو آخر ملف "الاسكندريه ..." في فولدر الإخراج
+  String? latestOutput(String ext) {
+    final cur = ext == '.xlsx' ? standardXlsxPath : generatedPdfPath;
+    if (cur != null && File(cur).existsSync()) return cur;
     try {
-      final r = await _chan.invokeMethod<String>(
-          'shareToWhatsApp', {'paths': paths, 'text': 'تقرير إيصالات الإسكندرية'});
-      if (r == 'ok') return;
+      final d = Directory(outputDir);
+      if (!d.existsSync()) return null;
+      final fs = d
+          .listSync()
+          .whereType<File>()
+          .where((f) {
+            final n = _normAr(baseName(f.path));
+            return n.endsWith(ext) && n.contains('اسكندري');
+          })
+          .toList()
+        ..sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
+      return fs.isEmpty ? null : fs.first.path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> openFile(String? path, String mime) async {
+    if (path == null || !File(path).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('الملف مش موجود. شغّل المعالجة الأول.')),
+      );
+      return;
+    }
+    try {
+      final ok = await _chan.invokeMethod<bool>('openFile', {'path': path, 'mime': mime});
+      if (ok == true) return;
     } catch (_) {}
-    // واتساب مش موجود أو فشل الإرسال المباشر -> قايمة المشاركة العادية
-    await shareStandardFiles();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('مفيش برنامج يفتح الملف ده.')),
+    );
   }
 
   bool _isAppOutput(String path) {
@@ -1137,7 +1179,7 @@ class _HomePageState extends State<HomePage> {
     final l = n.toLowerCase();
     return n == 'review_report.txt' ||
         n == 'ocr_debug.txt' ||
-        ((l.endsWith('.xlsx') || l.endsWith('.pdf')) && _normAr(n).startsWith('اسكندري'));
+        ((l.endsWith('.xlsx') || l.endsWith('.pdf')) && _normAr(n).contains('اسكندري'));
   }
 
   Future<bool> _confirm(String title, String body) async {
@@ -1155,49 +1197,44 @@ class _HomePageState extends State<HomePage> {
     return r == true;
   }
 
-  // بيمسح بس الملفات اللي التطبيق نفسه عملها (إكسيل/PDF "الاسكندريه ..." والتقارير)
-  Future<void> clearOutput() async {
-    final files = <File>[];
+  // مسح الكل: ملفات فولدر الإخراج + الصور المرتبة
+  Future<void> clearAll() async {
+    final protectedDirs = <String>{
+      root,
+      baseDir,
+      '$root/Download',
+      '$root/Documents',
+      '$root/DCIM',
+      '$root/Pictures',
+    };
+    final isProtected = protectedDirs.contains(outputDir);
+    final outFiles = <File>[];
     try {
       final d = Directory(outputDir);
       if (d.existsSync()) {
         for (final e in d.listSync().whereType<File>()) {
-          if (_isAppOutput(e.path)) files.add(e);
+          if (!isProtected || _isAppOutput(e.path)) outFiles.add(e);
         }
       }
     } catch (_) {}
-    if (files.isEmpty) {
-      setState(() => status = 'مفيش ملفات إخراج للمسح في: $outputDir');
-      return;
-    }
-    if (!await _confirm('مسح ملفات الإخراج', 'هتتمسح ${files.length} ملف من:\n$outputDir')) return;
-    var n = 0;
-    for (final f in files) {
-      try {
-        f.deleteSync();
-        n++;
-      } catch (_) {}
-    }
-    setState(() {
-      standardXlsxPath = null;
-      generatedPdfPath = null;
-      status = 'تم مسح $n ملف من الإخراج.';
-    });
-  }
-
-  Future<void> clearRawImages() async {
-    final files = <File>[];
+    final rawFiles = <File>[];
     try {
       final d = Directory(rawImagesDir);
-      if (d.existsSync()) files.addAll(d.listSync().whereType<File>());
+      if (d.existsSync()) rawFiles.addAll(d.listSync().whereType<File>());
     } catch (_) {}
-    if (files.isEmpty) {
-      setState(() => status = 'فولدر الصور المرتبة فاضي.');
+    if (outFiles.isEmpty && rawFiles.isEmpty) {
+      setState(() => status = 'مفيش حاجة للمسح.');
       return;
     }
-    if (!await _confirm('مسح الصور المرتبة', 'هتتمسح ${files.length} صورة من:\n$rawImagesDir')) return;
+    final ok = await _confirm(
+      'مسح الكل',
+      'هتتمسح ${outFiles.length} ملف من الإخراج:\n$outputDir\n\n'
+          'و ${rawFiles.length} صورة من الصور المرتبة.'
+          '${isProtected ? '\n\n(فولدر الإخراج ده عام، فهيتمسح بس ملفات التطبيق منه)' : ''}',
+    );
+    if (!ok) return;
     var n = 0;
-    for (final f in files) {
+    for (final f in [...outFiles, ...rawFiles]) {
       try {
         f.deleteSync();
         n++;
@@ -1207,7 +1244,9 @@ class _HomePageState extends State<HomePage> {
       processedItems.clear();
       missingTerminals = [];
       warnings.clear();
-      status = 'تم مسح $n صورة من الصور المرتبة.';
+      standardXlsxPath = null;
+      generatedPdfPath = null;
+      status = 'تم مسح $n ملف.';
     });
   }
 
@@ -1471,6 +1510,32 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> runFullPipeline() async {
+    try {
+      await Permission.notification.request();
+    } catch (_) {}
+    try {
+      await _chan.invokeMethod('startKeepAlive',
+          {'title': 'A2R POS', 'text': 'جاري فحص الإيصالات...'});
+    } catch (_) {}
+    try {
+      await _runPipelineInner();
+    } finally {
+      try {
+        await _chan.invokeMethod('stopKeepAlive');
+      } catch (_) {}
+      if (_life != AppLifecycleState.resumed) {
+        final rv = processedItems.where((e) => e.needsReview).length;
+        final txt = 'تم فحص ${processedItems.length} إيصال'
+            '${missingTerminals.isNotEmpty ? ' - ناقص ${missingTerminals.length} ماكينة' : ''}'
+            '${rv > 0 ? ' - $rv للمراجعة' : ''}';
+        try {
+          await _chan.invokeMethod('notify', {'title': 'A2R POS - انتهى الفحص', 'text': txt});
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> _runPipelineInner() async {
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
       setState(() => status = 'يجب منح إذن الوصول إلى جميع الملفات للمتابعة.');
@@ -1835,24 +1900,32 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Widget _card(String title, List<Widget> children) => Card(
+        margin: const EdgeInsets.only(bottom: 10),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              const SizedBox(height: 8),
+              ...children,
+            ],
+          ),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
+    final xlsx = latestOutput('.xlsx');
+    final pdf = latestOutput('.pdf');
+    final reviewCount = processedItems.where((e) => e.needsReview).length;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('إيصالات POS'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.share),
-            tooltip: 'مشاركة الملفات الرسمية',
-            onPressed: busy ? null : shareStandardFiles,
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+      appBar: AppBar(title: const Text('A2R POS')),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          _card('الفترة', [
             Wrap(
               spacing: 8,
               children: [
@@ -1869,16 +1942,18 @@ class _HomePageState extends State<HomePage> {
                   ),
               ],
             ),
-            const SizedBox(height: 8),
+          ]),
+          _card('المصدر والإخراج', [
             Text('المصدر: ${customDir ?? 'واتساب (تلقائي)'}',
-                textDirection: TextDirection.ltr),
+                textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 4),
             Row(
               children: [
                 Expanded(
                   child: FilledButton.tonalIcon(
                     onPressed: busy ? null : pickFolder,
                     icon: const Icon(Icons.folder_open),
-                    label: const Text('اختيار فولدر الفحص'),
+                    label: const Text('فولدر الفحص'),
                   ),
                 ),
                 if (customDir != null) ...[
@@ -1890,15 +1965,17 @@ class _HomePageState extends State<HomePage> {
                 ],
               ],
             ),
+            const SizedBox(height: 10),
             Text('الإخراج: ${customOut ?? '$defaultOutputDir (افتراضي)'}',
-                textDirection: TextDirection.ltr),
+                textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 4),
             Row(
               children: [
                 Expanded(
                   child: FilledButton.tonalIcon(
                     onPressed: busy ? null : pickOutFolder,
                     icon: const Icon(Icons.drive_file_move_outline),
-                    label: const Text('اختيار مكان الإخراج'),
+                    label: const Text('مكان الإخراج'),
                   ),
                 ),
                 if (customOut != null) ...[
@@ -1910,6 +1987,7 @@ class _HomePageState extends State<HomePage> {
                 ],
               ],
             ),
+            const SizedBox(height: 4),
             Row(
               children: [
                 const Expanded(child: Text('تدوير تلقائي للصور المقلوبة')),
@@ -1919,161 +1997,167 @@ class _HomePageState extends State<HomePage> {
                 ),
               ],
             ),
-            const SizedBox(height: 4),
+          ]),
+          SizedBox(
+            height: 52,
+            child: FilledButton.icon(
+              onPressed: busy ? null : runFullPipeline,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('بدء المعالجة الشاملة'),
+            ),
+          ),
+          if (busy) ...[
+            const SizedBox(height: 8),
+            LinearProgressIndicator(value: progress > 0 ? progress : null),
+          ],
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade200,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(status),
+          ),
+          const SizedBox(height: 10),
+          _card('الملفات الناتجة', [
             Row(
               children: [
                 Expanded(
-                  child: FilledButton.icon(
-                    onPressed: busy ? null : runFullPipeline,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('بدء المعالجة الشاملة'),
+                  child: FilledButton.tonalIcon(
+                    onPressed: xlsx == null
+                        ? null
+                        : () => openFile(xlsx,
+                            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+                    icon: const Icon(Icons.table_chart),
+                    label: const Text('فتح الإكسيل'),
                   ),
                 ),
                 const SizedBox(width: 8),
-                IconButton.filledTonal(
-                  onPressed: busy ? null : shareStandardFiles,
-                  icon: const Icon(Icons.share),
-                  tooltip: 'مشاركة التقرير الرسمي والـ PDF',
-                ),
-                const SizedBox(width: 4),
-                IconButton.filledTonal(
-                  onPressed: busy ? null : shareAdvancedFile,
-                  icon: const Icon(Icons.table_chart),
-                  tooltip: 'مشاركة ملفات المراجعة',
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    onPressed: pdf == null ? null : () => openFile(pdf, 'application/pdf'),
+                    icon: const Icon(Icons.picture_as_pdf),
+                    label: const Text('فتح PDF'),
+                  ),
                 ),
               ],
             ),
-            Wrap(
-              spacing: 8,
-              children: [
-                ActionChip(
-                  avatar: const Icon(Icons.chat, size: 18),
-                  label: const Text('إرسال واتساب'),
-                  onPressed: busy ? null : sendToWhatsApp,
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.folder_special, size: 18),
-                  label: const Text('فتح مجلد all'),
-                  onPressed: () => openFolder(baseDir),
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.folder_open, size: 18),
-                  label: const Text('فتح الإخراج'),
-                  onPressed: () => openFolder(outputDir),
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.fact_check, size: 18),
-                  label: Text('مراجعة (${processedItems.where((e) => e.needsReview).length})'),
-                  onPressed: busy ? null : openReview,
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.delete_sweep, size: 18),
-                  label: const Text('مسح الإخراج'),
-                  onPressed: busy ? null : clearOutput,
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.delete_forever, size: 18),
-                  label: const Text('مسح الصور المرتبة'),
-                  onPressed: busy ? null : clearRawImages,
-                ),
-              ],
-            ),
-            if (busy) ...[
-              const SizedBox(height: 8),
-              LinearProgressIndicator(value: progress > 0 ? progress : null),
-            ],
             const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: busy ? null : sendToWhatsApp,
+                    icon: const Icon(Icons.chat),
+                    label: const Text('إرسال واتساب'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => openFolder(outputDir),
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('مكان الإخراج'),
+                  ),
+                ),
+              ],
+            ),
+          ]),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: busy ? null : openReview,
+                  icon: const Icon(Icons.fact_check),
+                  label: Text('مراجعة ($reviewCount)'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: busy ? null : clearAll,
+                  icon: const Icon(Icons.delete_sweep),
+                  label: const Text('مسح الكل'),
+                ),
+              ),
+            ],
+          ),
+          if (missingTerminals.isNotEmpty) ...[
+            const SizedBox(height: 10),
             Container(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Colors.grey.shade200,
+                color: Colors.amber.shade100,
+                border: Border.all(color: Colors.amber.shade800),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Text(status),
-            ),
-            if (missingTerminals.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.amber.shade100,
-                  border: Border.all(color: Colors.amber.shade800),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '⚠️ ماكينات ناقصة (${missingTerminals.length} من 19):',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.amber.shade900,
-                      ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '⚠️ ماكينات ناقصة (${missingTerminals.length} من 19):',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.amber.shade900,
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      missingTerminals
-                          .map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})')
-                          .join(' ، '),
-                      style: const TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    missingTerminals
+                        .map((n) => '$n (${rowNames[terminals[numToTid[n]]!.excelRow]})')
+                        .join(' ، '),
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (warnings.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              constraints: const BoxConstraints(maxHeight: 130),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                border: Border.all(color: Colors.orange.shade700),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: SingleChildScrollView(
+                child: Text(warningsText(), style: const TextStyle(fontSize: 12)),
+              ),
+            ),
+          ],
+          const SizedBox(height: 10),
+          for (final item in processedItems)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              child: ListTile(
+                leading: Image.file(
+                  File(item.path),
+                  width: 48,
+                  height: 48,
+                  fit: BoxFit.cover,
+                ),
+                title: Text(
+                  'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: Text(subtitleOf(item)),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (item.needsReview)
+                      Icon(Icons.warning_amber, color: Colors.orange.shade800),
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.teal),
+                      onPressed: () => editReceiptDialog(item),
                     ),
                   ],
                 ),
               ),
-            ],
-            if (warnings.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Container(
-                constraints: const BoxConstraints(maxHeight: 130),
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
-                  border: Border.all(color: Colors.orange.shade700),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: SingleChildScrollView(
-                  child: Text(warningsText(), style: const TextStyle(fontSize: 12)),
-                ),
-              ),
-            ],
-            const SizedBox(height: 8),
-            Expanded(
-              child: ListView.builder(
-                itemCount: processedItems.length,
-                itemBuilder: (context, i) {
-                  final item = processedItems[i];
-                  return Card(
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    child: ListTile(
-                      leading: Image.file(
-                        File(item.path),
-                        width: 48,
-                        height: 48,
-                        fit: BoxFit.cover,
-                      ),
-                      title: Text(
-                        'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Text(subtitleOf(item)),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (item.needsReview)
-                            Icon(Icons.warning_amber, color: Colors.orange.shade800),
-                          IconButton(
-                            icon: const Icon(Icons.edit, color: Colors.teal),
-                            onPressed: () => editReceiptDialog(item),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }
