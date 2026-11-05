@@ -15,7 +15,31 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 
-void main() => runApp(const PosApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  FlutterError.onError = (d) {
+    _dbg('FLUTTER_ERROR ${d.exceptionAsString()}');
+    FlutterError.presentError(d);
+  };
+  WidgetsBinding.instance.platformDispatcher.onError = (e, st) {
+    _dbg('UNCAUGHT $e\n$st');
+    return true;
+  };
+  runApp(const PosApp());
+}
+
+// سجل تشخيصي بيتكتب في id_debug.txt (بيساعد نعرف ليه ملف اتخطّى أو التطبيق خرج)
+void _dbg(String m) {
+  try {
+    final t = DateTime.now().toIso8601String().substring(11, 19);
+    File('$baseDir/id_debug.txt').writeAsStringSync('[$t] $m\n', mode: FileMode.append);
+  } catch (_) {}
+}
+
+// ملف التقفيل اللي التطبيق نفسه بيطلّعه (الاسكندريه 5.11.pdf) بس، مش أي اسم بيبدأ بـ "الاسكندريه"
+bool _isAppReportName(String n) => RegExp(
+        r'^الاسكندريه\s*(\d{1,2}[.\-_]\d{1,2}|اليوم)(\s*\(\d+\))?\.pdf$')
+    .hasMatch(_normAr(n));
 
 class PosApp extends StatelessWidget {
   const PosApp({super.key});
@@ -1567,6 +1591,11 @@ Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
       ];
     }
   } catch (_) {}
+  // كل تطبيق مرة واحدة (أول طريقة اتجربت هي اللي شغالة)، وبنشيل Termux لأنه مش بيعرض فولدرات
+  final seenPkgs = <String>{};
+  handlers = handlers
+      .where((h) => h['pkg'] != 'com.termux' && seenPkgs.add(h['pkg'] ?? ''))
+      .toList();
   if (!context.mounted) return false;
   final picked = await showModalBottomSheet<Map<String, String>>(
     context: context,
@@ -1582,7 +1611,7 @@ Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
             ListTile(
               leading: const Icon(Icons.folder_open),
               title: Text(h['label'] ?? h['pkg'] ?? ''),
-              subtitle: Text('${h['pkg'] ?? ''}\nطريقة: ${h['kind'] ?? ''}'),
+              subtitle: Text(h['pkg'] ?? ''),
               onTap: () => Navigator.pop(c, h),
             ),
           ListTile(
@@ -3598,6 +3627,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
+    if (busy) _dbg('LIFECYCLE $state');
   }
 
   Future<void> openPdf(String? path) async {
@@ -3788,9 +3818,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     String? idle;
     try {
       // المرحلة 1 (سريعة): تعريف الوحدة وتسمية كل الملفات
+      _dbg('PHASE1 start resumeOnly=$resumeOnly');
       if (!resumeOnly) idle = await _identifyAll(rec);
+      _dbg('PHASE1 done');
       // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف، وبتتحفظ بعد كل ملف
+      _dbg('PHASE2 start');
       await _countAll(rec);
+      _dbg('PHASE2 done');
       _flagDuplicates();
     } finally {
       await rec.close();
@@ -3833,12 +3867,25 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       try {
         for (final e in d.listSync().whereType<File>()) {
           final n = baseName(e.path);
-          if (!n.toLowerCase().endsWith('.pdf')) continue;
-          // إخراج التقفيل بتاع التطبيق بس (بيبدأ بـ "الاسكندريه")، أي اسم تاني بيتفحص عادي
-          if (_normAr(n).startsWith('الاسكندريه')) continue;
-          if (fileDate(e).isBefore(cutoff)) continue;
+          final fd = fileDate(e);
+          if (!n.toLowerCase().trim().endsWith('.pdf')) {
+            if (!fd.isBefore(cutoff)) _dbg('SKIP(مش PDF) $n  size=${e.lengthSync()}');
+            continue;
+          }
+          // إخراج التقفيل بتاع التطبيق بس (الاسكندريه 5.11.pdf)، أي اسم تاني بيتفحص عادي
+          if (_isAppReportName(n)) {
+            _dbg('SKIP(تقرير التطبيق) $n');
+            continue;
+          }
+          if (fd.isBefore(cutoff)) {
+            if (fd.isAfter(cutoff.subtract(const Duration(days: 14)))) {
+              _dbg('SKIP(أقدم من الفترة: $fd) $n');
+            }
+            continue;
+          }
           if (have.contains('$n:${e.lengthSync()}') && skipDone) {
             skipped++;
+            _dbg('SKIP(اتفحص قبل كده) $n');
             continue;
           }
           pdfs.add(e);
@@ -3886,9 +3933,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       setState(() => status = 'تعريف الملفات ${i + 1} / ${pdfs.length}: $name');
       try {
         await _identifyOne(r, f, rec);
-      } catch (_) {
+      } catch (e, st) {
         r.idOk = false;
-        r.idNotes.add('فشل التعريف');
+        r.idNotes.add('فشل التعريف: ${e.toString().split('\n').first}');
+        final ss = st.toString();
+        _dbg('ERROR(تعريف) $name size=$size: $e\n${ss.substring(0, ss.length > 600 ? 600 : ss.length)}');
       }
       r.openPath ??= f.path;
       results.add(r);
