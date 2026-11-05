@@ -34,7 +34,7 @@ jobs:
           cp main.dart app/lib/main.dart
           cd app
           flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing
-          sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
           echo '-dontwarn com.google.mlkit.vision.text.**' > android/app/proguard-rules.pro
@@ -118,6 +118,12 @@ jobs:
                                       result.success(false)
                                   }
                               }
+                              "folderHandlers" -> {
+                                  result.success(folderHandlers(call.argument<String>("path") ?: ""))
+                              }
+                              "openFolderWith" -> {
+                                  result.success(openFolderWith(call.argument<String>("path") ?: "", call.argument<String>("pkg") ?: "", call.argument<String>("cls") ?: "", call.argument<String>("kind") ?: ""))
+                              }
                               "openFile" -> {
                                   result.success(openFile(call.argument<String>("path") ?: "", call.argument<String>("mime") ?: "*/*"))
                               }
@@ -188,6 +194,73 @@ jobs:
                   } catch (e: Exception) {
                       false
                   }
+              }
+
+              private fun folderIntents(path: String): List<Pair<String, Intent>> {
+                  val out = ArrayList<Pair<String, Intent>>()
+                  val prefix = "/storage/emulated/0/"
+                  if (!path.startsWith(prefix)) return out
+                  val rel = path.substring(prefix.length)
+                  val docUri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:" + rel)
+                  out.add(Pair("doc", Intent(Intent.ACTION_VIEW).setDataAndType(docUri, "vnd.android.document/directory")))
+                  try {
+                      val fpUri = FileProvider.getUriForFile(this, packageName + ".pos_fileprovider", File(path))
+                      for (t in listOf("resource/folder", "application/x-directory", "inode/directory", "vnd.android.document/directory")) {
+                          out.add(Pair("fp:" + t, Intent(Intent.ACTION_VIEW).setDataAndType(fpUri, t)))
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return out
+              }
+
+              private fun folderHandlers(path: String): List<HashMap<String, String>> {
+                  val res = ArrayList<HashMap<String, String>>()
+                  val seen = HashSet<String>()
+                  for (p in folderIntents(path)) {
+                      val base = p.second
+                      base.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      for (ri in packageManager.queryIntentActivities(base, android.content.pm.PackageManager.MATCH_ALL)) {
+                          val pkg = ri.activityInfo.packageName
+                          if (!seen.add(pkg)) continue
+                          val m = HashMap<String, String>()
+                          m["label"] = ri.loadLabel(packageManager).toString()
+                          m["pkg"] = pkg
+                          m["cls"] = ri.activityInfo.name
+                          m["kind"] = p.first
+                          res.add(m)
+                      }
+                  }
+                  return res
+              }
+
+              private fun openFolderWith(path: String, pkg: String, cls: String, kind: String): Boolean {
+                  val prefix = "/storage/emulated/0/"
+                  if (!path.startsWith(prefix)) return false
+                  val rel = path.substring(prefix.length)
+                  val docUri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:" + rel)
+                  if (kind == "tree" || pkg.isEmpty()) {
+                      return try {
+                          val t = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                          t.putExtra(DocumentsContract.EXTRA_INITIAL_URI, docUri)
+                          t.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                          startActivity(t)
+                          true
+                      } catch (e: Exception) {
+                          false
+                      }
+                  }
+                  for (p in folderIntents(path)) {
+                      if (p.first != kind) continue
+                      val i = Intent(p.second)
+                      i.setClassName(pkg, cls)
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      try {
+                          startActivity(i)
+                          return true
+                      } catch (e: Exception) {
+                      }
+                  }
+                  return false
               }
 
               private fun openFile(path: String, mime: String): Boolean {
