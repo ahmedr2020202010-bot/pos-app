@@ -1555,6 +1555,59 @@ void saveFix(ReceiptItem item) {
 bool sameDay(ReceiptItem a, ReceiptItem b) =>
     a.date == null || b.date == null || a.date == b.date;
 
+// بيجيب كل التطبيقات اللي تقدر تفتح فولدر (مدير ملفات) ويخلّيك تختار أي واحد، مش الافتراضي بس
+Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
+  var handlers = <Map<String, String>>[];
+  try {
+    final r = await _chan.invokeMethod<List<dynamic>>('folderHandlers', {'path': path});
+    if (r != null) {
+      handlers = [
+        for (final e in r)
+          {for (final en in (e as Map).entries) en.key.toString(): en.value.toString()}
+      ];
+    }
+  } catch (_) {}
+  if (!context.mounted) return false;
+  final picked = await showModalBottomSheet<Map<String, String>>(
+    context: context,
+    isScrollControlled: true,
+    builder: (c) => SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        children: [
+          const ListTile(
+            title: Text('افتح الفولدر بواسطة', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          for (final h in handlers)
+            ListTile(
+              leading: const Icon(Icons.folder_open),
+              title: Text(h['label'] ?? h['pkg'] ?? ''),
+              subtitle: Text(h['pkg'] ?? ''),
+              onTap: () => Navigator.pop(c, h),
+            ),
+          ListTile(
+            leading: const Icon(Icons.folder_special),
+            title: const Text('متصفح ملفات النظام'),
+            onTap: () => Navigator.pop(c, <String, String>{'pkg': '', 'cls': '', 'kind': 'tree'}),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (picked == null) return true; // المستخدم قفل القايمة
+  try {
+    final ok = await _chan.invokeMethod<bool>('openFolderWith', {
+      'path': path,
+      'pkg': picked['pkg'] ?? '',
+      'cls': picked['cls'] ?? '',
+      'kind': picked['kind'] ?? '',
+    });
+    return ok == true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // ───────────────────── الشاشة الرئيسية ─────────────────────
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -1657,8 +1710,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Directory(path).createSync(recursive: true);
     } catch (_) {}
     try {
-      final ok = await _chan.invokeMethod<bool>('openFolder', {'path': path});
-      if (ok == true) return;
+      if (await chooseAndOpenFolder(context, path)) return;
     } catch (_) {}
     await Clipboard.setData(ClipboardData(text: path));
     if (!mounted) return;
@@ -3357,6 +3409,7 @@ class MResult {
   final List<String> idNotes = [];
   final List<String> cntNotes = [];
   List<String> altTids = []; // مرشحين تانيين للماكينة (مش بيتحفظوا)
+  Map<String, double> votes = {};
   String? tidUsed, dayUsed, monthUsed;
   bool idOk = true;
   bool cntOk = true;
@@ -3459,48 +3512,7 @@ MIdent _identify(String all) {
   return r;
 }
 
-// ───────── تعريف الماكينة من جوه الـ PDF: تصويت بين كل الصفحات + مطابقة اسم الملف الأصلي ─────────
-class NameHint {
-  final int row;
-  final int? k;
-  NameHint(this.row, this.k);
-}
-
-// الاسم الأصلي زي "2.أبيس 2.يوم.5.11.pdf" -> الوحدة (أبيس) ورقم الماكينة جواها (2)
-NameHint? _nameHint(String pdfName) {
-  final n = _normAr(pdfName.replaceAll(RegExp(r'\.pdf$', caseSensitive: false), ''))
-      .replaceAll('١', '1')
-      .replaceAll('٢', '2')
-      .replaceAll('٣', '3')
-      .replaceAll('٤', '4');
-  int? bestRow;
-  var bestIdx = -1;
-  var bestLen = 0;
-  for (final e in rowNames.entries) {
-    final u = _normAr(e.value);
-    final i = n.indexOf(u);
-    if (i >= 0 && u.length > bestLen) {
-      bestRow = e.key;
-      bestIdx = i;
-      bestLen = u.length;
-    }
-  }
-  if (bestRow == null) return null;
-  final rest = n.substring(bestIdx + bestLen);
-  final m = RegExp(r'^[^\d]{0,3}(\d)(?!\d)').firstMatch(rest);
-  return NameHint(bestRow, m == null ? null : int.tryParse(m.group(1)!));
-}
-
-String? _hintTid(NameHint? h) {
-  if (h == null) return null;
-  final same = terminals.entries.where((e) => e.value.excelRow == h.row).toList()
-    ..sort((a, b) => a.value.orderNum.compareTo(b.value.orderNum));
-  if (same.isEmpty) return null;
-  if (h.k != null && h.k! >= 1 && h.k! <= same.length) return same[h.k! - 1].key;
-  if (same.length == 1) return same.first.key;
-  return null;
-}
-
+// ───────── تعريف الماكينة من جوه الـ PDF بس (تصويت بين الصفحات) — مفيش اعتماد على اسم الملف ─────────
 // أصوات صفحة واحدة: "TERMINAL ID" بوزن 3، أي رقم 8 خانات معروف بوزن 1، وتقريبي (غلطة رقم) بوزن 0.5
 Map<String, double> _tidVotes(String text) {
   final v = <String, double>{};
@@ -3656,8 +3668,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       Directory(destDir).createSync(recursive: true);
     } catch (_) {}
     try {
-      final ok = await _chan.invokeMethod<bool>('openFolder', {'path': destDir});
-      if (ok == true) return;
+      if (await chooseAndOpenFolder(context, destDir)) return;
     } catch (_) {}
     await Clipboard.setData(ClipboardData(text: destDir));
     if (!mounted) return;
@@ -3926,34 +3937,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     final rk = _rankVotes(votes);
     r.altTids = rk.map((e) => e.key).toList();
-    var tid = rk.isNotEmpty ? rk.first.key : id.tid;
-    var fromName = false;
-    if (tid == null) {
-      // الـ PDF مفيهوش Terminal ID مقروء: نستعين باسم الملف الأصلي (ونعلّم للمراجعة)
-      tid = _hintTid(_nameHint(r.pdfName));
-      fromName = tid != null;
-    }
+    r.votes = votes;
+    final tid = rk.isNotEmpty ? rk.first.key : id.tid;
     await _applyName(r, f, tid, id.day, id.month);
-    if (fromName && r.newName != null) {
-      r.idOk = false;
-      r.idNotes.add('Terminal ID مش واضح في الـ PDF، اتسمّى من اسم الملف الأصلي');
-    }
-    _noteMismatch(r);
   }
 
-  // لو اسم الملف الأصلي بيقول وحدة غير اللي اتعرفت من جوه الـ PDF: نعلّم للمراجعة
-  void _noteMismatch(MResult r) {
-    final h = _nameHint(r.pdfName);
-    final tid = r.tidUsed;
-    if (h == null || tid == null || !terminals.containsKey(tid)) return;
-    final info = terminals[tid]!;
-    if (info.excelRow != h.row) {
-      r.idOk = false;
-      r.idNotes.add('اسم الملف الأصلي بيقول ${rowNames[h.row]} بس الـ PDF فيه ماكينة ${info.orderNum} ${info.unitName}');
-    }
-  }
-
-  // لو ملفين اتعرفوا على نفس الماكينة: نحاول نوزّعهم (اسم الملف الأصلي / المرشح التاني)
+  // لو ملفين اتعرفوا على نفس الماكينة: الأقوى (أكتر أصوات) يفضل، والتاني ياخد مرشحه التاني لو قراءته واضحة
   Future<void> _resolveDuplicates() async {
     final groups = <String, List<MResult>>{};
     for (final r in results) {
@@ -3964,36 +3953,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     for (final e in groups.entries) {
       final g = e.value;
       if (g.length < 2) continue;
-      MResult? winner;
-      for (final r in g) {
-        if (_hintTid(_nameHint(r.pdfName)) == e.key) {
-          winner = r;
-          break;
-        }
-      }
-      winner ??= g.first;
-      for (final r in g) {
-        if (identical(r, winner)) continue;
+      g.sort((a, b) => (b.votes[e.key] ?? 0).compareTo(a.votes[e.key] ?? 0));
+      for (var i = 1; i < g.length; i++) {
+        final r = g[i];
         if (!File(r.srcPath).existsSync()) continue;
         final claimed = results.map((x) => x.tidUsed).whereType<String>().toSet();
-        final h = _nameHint(r.pdfName);
         String? alt;
-        final ht = _hintTid(h);
-        if (ht != null && !claimed.contains(ht)) alt = ht;
-        if (alt == null) {
-          for (final c in r.altTids) {
-            if (c == e.key || claimed.contains(c)) continue;
-            if (h == null || terminals[c]!.excelRow == h.row) {
-              alt = c;
-              break;
-            }
+        for (final c in r.altTids) {
+          if (c == e.key || claimed.contains(c)) continue;
+          if ((r.votes[c] ?? 0) >= 1) {
+            alt = c;
+            break;
           }
         }
         if (alt == null) continue;
         await _applyName(r, File(r.srcPath), alt, r.dayUsed, r.monthUsed);
         if (r.newName != null) {
           r.idOk = false;
-          r.idNotes.add('الـ PDF اتعرّف على نفس ماكينة ملف تاني، اتسمّى ماكينة ${terminals[alt]!.orderNum} حسب اسم الملف الأصلي، راجع');
+          r.idNotes.add('الـ PDF اتعرّف على نفس ماكينة ملف تاني، اتسمّى ماكينة ${terminals[alt]!.orderNum} (المرشح التاني من قراءة الـ PDF)، راجع');
         }
       }
     }
@@ -4047,15 +4024,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final info = terminals[tid]!;
     r.orderNum = info.orderNum;
     if (day == null || month == null) {
-      final m = RegExp(r'(\d{2})-(\d{2})-(\d{4})').firstMatch(r.pdfName);
-      if (m != null) {
-        day = int.parse(m.group(1)!).toString();
-        month = int.parse(m.group(2)!).toString();
-      }
-    }
-    if (day == null || month == null) {
       r.idOk = false;
-      r.idNotes.add('مش قادر أعرف التاريخ');
+      r.idNotes.add('مش قادر أعرف التاريخ من الـ PDF');
       return;
     }
     r.dayUsed = day;
@@ -4130,16 +4100,21 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     final bytes = await src.readAsBytes();
     final col = MCollector();
-    var pg = 0;
-    await for (final page in Printing.raster(bytes, dpi: 250)) {
-      pg++;
-      final png = await page.toPng();
-      final tp = File('$tmpDir/m_$pg.png');
-      await tp.writeAsBytes(png);
-      await ocrPageStrips(rec, tp.path, '$tmpDir/m_${pg}_s', col);
-      try {
-        tp.deleteSync();
-      } catch (_) {}
+    // صفحة صفحة (مش الملف كله مرة واحدة) علشان الذاكرة ما تخلصش والتطبيق ما يقفلش
+    for (var pg = 1; pg <= 400; pg++) {
+      var got = false;
+      await for (final page in Printing.raster(bytes, pages: [pg - 1], dpi: 220)) {
+        got = true;
+        final png = await page.toPng();
+        final tp = File('$tmpDir/m_$pg.png');
+        await tp.writeAsBytes(png);
+        await ocrPageStrips(rec, tp.path, '$tmpDir/m_${pg}_s', col);
+        try {
+          tp.deleteSync();
+        } catch (_) {}
+      }
+      if (!got) break;
+      await Future.delayed(const Duration(milliseconds: 40));
     }
     final sc = col.finish();
     r.count = sc.count;
@@ -4158,7 +4133,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (r.newName == null && sc.tid != null) {
       // التعريف السريع فشل: نسمّي من نتيجة العد الكاملة
       await _applyName(r, src, sc.tid, sc.day, sc.month);
-      _noteMismatch(r);
     } else if (sc.tid != null && terminals[sc.tid] != null && r.orderNum != null &&
         terminals[sc.tid]!.orderNum != r.orderNum) {
       r.cntOk = false;
