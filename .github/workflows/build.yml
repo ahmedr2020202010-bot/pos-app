@@ -82,6 +82,7 @@ jobs:
           class MainActivity : FlutterActivity() {
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
+                  android.os.StrictMode.setVmPolicy(android.os.StrictMode.VmPolicy.Builder().build())
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "pos/native")
                       .setMethodCallHandler { call, result ->
                           when (call.method) {
@@ -202,6 +203,9 @@ jobs:
                   if (!path.startsWith(prefix)) return out
                   val rel = path.substring(prefix.length)
                   val docUri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:" + rel)
+                  for (t in listOf("resource/folder", "inode/directory")) {
+                      out.add(Pair("file:" + t, Intent(Intent.ACTION_VIEW).setDataAndType(Uri.fromFile(File(path)), t)))
+                  }
                   out.add(Pair("doc", Intent(Intent.ACTION_VIEW).setDataAndType(docUri, "vnd.android.document/directory")))
                   try {
                       val fpUri = FileProvider.getUriForFile(this, packageName + ".pos_fileprovider", File(path))
@@ -221,7 +225,7 @@ jobs:
                       base.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                       for (ri in packageManager.queryIntentActivities(base, android.content.pm.PackageManager.MATCH_ALL)) {
                           val pkg = ri.activityInfo.packageName
-                          if (!seen.add(pkg)) continue
+                          if (!seen.add(pkg + "|" + p.first)) continue
                           val m = HashMap<String, String>()
                           m["label"] = ri.loadLabel(packageManager).toString()
                           m["pkg"] = pkg
