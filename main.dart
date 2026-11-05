@@ -28,6 +28,21 @@ void main() {
   runApp(const PosApp());
 }
 
+// بيختار DPI بحيث الضلع الأطول ما يزيدش عن ~2500 بكسل (PDF الممسوح بيبقى مقاسه كبير وبيخلّي الذاكرة تخلص)
+Future<double> _safeDpi(Uint8List bytes, int pageIdx, double wanted) async {
+  try {
+    await for (final p in Printing.raster(bytes, pages: [pageIdx], dpi: 72)) {
+      final side = math.max(p.width, p.height).toDouble();
+      if (side <= 0) return wanted;
+      final d = 72.0 * 2500.0 / side;
+      return d < wanted ? (d < 72 ? 72 : d) : wanted;
+    }
+  } catch (_) {}
+  return wanted;
+}
+
+bool _pageEnd(Object e) => e.toString().contains('Invalid page index');
+
 // سجل تشخيصي بيتكتب في id_debug.txt (بيساعد نعرف ليه ملف اتخطّى أو التطبيق خرج)
 void _dbg(String m) {
   try {
@@ -3149,7 +3164,10 @@ List<Directory> findWhatsAppDocDirs() {
     final p = d.path;
     if (p.endsWith('WhatsApp Images')) {
       final dd = Directory('${p.substring(0, p.length - 'WhatsApp Images'.length)}WhatsApp Documents');
-      if (dd.existsSync() && !out.any((x) => x.path == dd.path)) out.add(dd);
+      for (final sub in ['', '/Sent', '/Private']) {
+        final x = Directory('${dd.path}$sub');
+        if (x.existsSync() && !out.any((o) => o.path == x.path)) out.add(x);
+      }
     }
   }
   return out;
@@ -3860,6 +3878,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         ? DateTime(2000)
         : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final have = results.map((r) => r.key).toSet();
+    _dbg('DIRS: ${dirs.map((d) => d.path).join(' | ')}');
     final pdfs = <File>[];
     var skipped = 0;
     for (final d in dirs) {
@@ -3942,13 +3961,16 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.openPath ??= f.path;
       results.add(r);
       saveMState(results);
+      _dbg('FILE ${i + 1}/${pdfs.length} done: $name  RSS=${ProcessInfo.currentRss ~/ 1048576}MB');
       if (!mounted) return null;
       setState(() => progressValue = (i + 1) / pdfs.length);
     }
+    _dbg('resolveDuplicates start');
     await _resolveDuplicates();
     _flagDuplicates();
     results.sort(_cmpM);
     saveMState(results);
+    _dbg('resolveDuplicates done');
     return null;
   }
 
@@ -3962,19 +3984,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       // بعد 6 صفحات لو لقينا ماكينة نوقف، ولو لسه مفيش نكمّل لحد 25 صفحة
       if (pi >= 6 && votes.isNotEmpty) break;
       var got = false;
-      await for (final page in Printing.raster(bytes, pages: [pi], dpi: 200)) {
-        got = true;
-        final png = await page.toPng();
-        final tp = File('$tmpDir/id_$pi.png');
-        await tp.writeAsBytes(png);
-        try {
-          final res = await rec.processImage(InputImage.fromFilePath(tp.path));
-          sb.writeln(res.text);
-          _tidVotes(res.text).forEach((k, v) => votes[k] = (votes[k] ?? 0) + v);
-        } catch (_) {}
-        try {
-          tp.deleteSync();
-        } catch (_) {}
+      try {
+        final dpi = await _safeDpi(bytes, pi, 200);
+        await for (final page in Printing.raster(bytes, pages: [pi], dpi: dpi)) {
+          got = true;
+          final png = await page.toPng();
+          final tp = File('$tmpDir/id_$pi.png');
+          await tp.writeAsBytes(png);
+          try {
+            final res = await rec.processImage(InputImage.fromFilePath(tp.path));
+            sb.writeln(res.text);
+            _tidVotes(res.text).forEach((k, v) => votes[k] = (votes[k] ?? 0) + v);
+          } catch (_) {}
+          try {
+            tp.deleteSync();
+          } catch (_) {}
+        }
+      } catch (e) {
+        if (!_pageEnd(e) || pi == 0) rethrow; // آخر صفحة عدّت = مش خطأ
       }
       if (!got) break;
       id = _identify(sb.toString());
@@ -4155,6 +4182,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       r.tries = 0;
       saveMState(results);
+      _dbg('COUNT ${i + 1}/${todo.length} ${r.newName ?? r.pdfName} = ${r.count}  RSS=${ProcessInfo.currentRss ~/ 1048576}MB');
       if (!mounted) return;
       setState(() => progressValue = (i + 1) / todo.length);
     }
@@ -4180,15 +4208,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     // صفحة صفحة (مش الملف كله مرة واحدة) علشان الذاكرة ما تخلصش والتطبيق ما يقفلش
     for (var pg = 1; pg <= 400; pg++) {
       var got = false;
-      await for (final page in Printing.raster(bytes, pages: [pg - 1], dpi: 220)) {
-        got = true;
-        final png = await page.toPng();
-        final tp = File('$tmpDir/m_$pg.png');
-        await tp.writeAsBytes(png);
-        await ocrPageStrips(rec, tp.path, '$tmpDir/m_${pg}_s', col);
-        try {
-          tp.deleteSync();
-        } catch (_) {}
+      try {
+        final dpi = await _safeDpi(bytes, pg - 1, 220);
+        await for (final page in Printing.raster(bytes, pages: [pg - 1], dpi: dpi)) {
+          got = true;
+          final png = await page.toPng();
+          final tp = File('$tmpDir/m_$pg.png');
+          await tp.writeAsBytes(png);
+          await ocrPageStrips(rec, tp.path, '$tmpDir/m_${pg}_s', col);
+          try {
+            tp.deleteSync();
+          } catch (_) {}
+        }
+      } catch (e) {
+        if (!_pageEnd(e) || pg == 1) rethrow;
       }
       if (!got) break;
       await Future.delayed(const Duration(milliseconds: 40));
