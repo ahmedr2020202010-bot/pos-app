@@ -357,8 +357,73 @@ class PieceResult {
   PieceResult(this.texts, this.val, this.ok);
 }
 
+// إيصال دفع (RRN / رقم كارت مخفي / Approved ...) ولا باتش كلوز / ملخص / ري برنت؟
+String classifyReceipt(String text) {
+  final up = text.toUpperCase();
+  final payRes = <RegExp>[
+    RegExp(r'R{1,2}N\W{0,3}\d{9,}'),
+    RegExp(r'\d{4,6}\W{0,2}\*{3,}\W{0,2}\d{4}'),
+    RegExp(r'APPROVED'),
+    RegExp(r'AUTH\W{0,3}\d{6}'),
+    RegExp(r'I\s*AUTHORI[SZ]E'),
+    RegExp(r'MERCHANT\s*COPY'),
+    RegExp(r'CLESS|CHIP\s*ONLINE'),
+  ];
+  final batchRes = <RegExp>[
+    RegExp(r'BATCH\s*CLOS'),
+    RegExp(r'SUCCESSF'),
+    RegExp(r'GRAND\s*TOTAL'),
+    RegExp(r'TOTAL\s*NET'),
+    RegExp(r'THANK\s*YOU'),
+    RegExp(r'NBE\s*NETWORK'),
+    RegExp(r'HOTLINE'),
+  ];
+  final pay = payRes.where((r) => r.hasMatch(up)).length;
+  final batch = batchRes.where((r) => r.hasMatch(up)).length;
+  if (pay >= 2 && batch < 2) return 'payment';
+  if (batch >= 1) return 'batch';
+  return 'other';
+}
+
+// لو GRAND TOTAL = مجموع إجماليات الكروت (حتى لو أسماء الكروت اتقرت غلط): نرجّعه مؤكد.
+double? sumClosure(List<String> texts) {
+  final cnt = <double, int>{};
+  for (final t in texts) {
+    final tt = t
+        .split(RegExp(r'THANK\s*YOU|Hotline|App\s*Version', caseSensitive: false))
+        .first;
+    final local = <double, int>{};
+    for (final a in amountsIn(tt)) {
+      local[a] = (local[a] ?? 0) + 1;
+    }
+    local.forEach((k, v) {
+      if (v > (cnt[k] ?? 0)) cnt[k] = v;
+    });
+  }
+  final c = cnt.entries.where((e) => e.value >= 2).map((e) => e.key).toList()..sort();
+  if (c.length < 3 || c.length > 14) return null;
+  for (var gi = c.length - 1; gi >= 2; gi--) {
+    final g = c[gi];
+    final others = c.sublist(0, gi);
+    final n = others.length;
+    for (var mask = 1; mask < (1 << n); mask++) {
+      var bits = 0, sum = 0.0;
+      for (var i = 0; i < n; i++) {
+        if (mask & (1 << i) != 0) {
+          bits++;
+          sum += others[i];
+        }
+      }
+      if (bits >= 2 && (sum - g).abs() < 0.005) return g;
+    }
+  }
+  return null;
+}
+
 PieceResult ocrPiece(List<OcrLine> lines) {
   final texts = <String>[rowsText(lines), readingText(lines)];
+  final sc = sumClosure(texts);
+  if (sc != null) return PieceResult(texts, sc, true);
   final d = decide(texts.map(parseReceipt).toList());
   return PieceResult(texts, d.val, d.ok);
 }
@@ -1057,6 +1122,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? generatedPdfPath;
   List<int> missingTerminals = [];
   final List<String> warnings = [];
+  final List<String> excludedPay = [];
   bool autoRotate = false; // أبطأ: بيجرّب تدوير كل صورة مش إيصال
   String sourceNote = '';
 
@@ -1574,6 +1640,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       processedItems.clear();
       missingTerminals.clear();
       warnings.clear();
+      excludedPay.clear();
       status = 'جاري البحث عن مجلدات الصور...';
     });
 
@@ -1653,16 +1720,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         var workPath = f.path;
         var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
         var isReceipt = receiptScore(res.text) >= 2 || findTerminalIn([res.text]) != null;
+        // إيصال دفع أو مستند مش باتش/ملخص/ري برنت: نتجاهله
+        var skipPay = false;
+        if (isReceipt && classifyReceipt(res.text) == 'payment') {
+          isReceipt = false;
+          skipPay = true;
+        }
 
         // صورة مقلوبة؟ جرّب EXIF ثم 90 / 270 / 180
-        if (!isReceipt && autoRotate) {
+        if (!isReceipt && !skipPay && autoRotate) {
           for (final deg in const [0, 90, 270, 180]) {
             final tp = '$tmpDir/rot_$deg.jpg';
             try {
               final wrote = await fixImageAsync(f.path, tp, deg);
               if (!wrote) continue;
               final r2 = await recognizer.processImage(InputImage.fromFilePath(tp));
-              if (receiptScore(r2.text) >= 2 || findTerminalIn([r2.text]) != null) {
+              if ((receiptScore(r2.text) >= 2 || findTerminalIn([r2.text]) != null) &&
+                  classifyReceipt(r2.text) != 'payment') {
                 res = r2;
                 workPath = tp;
                 isReceipt = true;
@@ -1770,6 +1844,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             item.how = 'manual';
           }
           rawReceipts.add(item);
+        } else if (skipPay) {
+          excludedPay.add(baseName(f.path));
         }
       } catch (e) {
         warnings.add('${baseName(f.path)}: فشلت القراءة');
@@ -1794,6 +1870,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     // ═════════ المرحلة 2: التكرار وترقيم الماكينات ═════════
     setState(() => status = 'مراجعة التكرار وترقيم الماكينات...');
+    if (excludedPay.isNotEmpty) {
+      warnings.add('اتجاهلت ${excludedPay.length} صورة إيصال دفع أو مستند (مش باتش كلوز/ملخص/ري برنت): '
+          '${excludedPay.take(8).join('، ')}${excludedPay.length > 8 ? ' ...' : ''}');
+    }
     final prio = <String, int>{'manual': 0, 'terminal': 0, 'fuzzy': 1, 'file-number': 2};
     final withTid = rawReceipts.where((r) => r.tid != null).toList();
     withTid.sort((a, b) {
