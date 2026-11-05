@@ -2510,48 +2510,6 @@ class _ReviewPageState extends State<ReviewPage> {
 }
 
 
-String _latinDigits(String s) {
-  const ar = '٠١٢٣٤٥٦٧٨٩';
-  final sb = StringBuffer();
-  for (final ch in s.split('')) {
-    final i = ar.indexOf(ch);
-    sb.write(i >= 0 ? '$i' : ch);
-  }
-  return sb.toString();
-}
-
-// تاريخ مكتوب في اسم الملف (4.11 / 4.11.2026 / 04-11-2026 / 2026-11-04) أو null
-DateTime? nameDate(String name) {
-  final n = _latinDigits(name);
-  final y = DateTime.now().year;
-  final a = RegExp(r'(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})').firstMatch(n);
-  if (a != null) {
-    final mo = int.parse(a.group(2)!), d = int.parse(a.group(3)!);
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return DateTime(int.parse(a.group(1)!), mo, d);
-  }
-  final b = RegExp(r'(?<!\d)(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](20\d{2}))?(?!\d)').firstMatch(n);
-  if (b != null) {
-    final d = int.parse(b.group(1)!), mo = int.parse(b.group(2)!);
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
-      return DateTime(b.group(3) != null ? int.parse(b.group(3)!) : y, mo, d);
-    }
-  }
-  return null;
-}
-
-// أحدث تاريخ بين: تعديل الملف / تغييره / التاريخ المكتوب في اسمه (علشان إعادة التسمية والنقل ما يخبّوش الملف)
-DateTime pdfEffectiveDate(File f) {
-  var best = fileDate(f);
-  try {
-    final st = f.statSync();
-    if (st.changed.isAfter(best)) best = st.changed;
-    if (st.modified.isAfter(best)) best = st.modified;
-  } catch (_) {}
-  final nd = nameDate(baseName(f.path));
-  if (nd != null && nd.isAfter(best)) best = nd;
-  return best;
-}
-
 // ───────────────────── ملفات الماكينات (PDF لكل ماكينة) ─────────────────────
 String? loadPdfDir() => _readCfg()['pdfDir'] as String?;
 
@@ -2602,101 +2560,97 @@ String machineNewName(TerminalInfo info, String day, String month) {
   ].join('.');
 }
 
-// ───────────── فحص إيصالات الدفع (تمييز: دفع / إقفال باتش / إعادة طباعة) ─────────────
-class MPiece {
-  final int page;
-  final String kind; // pay | batch | reprint | other
-  final String? rrn;
-  final String? date; // d.m
+class PageOcr {
   final String text;
-  MPiece(this.page, this.kind, this.rrn, this.date, this.text);
+  final List<OcrLine> lines;
+  PageOcr(this.text, this.lines);
 }
 
+// الإيصال الدفع بس: بنعدّه برقم RRN (12 رقم) المميز لكل عملية دفع.
+// إيصالات الإقفال والملخص وإعادة الطباعة مفيهاش RRN فمبتتعدّش.
 class MScan {
-  final List<MPiece> pieces = [];
-  String? tid;
-  String? day, month;
-  int get pay => pieces.where((p) => p.kind == 'pay').length;
-  int get batch => pieces.where((p) => p.kind == 'batch').length;
-  int get reprint => pieces.where((p) => p.kind == 'reprint').length;
-  int get count => pay;
-  List<MPiece> otherDay = [];
+  final Map<String, String?> rrnDay = {}; // rrn -> "يوم.شهر" أو null
+  int sale = 0, auth = 0;
+  bool nonPayment = false;
+  String? tid, day, month;
+  final List<String> otherDay = [];
+  int get rrn => rrnDay.length;
+  int get count {
+    final a = rrn, b = sale, c = auth;
+    if (a == b || a == c) return a;
+    if (b == c) return b;
+    return a > 0 ? a : (b > 0 ? b : c);
+  }
+
+  bool get agree => rrn == sale && sale == auth;
 }
 
-String? _pieceDate(String t) {
-  final m1 = RegExp(r'(20\d{2})[^\d\n]{1,3}(\d{1,2})[^\d\n]{1,3}(\d{1,2})').firstMatch(t);
-  if (m1 != null) {
-    final mo = int.parse(m1.group(2)!), d = int.parse(m1.group(3)!);
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return '$d.$mo';
-  }
-  final m2 = RegExp(r'(?<!\d)(\d{1,2})[/\-.](\d{1,2})[/\-.](20\d{2})').firstMatch(t);
-  if (m2 != null) {
-    final d = int.parse(m2.group(1)!), mo = int.parse(m2.group(2)!);
+final RegExp _rrnRe = RegExp(r'(?<![\d*])(?!00)(\d{12})(?!\d)');
+final RegExp _dateRe = RegExp(r'(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})');
+
+String? _dayKey(String text) {
+  for (final m in _dateRe.allMatches(text)) {
+    final mo = int.parse(m.group(2)!), d = int.parse(m.group(3)!);
     if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return '$d.$mo';
   }
   return null;
 }
 
-final RegExp _batchRe =
-    RegExp(r'BATCH|GRAND|TOTALS?\b|SUCCESSF|CLOSED|SETTLEMENT', caseSensitive: false);
-final RegExp _reprintRe =
-    RegExp(r'RE\s*-?\s*PRINT|REPRNT|DUPLICATE|DUPLIC', caseSensitive: false);
-final RegExp _rrnRe = RegExp(r'(?<![\d*])(?!00)(\d{12})(?!\d)');
-
-// بيقسّم صفحة لإيصالات (أعمدة ثم تقطيع عند كل سطر TERMINAL)
-List<List<OcrLine>> _splitPageToReceipts(List<OcrLine> lines) {
-  final out = <List<OcrLine>>[];
-  for (final col in splitColumns(lines)) {
-    final ls = [...col]..sort((a, b) => a.cy.compareTo(b.cy));
-    var cur = <OcrLine>[];
-    var hasTerm = false;
-    for (final l in ls) {
-      final isTerm = RegExp(r'TERMINAL', caseSensitive: false).hasMatch(l.text);
-      if (isTerm && hasTerm) {
-        out.add(cur);
-        cur = <OcrLine>[];
-        hasTerm = false;
-      }
-      if (isTerm) hasTerm = true;
-      cur.add(l);
-    }
-    if (cur.isNotEmpty) out.add(cur);
-  }
-  return out;
-}
-
-MScan scanReceipts(List<List<OcrLine>> pages, String fullText) {
+MScan scanPages(List<PageOcr> pages) {
   final r = MScan();
-  final seenRrn = <String>{};
-  for (var p = 0; p < pages.length; p++) {
-    for (final seg in _splitPageToReceipts(pages[p])) {
-      final txt = rowsText(seg);
-      if (txt.trim().length < 15) continue;
-      final rrn = _rrnRe.firstMatch(txt)?.group(1);
-      final isBatch = _batchRe.hasMatch(txt);
-      final isRe = _reprintRe.hasMatch(txt);
-      final hasSale = RegExp(r'\bSALE\b|PURCHASE', caseSensitive: false).hasMatch(txt) &&
-          RegExp('EGP', caseSensitive: false).hasMatch(txt);
-      String kind;
-      if (isBatch) {
-        kind = 'batch';
-      } else if (rrn != null || hasSale) {
-        kind = 'pay';
-        if (isRe) {
-          kind = 'reprint';
-        } else if (rrn != null && !seenRrn.add(rrn)) {
-          kind = 'reprint'; // نفس رقم المرجع اتكرر = نسخة تانية
+  final all = pages.map((p) => p.text).join('\n');
+
+  // عدد عمليات الدفع: RRN + ربط كل RRN بتاريخ أقرب سطر تاريخ ليه
+  for (final p in pages) {
+    final width = p.lines.isEmpty ? 1000.0 : p.lines.map((l) => l.right).reduce(math.max);
+    final dates = <OcrLine>[];
+    for (final l in p.lines) {
+      if (_dayKey(l.text) != null) dates.add(l);
+    }
+    for (final l in p.lines) {
+      for (final m in _rrnRe.allMatches(l.text)) {
+        final rrn = m.group(1)!;
+        String? day = _dayKey(l.text);
+        if (day == null) {
+          OcrLine? best;
+          var bd = double.infinity;
+          for (final d in dates) {
+            final dy = (d.cy - l.cy).abs();
+            final dx = ((d.left + d.right) / 2 - (l.left + l.right) / 2).abs();
+            if (dy > l.h * 4 || dx > width * 0.22) continue;
+            final dist = dy + dx * 0.5;
+            if (dist < bd) {
+              bd = dist;
+              best = d;
+            }
+          }
+          if (best != null) day = _dayKey(best.text);
         }
-      } else {
-        kind = 'other';
+        if (!r.rrnDay.containsKey(rrn) || r.rrnDay[rrn] == null) r.rrnDay[rrn] = day;
       }
-      r.pieces.add(MPiece(p + 1, kind, rrn, _pieceDate(txt), txt));
     }
   }
+  // لو سطور الصفحة مش كفاية، نحسب من النص الكامل
+  for (final m in _rrnRe.allMatches(all)) {
+    r.rrnDay.putIfAbsent(m.group(1)!, () => null);
+  }
 
-  // الماكينة والتاريخ من النص الكامل
+  r.sale = RegExp(r'(VISA|MASTER|MEZZA|MEEZA|MEEZ)\w*\W{0,6}S[a-z]l[a-z]', caseSensitive: false)
+      .allMatches(all)
+      .length;
+  r.auth = RegExp(r'AUTH\W{0,3}(\d{6})', caseSensitive: false)
+      .allMatches(all)
+      .map((m) => m.group(1)!)
+      .toSet()
+      .length;
+  r.nonPayment = RegExp(
+          r'GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF',
+          caseSensitive: false)
+      .hasMatch(all);
+
+  // الماكينة: أكتر Terminal ID متكرر
   final tc = <String, int>{};
-  for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(fullText)) {
+  for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(all)) {
     var c = m.group(1)!;
     c = tidFix[c] ?? c;
     if (terminals.containsKey(c)) tc[c] = (tc[c] ?? 0) + 1;
@@ -2704,41 +2658,45 @@ MScan scanReceipts(List<List<OcrLine>> pages, String fullText) {
   if (tc.isNotEmpty) {
     r.tid = tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
   } else {
-    r.tid = findTerminalIn([fullText]);
+    r.tid = findTerminalIn([all]);
   }
 
+  // اليوم الأغلب + الإيصالات اللي مش تبع نفس اليوم
   final dc = <String, int>{};
-  for (final p in r.pieces.where((p) => p.kind == 'pay' && p.date != null)) {
-    dc[p.date!] = (dc[p.date!] ?? 0) + 1;
+  for (final d in r.rrnDay.values) {
+    if (d != null) dc[d] = (dc[d] ?? 0) + 1;
   }
   if (dc.isEmpty) {
-    for (final p in r.pieces.where((p) => p.date != null)) {
-      dc[p.date!] = (dc[p.date!] ?? 0) + 1;
+    for (final m in _dateRe.allMatches(all)) {
+      final k = _dayKey(m.group(0)!);
+      if (k != null) dc[k] = (dc[k] ?? 0) + 1;
     }
   }
   if (dc.isNotEmpty) {
-    final best = dc.entries.reduce((a, b) => a.value >= b.value ? a : b).key.split('.');
-    r.day = best[0];
-    r.month = best[1];
-    final bestKey = '${r.day}.${r.month}';
-    r.otherDay =
-        r.pieces.where((p) => p.kind == 'pay' && p.date != null && p.date != bestKey).toList();
+    final best = dc.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+    final parts = best.split('.');
+    r.day = parts[0];
+    r.month = parts[1];
+    r.rrnDay.forEach((rrn, d) {
+      if (d != null && d != best) {
+        r.otherDay.add('إيصال ${rrn.substring(6)} بتاريخ $d');
+      }
+    });
   }
   return r;
 }
 
 class MResult {
   final String pdfName;
-  final String pdfPath;
+  String? openPath;
   int? orderNum;
   String? newName;
   int count = 0;
   String detail = '';
   bool ok = true;
-  String note = '';
-  List<String> dateWarnings = [];
-  final TextEditingController expected = TextEditingController();
-  MResult(this.pdfName, this.pdfPath);
+  final List<String> notes = [];
+  final TextEditingController ctl = TextEditingController();
+  MResult(this.pdfName);
 }
 
 class MachinesPage extends StatefulWidget {
@@ -2755,6 +2713,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   bool busy = false;
   String status = 'اضغط "فحص وإعادة تسمية" لفحص ملفات الماكينات من مستندات واتساب.';
   final List<MResult> results = [];
+  final Map<String, String> expectedByName = {};
   AppLifecycleState _life = AppLifecycleState.resumed;
   String get destDir => '$baseDir/وحدات';
 
@@ -2769,7 +2728,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     for (final r in results) {
-      r.expected.dispose();
+      r.ctl.dispose();
     }
     super.dispose();
   }
@@ -2777,6 +2736,23 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
+  }
+
+  Future<void> openPdf(String? path) async {
+    if (path == null || !File(path).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('الملف مش موجود.')),
+      );
+      return;
+    }
+    try {
+      final ok = await _chan.invokeMethod<bool>('openFile', {'path': path, 'mime': 'application/pdf'});
+      if (ok == true) return;
+    } catch (_) {}
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('مفيش برنامج يفتح الـ PDF.')),
+    );
   }
 
   Future<void> pickDir() async {
@@ -2811,22 +2787,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
-  Future<void> openPdf(MResult r) async {
-    var path = r.pdfPath;
-    if (!File(path).existsSync() && r.newName != null) {
-      path = '$destDir/${r.newName}.pdf';
-    }
-    try {
-      final ok = await _chan
-          .invokeMethod<bool>('openFile', {'path': path, 'mime': 'application/pdf'});
-      if (ok == true) return;
-    } catch (_) {}
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('مقدرتش أفتح الملف: $path')),
-    );
-  }
-
   Future<void> start() async {
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
@@ -2851,7 +2811,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         try {
           await _chan.invokeMethod('notify', {
             'title': 'A2R POS - انتهى فحص الماكينات',
-            'text': '${results.length} ملف، $total إيصال دفع'
+            'text': '${results.length} ملف، $total إيصال'
           });
         } catch (_) {}
       }
@@ -2859,11 +2819,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   Future<void> _scan() async {
+    for (final r0 in results) {
+      r0.ctl.dispose();
+    }
     setState(() {
       busy = true;
-      for (final r in results) {
-        r.expected.dispose();
-      }
       results.clear();
       status = 'جاري البحث عن ملفات PDF...';
     });
@@ -2874,7 +2834,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final done = loadDoneM();
     final pdfs = <File>[];
-    var skippedDone = 0, skippedOld = 0;
+    var skippedDone = 0;
     for (final d in dirs) {
       if (d.path == destDir) continue; // ما نفحصش ملفات فولدر وحدات (ناتج التطبيق)
       try {
@@ -2882,10 +2842,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           final n = baseName(e.path);
           if (!n.toLowerCase().endsWith('.pdf')) continue;
           if (_normAr(n).contains('اسكندري')) continue; // إخراج التطبيق نفسه
-          if (pdfEffectiveDate(e).isBefore(cutoff)) {
-            skippedOld++;
-            continue;
-          }
+          if (fileDate(e).isBefore(cutoff)) continue;
           if (skipDone && done.contains('$n:${e.lengthSync()}')) {
             skippedDone++;
             continue;
@@ -2901,10 +2858,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         status = dirs.isEmpty
             ? 'مش لاقي فولدر مستندات واتساب. اختار فولدر بإيدك.'
             : (skippedDone > 0
-                ? 'كل الملفات في الفترة دي اتفحصت قبل كده ($skippedDone ملف). أطفي "تجاهل الملفات اللي اتفحصت" علشان تفحصها تاني.'
-                : (skippedOld > 0
-                    ? 'مفيش ملفات في الفترة دي ($skippedOld ملف أقدم من الفترة المختارة). جرّب "3 أيام" أو "أسبوع" أو "الكل".'
-                    : 'مفيش ملفات PDF في الفولدر ده.'));
+                ? 'كل الملفات في الفترة دي اتفحصت قبل كده ($skippedDone ملف).'
+                : 'مفيش ملفات PDF في الفترة دي.');
       });
       return;
     }
@@ -2914,12 +2869,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final used = <String>{};
     for (var i = 0; i < pdfs.length; i++) {
       final f = pdfs[i];
-      final r = MResult(baseName(f.path), f.path);
+      final r = MResult(baseName(f.path));
       setState(() => status = 'فحص ${i + 1} / ${pdfs.length}: ${r.pdfName}');
       try {
         final bytes = await f.readAsBytes();
-        final buf = StringBuffer();
-        final pages = <List<OcrLine>>[];
+        final pages = <PageOcr>[];
         var pg = 0;
         await for (final page in Printing.raster(bytes, dpi: 300)) {
           pg++;
@@ -2927,27 +2881,28 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           final tp = File('$tmpDir/m_$pg.png');
           await tp.writeAsBytes(png);
           final res = await rec.processImage(InputImage.fromFilePath(tp.path));
-          buf.writeln(res.text);
-          pages.add(toLines(res));
+          pages.add(PageOcr(res.text, toLines(res)));
           try {
             tp.deleteSync();
           } catch (_) {}
         }
-        final sc = scanReceipts(pages, buf.toString());
+        final sc = scanPages(pages);
         r.count = sc.count;
-        r.detail = 'دفع ${sc.pay} • باتش ${sc.batch} • إعادة طباعة ${sc.reprint}';
-        if (sc.pay == 0) {
+        r.detail = 'RRN ${sc.rrn} • Sale ${sc.sale} • AUTH ${sc.auth}';
+        if (!sc.agree) {
           r.ok = false;
-          r.note = 'مفيش ولا إيصال دفع اتعرف، راجع الملف يدوياً';
+          r.notes.add('القراءات مختلفة، راجع العدد يدوياً');
         }
-        for (final p in sc.otherDay) {
-          r.dateWarnings.add(
-              'إيصال بتاريخ ${p.date!.replaceAll('.', '/')} (مش يوم ${sc.day}/${sc.month}) - صفحة ${p.page}${p.rrn != null ? ' - RRN ${p.rrn}' : ''}');
+        if (sc.otherDay.isNotEmpty) {
+          r.ok = false;
+          r.notes.add('مش تبع نفس اليوم: ${sc.otherDay.join(' ، ')}');
         }
-        if (r.dateWarnings.isNotEmpty) r.ok = false;
+        if (sc.nonPayment) {
+          r.notes.add('فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)');
+        }
         if (sc.tid == null) {
           r.ok = false;
-          r.note = 'مش قادر أعرف الماكينة من الـ PDF';
+          r.notes.add('مش قادر أعرف الماكينة من الـ PDF');
         } else {
           final info = terminals[sc.tid]!;
           r.orderNum = info.orderNum;
@@ -2961,7 +2916,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           }
           if (day == null || month == null) {
             r.ok = false;
-            r.note = 'مش قادر أعرف التاريخ';
+            r.notes.add('مش قادر أعرف التاريخ');
           } else {
             var name = machineNewName(info, day, month);
             var final0 = name;
@@ -2973,13 +2928,16 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             used.add(final0);
             await f.copy('$destDir/$final0.pdf');
             r.newName = final0;
+            r.openPath = '$destDir/$final0.pdf';
             done.add('${baseName(f.path)}:${f.lengthSync()}');
           }
         }
       } catch (e) {
         r.ok = false;
-        r.note = 'فشل الفحص';
+        r.notes.add('فشل الفحص');
       }
+      r.openPath ??= f.path;
+      r.ctl.text = expectedByName[r.pdfName] ?? '';
       results.add(r);
       if (!mounted) return;
       setState(() => progressValue = (i + 1) / pdfs.length);
@@ -2995,8 +2953,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     setState(() {
       busy = false;
       progressValue = 0;
-      status =
-          'اكتمل: ${results.length} ملف، $named اتسمّى واتنسخ في وحدات، إجمالي $total إيصال دفع (من غير الباتش وإعادة الطباعة).${skippedDone + skippedOld > 0 ? ' (اتخطّى: $skippedDone اتفحص قبل كده، $skippedOld أقدم من الفترة)' : ''}';
+      status = 'اكتمل: ${results.length} ملف، $named اتسمّى واتنسخ في وحدات، إجمالي $total إيصال.';
     });
   }
 
@@ -3009,87 +2966,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (!got.contains(n)) out.add('$n ${terminals[numToTid[n]]!.unitName}');
     }
     return out;
-  }
-
-  // لون خانة العدد اليدوي: أخضر = مطابق، أحمر = مختلف، رمادي = فاضية
-  Color _checkColor(MResult r) {
-    final v = int.tryParse(r.expected.text.trim());
-    if (v == null) return Colors.grey.shade200;
-    return v == r.count ? Colors.green.shade200 : Colors.red.shade200;
-  }
-
-  Widget _resultCard(MResult r) {
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: InkWell(
-        onTap: () => openPdf(r),
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(r.ok ? Icons.check_circle : Icons.warning_amber,
-                  color: r.ok ? Colors.green : Colors.orange.shade800),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(r.newName ?? '؟ ${r.pdfName}',
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 2),
-                    Text('الأصل: ${r.pdfName}', style: const TextStyle(fontSize: 12)),
-                    Text('إيصالات الدفع: ${r.count}',
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    Text(r.detail, style: const TextStyle(fontSize: 12)),
-                    if (r.note.isNotEmpty)
-                      Text('⚠️ ${r.note}',
-                          style: TextStyle(fontSize: 12, color: Colors.orange.shade900)),
-                    for (final w in r.dateWarnings)
-                      Text('📅 $w',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.red.shade800,
-                              fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 2),
-                    Row(children: [
-                      Icon(Icons.picture_as_pdf, size: 14, color: Colors.teal.shade700),
-                      const SizedBox(width: 4),
-                      Text('اضغط لفتح الملف',
-                          style: TextStyle(fontSize: 11, color: Colors.teal.shade700)),
-                    ]),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Column(
-                children: [
-                  const Text('العدد الصح', style: TextStyle(fontSize: 11)),
-                  const SizedBox(height: 2),
-                  SizedBox(
-                    width: 72,
-                    child: TextField(
-                      controller: r.expected,
-                      keyboardType: TextInputType.number,
-                      textAlign: TextAlign.center,
-                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        filled: true,
-                        fillColor: _checkColor(r),
-                        border: const OutlineInputBorder(),
-                      ),
-                      onChanged: (_) => setState(() {}),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   @override
@@ -3209,7 +3085,47 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             ),
           ],
           const SizedBox(height: 10),
-          for (final r in results) _resultCard(r),
+          for (final r in results)
+            Builder(builder: (context) {
+              final e = int.tryParse(r.ctl.text.trim());
+              final match = e == null ? null : e == r.count;
+              return Card(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                color: match == null
+                    ? null
+                    : (match ? Colors.green.shade100 : Colors.red.shade100),
+                child: ListTile(
+                  onTap: () => openPdf(r.openPath),
+                  title: Text(r.newName ?? '؟ ${r.pdfName}',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('الأصل: ${r.pdfName}\n'
+                      'عدد إيصالات الدفع: ${r.count}  (${r.detail})'
+                      '${r.notes.isEmpty ? '' : '\n⚠️ ${r.notes.join('\n⚠️ ')}'}'),
+                  isThreeLine: true,
+                  trailing: SizedBox(
+                    width: 76,
+                    child: TextField(
+                      controller: r.ctl,
+                      keyboardType: TextInputType.number,
+                      textAlign: TextAlign.center,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'الصح',
+                        border: const OutlineInputBorder(),
+                        filled: match != null,
+                        fillColor: match == null
+                            ? null
+                            : (match ? Colors.green.shade300 : Colors.red.shade300),
+                      ),
+                      onChanged: (v) {
+                        expectedByName[r.pdfName] = v;
+                        setState(() {});
+                      },
+                    ),
+                  ),
+                ),
+              );
+            }),
         ],
       ),
     );
