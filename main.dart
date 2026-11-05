@@ -27,7 +27,33 @@ class PosApp extends StatelessWidget {
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
       builder: (context, child) =>
           Directionality(textDirection: TextDirection.rtl, child: child!),
-      home: const HomePage(),
+      home: const RootPage(),
+    );
+  }
+}
+
+class RootPage extends StatefulWidget {
+  const RootPage({super.key});
+
+  @override
+  State<RootPage> createState() => _RootPageState();
+}
+
+class _RootPageState extends State<RootPage> {
+  int tab = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(index: tab, children: const [HomePage(), MachinesPage()]),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: tab,
+        onDestinationSelected: (i) => setState(() => tab = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.receipt_long), label: 'الإيصالات'),
+          NavigationDestination(icon: Icon(Icons.folder_copy), label: 'ملفات الماكينات'),
+        ],
+      ),
     );
   }
 }
@@ -1031,7 +1057,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? generatedPdfPath;
   List<int> missingTerminals = [];
   final List<String> warnings = [];
-  bool autoRotate = true;
+  bool autoRotate = false; // أبطأ: بيجرّب تدوير كل صورة مش إيصال
   String sourceNote = '';
 
   @override
@@ -1652,7 +1678,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
           // قراءة تانية بتنسيق مختلف (صورة محسّنة) علشان نكشف الأخطاء
           double? alt;
-          try {
+          // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
+          final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0;
+          if (needSecond) {
+            try {
             final ep = '$tmpDir/enh.jpg';
             await enhanceImageAsync(workPath, ep);
             final res2 = await recognizer.processImage(InputImage.fromFilePath(ep));
@@ -1663,7 +1692,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   mode: FileMode.append);
             } catch (_) {}
             alt = mergeSecondRead(a, a2);
-          } catch (_) {}
+            } catch (_) {}
+          }
 
           if (a.tid == null) {
             final fnNum = int.tryParse(baseName(f.path).split('.').first);
@@ -1990,7 +2020,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             const SizedBox(height: 4),
             Row(
               children: [
-                const Expanded(child: Text('تدوير تلقائي للصور المقلوبة')),
+                const Expanded(child: Text('فحص الصور المقلوبة (أبطأ)')),
                 Switch(
                   value: autoRotate,
                   onChanged: busy ? null : (v) => setState(() => autoRotate = v),
@@ -2474,6 +2504,490 @@ class _ReviewPageState extends State<ReviewPage> {
             },
           ),
         ),
+      ),
+    );
+  }
+}
+
+
+// ───────────────────── ملفات الماكينات (PDF لكل ماكينة) ─────────────────────
+String? loadPdfDir() => _readCfg()['pdfDir'] as String?;
+
+// فولدرات مستندات واتساب (جنب فولدرات الصور)
+List<Directory> findWhatsAppDocDirs() {
+  final out = <Directory>[];
+  for (final d in findWhatsAppImageDirs()) {
+    final p = d.path;
+    if (p.endsWith('WhatsApp Images')) {
+      final dd = Directory('${p.substring(0, p.length - 'WhatsApp Images'.length)}WhatsApp Documents');
+      if (dd.existsSync() && !out.any((x) => x.path == dd.path)) out.add(dd);
+    }
+  }
+  return out;
+}
+
+Set<String> loadDoneM() {
+  final l = _readCfg()['doneM'];
+  return l is List ? l.map((e) => e.toString()).toSet() : <String>{};
+}
+
+void saveDoneM(Set<String> s) {
+  final m = _readCfg();
+  final l = s.toList();
+  m['doneM'] = l.length > 500 ? l.sublist(l.length - 500) : l;
+  _writeCfg(m);
+}
+
+void savePdfDir(String? f) {
+  final m = _readCfg();
+  m['pdfDir'] = f;
+  _writeCfg(m);
+}
+
+// الاسم الجديد: "1.أبيس.1.يوم.4.11" (وحدة فيها أكتر من ماكينة) أو "17.مديرية.الأمن.يوم.4.11"
+String machineNewName(TerminalInfo info, String day, String month) {
+  final same = terminals.values.where((t) => t.excelRow == info.excelRow).toList()
+    ..sort((a, b) => a.orderNum.compareTo(b.orderNum));
+  final unit = info.unitName.trim().replaceAll(RegExp(r'\s+'), '.');
+  final k = same.indexWhere((t) => t.orderNum == info.orderNum) + 1;
+  return [
+    info.orderNum.toString(),
+    unit,
+    if (same.length > 1) '$k',
+    'يوم',
+    day,
+    month,
+  ].join('.');
+}
+
+class MScan {
+  int rrn = 0, egp = 0, hdr = 0;
+  String? tid;
+  String? day, month;
+  int get count {
+    if (rrn == egp || rrn == hdr) return rrn;
+    if (egp == hdr) return egp;
+    return egp > 0 ? egp : (rrn > 0 ? rrn : hdr);
+  }
+
+  bool get agree => rrn == egp && egp == hdr;
+}
+
+MScan scanReceiptsText(String text) {
+  final r = MScan();
+  final rrns = <String>{};
+  for (final m in RegExp(r'(?<![\d*])(?!00)(\d{12})(?!\d)').allMatches(text)) {
+    rrns.add(m.group(1)!);
+  }
+  r.rrn = rrns.length;
+  r.egp = RegExp('EGP', caseSensitive: false).allMatches(text).length;
+  r.hdr = RegExp('TERMINAL', caseSensitive: false).allMatches(text).length;
+
+  final tc = <String, int>{};
+  for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(text)) {
+    var c = m.group(1)!;
+    c = tidFix[c] ?? c;
+    if (terminals.containsKey(c)) tc[c] = (tc[c] ?? 0) + 1;
+  }
+  if (tc.isNotEmpty) {
+    r.tid = tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+  } else {
+    r.tid = findTerminalIn([text]);
+  }
+
+  final dc = <String, int>{};
+  for (final m in RegExp(r'(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})').allMatches(text)) {
+    final mo = int.parse(m.group(2)!), d = int.parse(m.group(3)!);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      final k = '$d.$mo';
+      dc[k] = (dc[k] ?? 0) + 1;
+    }
+  }
+  if (dc.isNotEmpty) {
+    final best = dc.entries.reduce((a, b) => a.value >= b.value ? a : b).key.split('.');
+    r.day = best[0];
+    r.month = best[1];
+  }
+  return r;
+}
+
+class MResult {
+  final String pdfName;
+  int? orderNum;
+  String? newName;
+  int count = 0;
+  String detail = '';
+  bool ok = true;
+  String note = '';
+  MResult(this.pdfName);
+}
+
+class MachinesPage extends StatefulWidget {
+  const MachinesPage({super.key});
+
+  @override
+  State<MachinesPage> createState() => _MachinesPageState();
+}
+
+class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver {
+  String? pdfDir; // null = مستندات واتساب (تلقائي)
+  int days = 3;
+  bool skipDone = true;
+  bool busy = false;
+  String status = 'اضغط "فحص وإعادة تسمية" لفحص ملفات الماكينات من مستندات واتساب.';
+  final List<MResult> results = [];
+  AppLifecycleState _life = AppLifecycleState.resumed;
+  String get destDir => '$baseDir/وحدات';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    pdfDir = loadPdfDir();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _life = state;
+  }
+
+  Future<void> pickDir() async {
+    final perm = await Permission.manageExternalStorage.request();
+    if (!perm.isGranted) {
+      setState(() => status = 'لازم تسمح بالوصول لكل الملفات الأول.');
+      return;
+    }
+    if (!mounted) return;
+    final res = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => FolderPicker(start: pdfDir ?? root)),
+    );
+    if (res != null) {
+      savePdfDir(res);
+      setState(() => pdfDir = res);
+    }
+  }
+
+  Future<void> openDest() async {
+    try {
+      Directory(destDir).createSync(recursive: true);
+    } catch (_) {}
+    try {
+      final ok = await _chan.invokeMethod<bool>('openFolder', {'path': destDir});
+      if (ok == true) return;
+    } catch (_) {}
+    await Clipboard.setData(ClipboardData(text: destDir));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('مقدرتش أفتح الفولدر. المسار اتنسخ: $destDir')),
+    );
+  }
+
+  Future<void> start() async {
+    final perm = await Permission.manageExternalStorage.request();
+    if (!perm.isGranted) {
+      setState(() => status = 'لازم تسمح بالوصول لكل الملفات الأول.');
+      return;
+    }
+    try {
+      await Permission.notification.request();
+    } catch (_) {}
+    try {
+      await _chan.invokeMethod(
+          'startKeepAlive', {'title': 'A2R POS', 'text': 'جاري فحص ملفات الماكينات...'});
+    } catch (_) {}
+    try {
+      await _scan();
+    } finally {
+      try {
+        await _chan.invokeMethod('stopKeepAlive');
+      } catch (_) {}
+      if (_life != AppLifecycleState.resumed) {
+        final total = results.fold<int>(0, (a, r) => a + r.count);
+        try {
+          await _chan.invokeMethod('notify', {
+            'title': 'A2R POS - انتهى فحص الماكينات',
+            'text': '${results.length} ملف، $total إيصال'
+          });
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> _scan() async {
+    setState(() {
+      busy = true;
+      results.clear();
+      status = 'جاري البحث عن ملفات PDF...';
+    });
+    final dirs = pdfDir != null ? [Directory(pdfDir!)] : findWhatsAppDocDirs();
+    final now = DateTime.now();
+    final cutoff = days < 0
+        ? DateTime(2000)
+        : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+    final done = loadDoneM();
+    final pdfs = <File>[];
+    var skippedDone = 0;
+    for (final d in dirs) {
+      if (d.path == destDir) continue; // ما نفحصش ملفات فولدر وحدات (ناتج التطبيق)
+      try {
+        for (final e in d.listSync().whereType<File>()) {
+          final n = baseName(e.path);
+          if (!n.toLowerCase().endsWith('.pdf')) continue;
+          if (_normAr(n).contains('اسكندري')) continue; // إخراج التطبيق نفسه
+          if (fileDate(e).isBefore(cutoff)) continue;
+          if (skipDone && done.contains('$n:${e.lengthSync()}')) {
+            skippedDone++;
+            continue;
+          }
+          pdfs.add(e);
+        }
+      } catch (_) {}
+    }
+    pdfs.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
+    if (pdfs.isEmpty) {
+      setState(() {
+        busy = false;
+        status = dirs.isEmpty
+            ? 'مش لاقي فولدر مستندات واتساب. اختار فولدر بإيدك.'
+            : (skippedDone > 0
+                ? 'كل الملفات في الفترة دي اتفحصت قبل كده ($skippedDone ملف).'
+                : 'مفيش ملفات PDF في الفترة دي.');
+      });
+      return;
+    }
+    Directory(destDir).createSync(recursive: true);
+    Directory(tmpDir).createSync(recursive: true);
+    final rec = TextRecognizer(script: TextRecognitionScript.latin);
+    final used = <String>{};
+    for (var i = 0; i < pdfs.length; i++) {
+      final f = pdfs[i];
+      final r = MResult(baseName(f.path));
+      setState(() => status = 'فحص ${i + 1} / ${pdfs.length}: ${r.pdfName}');
+      try {
+        final bytes = await f.readAsBytes();
+        final buf = StringBuffer();
+        var pg = 0;
+        await for (final page in Printing.raster(bytes, dpi: 300)) {
+          pg++;
+          final png = await page.toPng();
+          final tp = File('$tmpDir/m_$pg.png');
+          await tp.writeAsBytes(png);
+          final res = await rec.processImage(InputImage.fromFilePath(tp.path));
+          buf.writeln(res.text);
+          try {
+            tp.deleteSync();
+          } catch (_) {}
+        }
+        final sc = scanReceiptsText(buf.toString());
+        r.count = sc.count;
+        r.detail = 'RRN ${sc.rrn} • مبالغ ${sc.egp} • ترويسات ${sc.hdr}';
+        if (!sc.agree) {
+          r.ok = false;
+          r.note = 'القراءات مختلفة، راجع العدد يدوياً';
+        }
+        if (sc.tid == null) {
+          r.ok = false;
+          r.note = 'مش قادر أعرف الماكينة من الـ PDF';
+        } else {
+          final info = terminals[sc.tid]!;
+          r.orderNum = info.orderNum;
+          var day = sc.day, month = sc.month;
+          if (day == null) {
+            final m = RegExp(r'(\d{2})-(\d{2})-(\d{4})').firstMatch(r.pdfName);
+            if (m != null) {
+              day = int.parse(m.group(1)!).toString();
+              month = int.parse(m.group(2)!).toString();
+            }
+          }
+          if (day == null || month == null) {
+            r.ok = false;
+            r.note = 'مش قادر أعرف التاريخ';
+          } else {
+            var name = machineNewName(info, day, month);
+            var final0 = name;
+            var k = 2;
+            while (used.contains(final0) || File('$destDir/$final0.pdf').existsSync()) {
+              final0 = '${name}_$k';
+              k++;
+            }
+            used.add(final0);
+            await f.copy('$destDir/$final0.pdf');
+            r.newName = final0;
+            done.add('${baseName(f.path)}:${f.lengthSync()}');
+          }
+        }
+      } catch (e) {
+        r.ok = false;
+        r.note = 'فشل الفحص';
+      }
+      results.add(r);
+      if (!mounted) return;
+      setState(() => progressValue = (i + 1) / pdfs.length);
+    }
+    await rec.close();
+    saveDoneM(done);
+    try {
+      Directory(tmpDir).deleteSync(recursive: true);
+    } catch (_) {}
+    results.sort((a, b) => (a.orderNum ?? 99).compareTo(b.orderNum ?? 99));
+    final total = results.fold<int>(0, (a, r) => a + r.count);
+    final named = results.where((r) => r.newName != null).length;
+    setState(() {
+      busy = false;
+      progressValue = 0;
+      status = 'اكتمل: ${results.length} ملف، $named اتسمّى واتنسخ في وحدات، إجمالي $total إيصال.';
+    });
+  }
+
+  double progressValue = 0;
+
+  List<String> missingMachines() {
+    final got = results.map((r) => r.orderNum).whereType<int>().toSet();
+    final out = <String>[];
+    for (var n = 1; n <= 19; n++) {
+      if (!got.contains(n)) out.add('$n ${terminals[numToTid[n]]!.unitName}');
+    }
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final missing = results.isEmpty ? <String>[] : missingMachines();
+    return Scaffold(
+      appBar: AppBar(title: const Text('ملفات الماكينات')),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('الفترة', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      for (final o in const [
+                        [0, 'اليوم'],
+                        [3, '3 أيام'],
+                        [7, 'أسبوع'],
+                        [-1, 'الكل'],
+                      ])
+                        ChoiceChip(
+                          label: Text(o[1] as String),
+                          selected: days == o[0],
+                          onSelected: busy ? null : (_) => setState(() => days = o[0] as int),
+                        ),
+                    ],
+                  ),
+                  const Divider(height: 20),
+                  const Text('المصدر',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                  const SizedBox(height: 6),
+                  Text('المصدر: ${pdfDir ?? 'واتساب - مستندات (تلقائي)'}',
+                      textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.tonalIcon(
+                          onPressed: busy ? null : pickDir,
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('اختيار فولدر'),
+                        ),
+                      ),
+                      if (pdfDir != null) ...[
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: busy
+                              ? null
+                              : () {
+                                  savePdfDir(null);
+                                  setState(() => pdfDir = null);
+                                },
+                          child: const Text('واتساب'),
+                        ),
+                      ],
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      const Expanded(child: Text('تجاهل الملفات اللي اتفحصت قبل كده')),
+                      Switch(
+                        value: skipDone,
+                        onChanged: busy ? null : (v) => setState(() => skipDone = v),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 52,
+            child: FilledButton.icon(
+              onPressed: busy ? null : start,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('فحص وإعادة تسمية'),
+            ),
+          ),
+          if (busy) ...[
+            const SizedBox(height: 8),
+            LinearProgressIndicator(value: progressValue > 0 ? progressValue : null),
+          ],
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade200,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(status),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: openDest,
+            icon: const Icon(Icons.folder_special),
+            label: const Text('فتح فولدر وحدات'),
+          ),
+          if (missing.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.amber.shade100,
+                border: Border.all(color: Colors.amber.shade800),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text('⚠️ ماكينات ما وصلش ملفها (${missing.length}): ${missing.join(' ، ')}',
+                  style: const TextStyle(fontSize: 13)),
+            ),
+          ],
+          const SizedBox(height: 10),
+          for (final r in results)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              child: ListTile(
+                title: Text(r.newName ?? '؟ ${r.pdfName}',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text('الأصل: ${r.pdfName}\nعدد الإيصالات: ${r.count}  (${r.detail})'
+                    '${r.note.isEmpty ? '' : '\n⚠️ ${r.note}'}'),
+                isThreeLine: true,
+                trailing: Icon(r.ok ? Icons.check_circle : Icons.warning_amber,
+                    color: r.ok ? Colors.green : Colors.orange.shade800),
+              ),
+            ),
+        ],
       ),
     );
   }
