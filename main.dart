@@ -3834,7 +3834,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         for (final e in d.listSync().whereType<File>()) {
           final n = baseName(e.path);
           if (!n.toLowerCase().endsWith('.pdf')) continue;
-          if (_normAr(n).contains('اسكندري')) continue; // إخراج التقفيل
+          // إخراج التقفيل بتاع التطبيق بس (بيبدأ بـ "الاسكندريه")، أي اسم تاني بيتفحص عادي
+          if (_normAr(n).startsWith('الاسكندريه')) continue;
           if (fileDate(e).isBefore(cutoff)) continue;
           if (have.contains('$n:${e.lengthSync()}') && skipDone) {
             skipped++;
@@ -3908,7 +3909,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final sb = StringBuffer();
     final votes = <String, double>{};
     var id = MIdent();
-    for (var pi = 0; pi < 6; pi++) {
+    for (var pi = 0; pi < 25; pi++) {
+      // بعد 6 صفحات لو لقينا ماكينة نوقف، ولو لسه مفيش نكمّل لحد 25 صفحة
+      if (pi >= 6 && votes.isNotEmpty) break;
       var got = false;
       await for (final page in Printing.raster(bytes, pages: [pi], dpi: 200)) {
         got = true;
@@ -3938,8 +3941,25 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final rk = _rankVotes(votes);
     r.altTids = rk.map((e) => e.key).toList();
     r.votes = votes;
-    final tid = rk.isNotEmpty ? rk.first.key : id.tid;
+    var tid = rk.isNotEmpty ? rk.first.key : id.tid;
+    var fromUnit = false;
+    if (tid == null) {
+      // مفيش Terminal ID مقروء: نحدد الوحدة من Merchant ID/اسم الوحدة جوه الـ PDF،
+      // ولو الوحدة فيها ماكينة واحدة بس نستخدمها (وتتعلّم للمراجعة)
+      final row = findUnitExtraIn([sb.toString()]);
+      if (row != null) {
+        final same = terminals.entries.where((e) => e.value.excelRow == row).toList();
+        if (same.length == 1) {
+          tid = same.first.key;
+          fromUnit = true;
+        }
+      }
+    }
     await _applyName(r, f, tid, id.day, id.month);
+    if (fromUnit && r.newName != null) {
+      r.idOk = false;
+      r.idNotes.add('Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع');
+    }
   }
 
   // لو ملفين اتعرفوا على نفس الماكينة: الأقوى (أكتر أصوات) يفضل، والتاني ياخد مرشحه التاني لو قراءته واضحة
