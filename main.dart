@@ -2560,32 +2560,9 @@ String machineNewName(TerminalInfo info, String day, String month) {
   ].join('.');
 }
 
-class PageOcr {
-  final String text;
-  final List<OcrLine> lines;
-  PageOcr(this.text, this.lines);
-}
-
-// الإيصال الدفع بس: بنعدّه برقم RRN (12 رقم) المميز لكل عملية دفع.
-// إيصالات الإقفال والملخص وإعادة الطباعة مفيهاش RRN فمبتتعدّش.
-class MScan {
-  final Map<String, String?> rrnDay = {}; // rrn -> "يوم.شهر" أو null
-  int sale = 0, auth = 0;
-  bool nonPayment = false;
-  String? tid, day, month;
-  final List<String> otherDay = [];
-  int get rrn => rrnDay.length;
-  int get count {
-    final a = rrn, b = sale, c = auth;
-    if (a == b || a == c) return a;
-    if (b == c) return b;
-    return a > 0 ? a : (b > 0 ? b : c);
-  }
-
-  bool get agree => rrn == sale && sale == auth;
-}
-
-final RegExp _rrnRe = RegExp(r'(?<![\d*])(?!00)(\d{12})(?!\d)');
+// ───────── عدّ إيصالات الدفع: كل إيصال دفع ليه سطر RRN (12 رقم، بيبدأ بـ 63) ─────────
+// بنقرا الصفحة على شرائح رأسية ضيقة (القراءة أدق من الصفحة كلها)، وبنجمع "نقاط ارتكاز"
+// (سطر RRN) لكل إيصال. إيصالات الإقفال والملخص ما فيهاش RRN فمبتتعدّش.
 final RegExp _dateRe = RegExp(r'(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})');
 
 String? _dayKey(String text) {
@@ -2596,94 +2573,215 @@ String? _dayKey(String text) {
   return null;
 }
 
-MScan scanPages(List<PageOcr> pages) {
-  final r = MScan();
-  final all = pages.map((p) => p.text).join('\n');
+// null = مفيش RRN في السطر | 12 رقم = RRN كامل | 'P' = RRN مقروء ناقص
+String? _anchorOf(String t) {
+  final m = RegExp(r'R{1,2}N\W{0,3}((?:\d\s?){9,12})', caseSensitive: false).firstMatch(t) ??
+      RegExp(r'(?<!\d)(63(?:\d\s?){7,10})(?!\d)').firstMatch(t);
+  if (m == null) return null;
+  final d = m.group(1)!.replaceAll(RegExp(r'\s'), '');
+  if (d.length < 9) return null;
+  if (d.length == 12 && d.startsWith('63')) return d;
+  return 'P';
+}
 
-  // عدد عمليات الدفع: RRN + ربط كل RRN بتاريخ أقرب سطر تاريخ ليه
-  for (final p in pages) {
-    final width = p.lines.isEmpty ? 1000.0 : p.lines.map((l) => l.right).reduce(math.max);
-    final dates = <OcrLine>[];
-    for (final l in p.lines) {
-      if (_dayKey(l.text) != null) dates.add(l);
+const double _stripScale = 1.5;
+
+// بيقص الصفحة لـ 5 شرائح رأسية (أعمدة) متداخلة ويكبّرها. بيرجّع [عرض، ارتفاع، x0 لكل شريحة...]
+List<int> _makeStrips(String src, String prefix) {
+  final im = img.decodeImage(File(src).readAsBytesSync());
+  if (im == null) return [];
+  final w = im.width, h = im.height;
+  const n = 5;
+  final cw = w / n;
+  final out = <int>[w, h];
+  for (var i = 0; i < n; i++) {
+    final x0 = math.max(0, (i * cw - cw * 0.12).round());
+    final x1 = math.min(w, ((i + 1) * cw + cw * 0.12).round());
+    var c = img.copyCrop(im, x: x0, y: 0, width: x1 - x0, height: h);
+    c = img.copyResize(c,
+        width: (c.width * _stripScale).round(), interpolation: img.Interpolation.linear);
+    File('${prefix}_$i.jpg').writeAsBytesSync(img.encodeJpg(c, quality: 92));
+    out.add(x0);
+  }
+  return out;
+}
+
+class Anchor {
+  String? rrn;
+  String? day;
+  final double l, r, cy;
+  Anchor(this.rrn, this.day, this.l, this.r, this.cy);
+}
+
+class MCollector {
+  final List<List<Anchor>> pages = [];
+  final StringBuffer text = StringBuffer();
+  double pageH = 3000;
+
+  void add(Anchor n) {
+    final list = pages.last;
+    for (final a in list) {
+      // نفس الإيصال اتقرا من شريحتين متداخلتين: نفس المكان على الصفحة
+      if (a.l < n.r && n.l < a.r && (a.cy - n.cy).abs() < pageH * 0.012) {
+        a.rrn ??= n.rrn;
+        a.day ??= n.day;
+        return;
+      }
     }
-    for (final l in p.lines) {
-      for (final m in _rrnRe.allMatches(l.text)) {
-        final rrn = m.group(1)!;
-        String? day = _dayKey(l.text);
-        if (day == null) {
-          OcrLine? best;
-          var bd = double.infinity;
-          for (final d in dates) {
-            final dy = (d.cy - l.cy).abs();
-            final dx = ((d.left + d.right) / 2 - (l.left + l.right) / 2).abs();
-            if (dy > l.h * 4 || dx > width * 0.22) continue;
-            final dist = dy + dx * 0.5;
-            if (dist < bd) {
-              bd = dist;
-              best = d;
-            }
-          }
-          if (best != null) day = _dayKey(best.text);
+    list.add(n);
+  }
+
+  MScan finish() {
+    final r = MScan();
+    final seen = <String>{};
+    final days = <String, int>{};
+    final partialDays = <String>[];
+    for (final a in pages.expand((p) => p)) {
+      if (a.rrn != null) {
+        if (seen.add(a.rrn!)) {
+          r.full++;
+          r.rrnDay[a.rrn!] = a.day;
+          if (a.day != null) days[a.day!] = (days[a.day!] ?? 0) + 1;
         }
-        if (!r.rrnDay.containsKey(rrn) || r.rrnDay[rrn] == null) r.rrnDay[rrn] = day;
+      } else {
+        r.partial++;
+        if (a.day != null) {
+          partialDays.add(a.day!);
+          days[a.day!] = (days[a.day!] ?? 0) + 1;
+        }
       }
     }
-  }
-  // لو سطور الصفحة مش كفاية، نحسب من النص الكامل
-  for (final m in _rrnRe.allMatches(all)) {
-    r.rrnDay.putIfAbsent(m.group(1)!, () => null);
-  }
+    final all = text.toString();
+    r.nonPayment = RegExp(
+            r'GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF',
+            caseSensitive: false)
+        .hasMatch(all);
 
-  r.sale = RegExp(r'(VISA|MASTER|MEZZA|MEEZA|MEEZ)\w*\W{0,6}S[a-z]l[a-z]', caseSensitive: false)
-      .allMatches(all)
-      .length;
-  r.auth = RegExp(r'AUTH\W{0,3}(\d{6})', caseSensitive: false)
-      .allMatches(all)
-      .map((m) => m.group(1)!)
-      .toSet()
-      .length;
-  r.nonPayment = RegExp(
-          r'GRAND\s*TOTAL|TOTAL\s*NET\s*AMOUNT|BATCH\s*CLOS|SUMMARY|REPRINT|DUPLICATE|SUCCESSF',
-          caseSensitive: false)
-      .hasMatch(all);
-
-  // الماكينة: أكتر Terminal ID متكرر
-  final tc = <String, int>{};
-  for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(all)) {
-    var c = m.group(1)!;
-    c = tidFix[c] ?? c;
-    if (terminals.containsKey(c)) tc[c] = (tc[c] ?? 0) + 1;
-  }
-  if (tc.isNotEmpty) {
-    r.tid = tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
-  } else {
-    r.tid = findTerminalIn([all]);
-  }
-
-  // اليوم الأغلب + الإيصالات اللي مش تبع نفس اليوم
-  final dc = <String, int>{};
-  for (final d in r.rrnDay.values) {
-    if (d != null) dc[d] = (dc[d] ?? 0) + 1;
-  }
-  if (dc.isEmpty) {
-    for (final m in _dateRe.allMatches(all)) {
-      final k = _dayKey(m.group(0)!);
-      if (k != null) dc[k] = (dc[k] ?? 0) + 1;
+    // الماكينة: أكتر Terminal ID متكرر
+    final tc = <String, int>{};
+    for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(all)) {
+      var c = m.group(1)!;
+      c = tidFix[c] ?? c;
+      if (terminals.containsKey(c)) tc[c] = (tc[c] ?? 0) + 1;
     }
-  }
-  if (dc.isNotEmpty) {
-    final best = dc.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
-    final parts = best.split('.');
-    r.day = parts[0];
-    r.month = parts[1];
-    r.rrnDay.forEach((rrn, d) {
-      if (d != null && d != best) {
-        r.otherDay.add('إيصال ${rrn.substring(6)} بتاريخ $d');
+    r.tid = tc.isNotEmpty
+        ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
+        : findTerminalIn([all]);
+
+    // اليوم الأغلب + الإيصالات اللي مش تبع نفس اليوم
+    if (days.isEmpty) {
+      for (final m in _dateRe.allMatches(all)) {
+        final k = _dayKey(m.group(0)!);
+        if (k != null) days[k] = (days[k] ?? 0) + 1;
       }
-    });
+    }
+    if (days.isNotEmpty) {
+      final best = days.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+      final p = best.split('.');
+      r.day = p[0];
+      r.month = p[1];
+      r.rrnDay.forEach((rrn, d) {
+        if (d != null && d != best) r.otherDay.add('إيصال ${rrn.substring(6)} بتاريخ $d');
+      });
+      for (final d in partialDays) {
+        if (d != best) r.otherDay.add('إيصال (رقمه مش واضح) بتاريخ $d');
+      }
+    }
+
+    // تسلسل أرقام الإيصالات (آخر 6 أرقام من الـ RRN): أكبر مجموعة متتالية
+    final nums = r.rrnDay.keys.map((k) => int.parse(k.substring(6))).toList()..sort();
+    if (nums.length >= 2) {
+      var bestStart = 0, bestLen = 1, start = 0;
+      for (var i = 1; i <= nums.length; i++) {
+        if (i == nums.length || nums[i] - nums[i - 1] > 15) {
+          if (i - start > bestLen) {
+            bestLen = i - start;
+            bestStart = start;
+          }
+          start = i;
+        }
+      }
+      final cl = nums.sublist(bestStart, bestStart + bestLen);
+      r.seqMin = cl.first;
+      r.seqMax = cl.last;
+      final have = cl.toSet();
+      for (var n = cl.first; n <= cl.last; n++) {
+        if (!have.contains(n)) r.seqMissing.add(n);
+      }
+    }
+    return r;
   }
-  return r;
+}
+
+class MScan {
+  int full = 0, partial = 0;
+  final Map<String, String?> rrnDay = {};
+  bool nonPayment = false;
+  String? tid, day, month;
+  final List<String> otherDay = [];
+  int? seqMin, seqMax;
+  final List<int> seqMissing = [];
+
+  int get count => full + partial;
+  int? get rangeLen => seqMin == null ? null : seqMax! - seqMin! + 1;
+  bool get agree => rangeLen == null || count == rangeLen;
+  String get rangeText =>
+      seqMin == null ? '' : ' • التسلسل ${seqMin.toString().padLeft(6, '0')}-${seqMax.toString().padLeft(6, '0')} ($rangeLen)';
+  String get seqNote {
+    final miss = seqMissing.take(10).map((n) => n.toString().padLeft(6, '0')).join('، ');
+    return 'العدد $count بس التسلسل $rangeLen'
+        '${seqMissing.isNotEmpty ? ' - أرقام مش لاقيها: $miss${seqMissing.length > 10 ? ' ...' : ''}' : ''}'
+        ' (ممكن إيصالات ناقصة أو مش اتقرت، راجع الملف)';
+  }
+}
+
+void _collect(RecognizedText res, double x0, double scale, MCollector col) {
+  col.text.writeln(res.text);
+  final lines = toLines(res);
+  final dates = lines.where((l) => _dayKey(l.text) != null).toList();
+  for (final l in lines) {
+    final a = _anchorOf(l.text);
+    if (a == null) continue;
+    var day = _dayKey(l.text);
+    if (day == null) {
+      OcrLine? best;
+      var bd = double.infinity;
+      for (final d in dates) {
+        final dy = (d.cy - l.cy).abs();
+        if (dy > l.h * 5) continue;
+        if (!(d.left < l.right + 60 && l.left < d.right + 60)) continue;
+        if (dy < bd) {
+          bd = dy;
+          best = d;
+        }
+      }
+      if (best != null) day = _dayKey(best.text);
+    }
+    col.add(Anchor(a == 'P' ? null : a, day, x0 + l.left / scale, x0 + l.right / scale,
+        l.cy / scale));
+  }
+}
+
+// قراءة الصفحة كلها + قراءة شرائح مكبّرة، وبعدين دمج النتايج (نفس الإيصال بيتعدّ مرة)
+Future<void> ocrPageStrips(
+    TextRecognizer rec, String pngPath, String prefix, MCollector col) async {
+  final info = await Isolate.run(() => _makeStrips(pngPath, prefix));
+  col.pageH = info.length >= 2 ? info[1].toDouble() : 3000;
+  col.pages.add(<Anchor>[]);
+  try {
+    final res = await rec.processImage(InputImage.fromFilePath(pngPath));
+    _collect(res, 0, 1, col);
+  } catch (_) {}
+  for (var i = 2; i < info.length; i++) {
+    final fp = '${prefix}_${i - 2}.jpg';
+    try {
+      final res = await rec.processImage(InputImage.fromFilePath(fp));
+      _collect(res, info[i].toDouble(), _stripScale, col);
+    } catch (_) {}
+    try {
+      File(fp).deleteSync();
+    } catch (_) {}
+  }
 }
 
 class MResult {
@@ -2873,25 +2971,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       setState(() => status = 'فحص ${i + 1} / ${pdfs.length}: ${r.pdfName}');
       try {
         final bytes = await f.readAsBytes();
-        final pages = <PageOcr>[];
+        final col = MCollector();
         var pg = 0;
-        await for (final page in Printing.raster(bytes, dpi: 300)) {
+        await for (final page in Printing.raster(bytes, dpi: 250)) {
           pg++;
           final png = await page.toPng();
           final tp = File('$tmpDir/m_$pg.png');
           await tp.writeAsBytes(png);
-          final res = await rec.processImage(InputImage.fromFilePath(tp.path));
-          pages.add(PageOcr(res.text, toLines(res)));
+          await ocrPageStrips(rec, tp.path, '$tmpDir/m_${pg}_s', col);
           try {
             tp.deleteSync();
           } catch (_) {}
         }
-        final sc = scanPages(pages);
+        final sc = col.finish();
         r.count = sc.count;
-        r.detail = 'RRN ${sc.rrn} • Sale ${sc.sale} • AUTH ${sc.auth}';
+        r.detail = 'RRN كامل ${sc.full} • ناقص القراءة ${sc.partial}${sc.rangeText}';
         if (!sc.agree) {
           r.ok = false;
-          r.notes.add('القراءات مختلفة، راجع العدد يدوياً');
+          r.notes.add(sc.seqNote);
         }
         if (sc.otherDay.isNotEmpty) {
           r.ok = false;
