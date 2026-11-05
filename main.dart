@@ -2510,6 +2510,48 @@ class _ReviewPageState extends State<ReviewPage> {
 }
 
 
+String _latinDigits(String s) {
+  const ar = '٠١٢٣٤٥٦٧٨٩';
+  final sb = StringBuffer();
+  for (final ch in s.split('')) {
+    final i = ar.indexOf(ch);
+    sb.write(i >= 0 ? '$i' : ch);
+  }
+  return sb.toString();
+}
+
+// تاريخ مكتوب في اسم الملف (4.11 / 4.11.2026 / 04-11-2026 / 2026-11-04) أو null
+DateTime? nameDate(String name) {
+  final n = _latinDigits(name);
+  final y = DateTime.now().year;
+  final a = RegExp(r'(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})').firstMatch(n);
+  if (a != null) {
+    final mo = int.parse(a.group(2)!), d = int.parse(a.group(3)!);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return DateTime(int.parse(a.group(1)!), mo, d);
+  }
+  final b = RegExp(r'(?<!\d)(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](20\d{2}))?(?!\d)').firstMatch(n);
+  if (b != null) {
+    final d = int.parse(b.group(1)!), mo = int.parse(b.group(2)!);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return DateTime(b.group(3) != null ? int.parse(b.group(3)!) : y, mo, d);
+    }
+  }
+  return null;
+}
+
+// أحدث تاريخ بين: تعديل الملف / تغييره / التاريخ المكتوب في اسمه (علشان إعادة التسمية والنقل ما يخبّوش الملف)
+DateTime pdfEffectiveDate(File f) {
+  var best = fileDate(f);
+  try {
+    final st = f.statSync();
+    if (st.changed.isAfter(best)) best = st.changed;
+    if (st.modified.isAfter(best)) best = st.modified;
+  } catch (_) {}
+  final nd = nameDate(baseName(f.path));
+  if (nd != null && nd.isAfter(best)) best = nd;
+  return best;
+}
+
 // ───────────────────── ملفات الماكينات (PDF لكل ماكينة) ─────────────────────
 String? loadPdfDir() => _readCfg()['pdfDir'] as String?;
 
@@ -2832,7 +2874,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
     final done = loadDoneM();
     final pdfs = <File>[];
-    var skippedDone = 0;
+    var skippedDone = 0, skippedOld = 0;
     for (final d in dirs) {
       if (d.path == destDir) continue; // ما نفحصش ملفات فولدر وحدات (ناتج التطبيق)
       try {
@@ -2840,7 +2882,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           final n = baseName(e.path);
           if (!n.toLowerCase().endsWith('.pdf')) continue;
           if (_normAr(n).contains('اسكندري')) continue; // إخراج التطبيق نفسه
-          if (fileDate(e).isBefore(cutoff)) continue;
+          if (pdfEffectiveDate(e).isBefore(cutoff)) {
+            skippedOld++;
+            continue;
+          }
           if (skipDone && done.contains('$n:${e.lengthSync()}')) {
             skippedDone++;
             continue;
@@ -2856,8 +2901,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         status = dirs.isEmpty
             ? 'مش لاقي فولدر مستندات واتساب. اختار فولدر بإيدك.'
             : (skippedDone > 0
-                ? 'كل الملفات في الفترة دي اتفحصت قبل كده ($skippedDone ملف).'
-                : 'مفيش ملفات PDF في الفترة دي.');
+                ? 'كل الملفات في الفترة دي اتفحصت قبل كده ($skippedDone ملف). أطفي "تجاهل الملفات اللي اتفحصت" علشان تفحصها تاني.'
+                : (skippedOld > 0
+                    ? 'مفيش ملفات في الفترة دي ($skippedOld ملف أقدم من الفترة المختارة). جرّب "3 أيام" أو "أسبوع" أو "الكل".'
+                    : 'مفيش ملفات PDF في الفولدر ده.'));
       });
       return;
     }
@@ -2949,7 +2996,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       busy = false;
       progressValue = 0;
       status =
-          'اكتمل: ${results.length} ملف، $named اتسمّى واتنسخ في وحدات، إجمالي $total إيصال دفع (من غير الباتش وإعادة الطباعة).';
+          'اكتمل: ${results.length} ملف، $named اتسمّى واتنسخ في وحدات، إجمالي $total إيصال دفع (من غير الباتش وإعادة الطباعة).${skippedDone + skippedOld > 0 ? ' (اتخطّى: $skippedDone اتفحص قبل كده، $skippedOld أقدم من الفترة)' : ''}';
     });
   }
 
