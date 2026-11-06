@@ -77,6 +77,126 @@ bool _isAppReportName(String n) => RegExp(
         r'^الاسكندريه\s*(\d{1,2}[.\-_]\d{1,2}|اليوم)(\s*\(\d+\))?\.pdf$')
     .hasMatch(_normAr(n));
 
+// ───────── عناصر واجهة مدمجة (علشان الشاشة ما تبقاش زحمة) ─────────
+Widget _mini(IconData icon, String label, VoidCallback? onPressed, {bool filled = false}) {
+  const pad = WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 12));
+  const size = WidgetStatePropertyAll(Size(0, 36));
+  const txt = WidgetStatePropertyAll(TextStyle(fontSize: 13));
+  final st = const ButtonStyle(
+    padding: pad,
+    minimumSize: size,
+    textStyle: txt,
+    visualDensity: VisualDensity.compact,
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  );
+  final ic = Icon(icon, size: 18);
+  return filled
+      ? FilledButton.tonalIcon(onPressed: onPressed, icon: ic, label: Text(label), style: st)
+      : OutlinedButton.icon(onPressed: onPressed, icon: ic, label: Text(label), style: st);
+}
+
+Widget _periodRow(int days, bool busy, void Function(int) onPick) => Row(
+      children: [
+        const Text('الفترة', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Wrap(
+            spacing: 6,
+            children: [
+              for (final o in const [
+                [0, 'اليوم'],
+                [1, 'يومين'],
+                [2, '3 أيام'],
+                [-1, 'الكل'],
+              ])
+                ChoiceChip(
+                  label: Text(o[1] as String, style: const TextStyle(fontSize: 13)),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  selected: days == o[0],
+                  onSelected: busy ? null : (_) => onPick(o[0] as int),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+
+Widget _pathRow(IconData icon, String label, String path, VoidCallback? onPick,
+    {VoidCallback? onReset}) {
+  final bs = TextButton.styleFrom(
+    visualDensity: VisualDensity.compact,
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    minimumSize: const Size(0, 32),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  );
+  return GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onLongPress: onReset, // ضغطة مطوّلة = رجوع للافتراضي
+    child: Row(
+      children: [
+        Icon(icon, size: 18),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+              Text(path,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textDirection: TextDirection.ltr,
+                  style: const TextStyle(fontSize: 12)),
+            ],
+          ),
+        ),
+        TextButton(onPressed: onPick, style: bs, child: const Text('تغيير')),
+      ],
+    ),
+  );
+}
+
+Widget _settingsCard(List<Widget> children) => Card(
+      margin: const EdgeInsets.only(bottom: 6),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
+      ),
+    );
+
+Widget _switchRow(String label, bool v, void Function(bool)? onChanged) => SwitchListTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      contentPadding: EdgeInsets.zero,
+      title: Text(label, style: const TextStyle(fontSize: 13)),
+      value: v,
+      onChanged: onChanged,
+    );
+
+Widget _statusBox(String text) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
+      child: Text(text, style: const TextStyle(fontSize: 13)),
+    );
+
+Widget _bottomBar(Widget button, {bool busy = false, double? progress}) => Material(
+      elevation: 6,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (busy)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: LinearProgressIndicator(value: (progress ?? 0) > 0 ? progress : null),
+              ),
+            SizedBox(height: 44, width: double.infinity, child: button),
+          ],
+        ),
+      ),
+    );
+
 class PosApp extends StatelessWidget {
   const PosApp({super.key});
 
@@ -108,6 +228,7 @@ class _RootPageState extends State<RootPage> {
     return Scaffold(
       body: IndexedStack(index: tab, children: const [HomePage(), MachinesPage()]),
       bottomNavigationBar: NavigationBar(
+        height: 60,
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
         destinations: const [
@@ -2678,173 +2799,79 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final pdf = latestOutput('.pdf');
     final reviewCount = processedItems.where((e) => e.needsReview).length;
     return Scaffold(
-      appBar: AppBar(title: const Text('التقفيل')),
-      body: ListView(
-        padding: const EdgeInsets.all(12),
-        children: [
-          _card('الفترة', [
-            Wrap(
-              spacing: 8,
-              children: [
-                for (final o in const [
-                  [0, 'اليوم'],
-                  [1, 'يومين'],
-                  [2, '3 أيام'],
-                  [-1, 'الكل'],
-                ])
-                  ChoiceChip(
-                    label: Text(o[1] as String),
-                    selected: days == o[0],
-                    onSelected: busy ? null : (_) => setState(() => days = o[0] as int),
-                  ),
-              ],
-            ),
-          ]),
-          _card('المصدر والإخراج', [
-            Text('المصدر: ${customDir ?? 'واتساب (تلقائي)'}',
-                textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    onPressed: busy ? null : pickFolder,
-                    icon: const Icon(Icons.folder_open),
-                    label: const Text('فولدر الفحص'),
-                  ),
-                ),
-                if (customDir != null) ...[
-                  const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed: busy ? null : useWhatsApp,
-                    child: const Text('واتساب'),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text('الإخراج: ${customOut ?? '$defaultOutputDir (افتراضي)'}',
-                textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    onPressed: busy ? null : pickOutFolder,
-                    icon: const Icon(Icons.drive_file_move_outline),
-                    label: const Text('مكان الإخراج'),
-                  ),
-                ),
-                if (customOut != null) ...[
-                  const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed: busy ? null : useDefaultOut,
-                    child: const Text('الافتراضي'),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                const Expanded(child: Text('فحص الصور المقلوبة (أبطأ)')),
-                Switch(
-                  value: autoRotate,
-                  onChanged: busy ? null : (v) => setState(() => autoRotate = v),
-                ),
-              ],
-            ),
-          ]),
-          SizedBox(
-            height: 52,
-            child: FilledButton.icon(
-              onPressed: busy ? null : runFullPipeline,
-              icon: const Icon(Icons.play_arrow),
-              label: const Text('بدء المعالجة الشاملة'),
-            ),
-          ),
-          if (busy) ...[
-            const SizedBox(height: 8),
-            LinearProgressIndicator(value: progress > 0 ? progress : null),
-          ],
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade200,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(status),
-          ),
-          const SizedBox(height: 10),
-          _card('الملفات الناتجة', [
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    onPressed: xlsx == null
-                        ? null
-                        : () => openFile(xlsx,
-                            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
-                    icon: const Icon(Icons.table_chart),
-                    label: const Text('فتح الإكسيل'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    onPressed: pdf == null ? null : () => openFile(pdf, 'application/pdf'),
-                    icon: const Icon(Icons.picture_as_pdf),
-                    label: const Text('فتح PDF'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: busy ? null : sendToWhatsApp,
-                    icon: const Icon(Icons.chat),
-                    label: const Text('إرسال واتساب'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => openFolder(outputDir),
-                    icon: const Icon(Icons.folder_open),
-                    label: const Text('مكان الإخراج'),
-                  ),
-                ),
-              ],
-            ),
-          ]),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: busy ? null : openReview,
-                  icon: const Icon(Icons.fact_check),
-                  label: Text('مراجعة ($reviewCount)'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: busy ? null : clearAll,
-                  icon: const Icon(Icons.delete_sweep),
-                  label: const Text('مسح الكل'),
-                ),
-              ),
+      appBar: AppBar(
+        toolbarHeight: 44,
+        titleSpacing: 12,
+        title: const Text('التقفيل', style: TextStyle(fontSize: 17)),
+        actions: [
+          PopupMenuButton<String>(
+            tooltip: 'المزيد',
+            onSelected: (v) {
+              if (v == 'folder') {
+                openFolder(outputDir);
+              } else if (v == 'src') {
+                useWhatsApp();
+              } else if (v == 'out') {
+                useDefaultOut();
+              } else if (v == 'clear') {
+                clearAll();
+              }
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'folder', child: Text('فتح فولدر الإخراج')),
+              if (customDir != null)
+                PopupMenuItem(value: 'src', enabled: !busy, child: const Text('المصدر: رجوع لواتساب')),
+              if (customOut != null)
+                PopupMenuItem(value: 'out', enabled: !busy, child: const Text('الإخراج: الافتراضي')),
+              PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
             ],
           ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: shareAdvancedFile,
-            icon: const Icon(Icons.bug_report_outlined),
-            label: const Text('مشاركة اللوج'),
+        ],
+      ),
+      bottomNavigationBar: _bottomBar(
+        FilledButton.icon(
+          onPressed: busy ? null : runFullPipeline,
+          icon: const Icon(Icons.play_arrow),
+          label: const Text('بدء المعالجة الشاملة'),
+        ),
+        busy: busy,
+        progress: progress,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+        children: [
+          _settingsCard([
+            _periodRow(days, busy, (d) => setState(() => days = d)),
+            const Divider(height: 10),
+            _pathRow(Icons.folder_open, 'المصدر', customDir ?? 'واتساب (تلقائي)',
+                busy ? null : pickFolder,
+                onReset: customDir != null && !busy ? useWhatsApp : null),
+            _pathRow(Icons.drive_file_move_outline, 'الإخراج',
+                customOut ?? '$defaultOutputDir (افتراضي)', busy ? null : pickOutFolder,
+                onReset: customOut != null && !busy ? useDefaultOut : null),
+            _switchRow('فحص الصور المقلوبة (أبطأ)', autoRotate,
+                busy ? null : (v) => setState(() => autoRotate = v)),
+          ]),
+          _statusBox(status),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _mini(
+                  Icons.table_chart,
+                  'إكسيل',
+                  xlsx == null
+                      ? null
+                      : () => openFile(xlsx,
+                          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+                  filled: true),
+              _mini(Icons.picture_as_pdf, 'PDF',
+                  pdf == null ? null : () => openFile(pdf, 'application/pdf'),
+                  filled: true),
+              _mini(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
+              _mini(Icons.fact_check, 'مراجعة ($reviewCount)', busy ? null : openReview),
+            ],
           ),
           if (missingTerminals.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -3847,8 +3874,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   // صح = يفضل مع ملفات اليوم، غلط = يتشال من الإرسال والعد والفولدر. الضغط تاني بيلغي الاختيار
-  void setVerdict(MResult r, int v) {
-    final nv = r.verdict == v ? 0 : v;
+  void setVerdict(MResult r, int v, {bool toggle = true}) {
+    final nv = (toggle && r.verdict == v) ? 0 : v;
     final wasExcluded = r.excluded;
     r.verdict = nv;
     final op = r.openPath;
@@ -3871,6 +3898,28 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     saveMState(results);
     setState(() {});
     if (wasExcluded && nv >= 0 && r.pending && !busy) start(resumeOnly: true);
+  }
+
+  Future<void> markRestOk() async {
+    final list = results.where((r) => !r.ok).toList();
+    if (list.isEmpty) return;
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('الباقي صح'),
+        content: Text('هتعلّم ${list.length} ملف على إنهم صح؟'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('لا')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('تمام')),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    for (final r in list) {
+      r.verdict = 1;
+    }
+    saveMState(results);
+    if (mounted) setState(() {});
   }
 
   Future<void> shareOne(MResult r) async {
@@ -4323,7 +4372,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (r.pending && r.tries >= 3) {
         r.count = 0;
         r.cntOk = false;
-        r.cntNotes.add('العد وقف أكتر من مرة (التطبيق اتقفل). اضغط ⟳ لإعادة العد');
+        r.cntNotes.add('العد وقف أكتر من مرة (التطبيق اتقفل). من ⋮ اختار إعادة العد');
       }
     }
     final todo = results.where((r) => r.pending).toList();
@@ -4474,185 +4523,114 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pendCount = results.where((r) => r.pending).length;
     final named = results.where((r) => r.newName != null && !r.excluded).length;
     return Scaffold(
-      appBar: AppBar(title: const Text('إيصالات الدفع')),
+      appBar: AppBar(
+        toolbarHeight: 44,
+        titleSpacing: 12,
+        title: const Text('إيصالات الدفع', style: TextStyle(fontSize: 17)),
+        actions: [
+          PopupMenuButton<String>(
+            tooltip: 'المزيد',
+            onSelected: (v) {
+              if (v == 'folder') {
+                openDest();
+              } else if (v == 'src') {
+                savePdfDir(null);
+                setState(() => pdfDir = null);
+              } else if (v == 'out') {
+                useDefaultOut();
+              } else if (v == 'clear') {
+                clearAll();
+              }
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'folder', child: Text('فتح فولدر الإخراج')),
+              if (pdfDir != null)
+                PopupMenuItem(value: 'src', enabled: !busy, child: const Text('المصدر: رجوع لواتساب')),
+              if (destDir != defaultMDest)
+                PopupMenuItem(value: 'out', enabled: !busy, child: const Text('الإخراج: الافتراضي')),
+              PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
+            ],
+          ),
+        ],
+      ),
+      bottomNavigationBar: _bottomBar(
+        busy
+            ? OutlinedButton.icon(
+                onPressed: stopReq ? null : () => setState(() => stopReq = true),
+                icon: const Icon(Icons.stop),
+                label: const Text('إيقاف'),
+              )
+            : FilledButton.icon(
+                onPressed: () => start(),
+                icon: const Icon(Icons.play_arrow),
+                label: Text(pendCount > 0 ? 'فحص / متابعة (فاضل $pendCount)' : 'فحص وإعادة تسمية'),
+              ),
+        busy: busy,
+        progress: progressValue,
+      ),
       body: ListView(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
-          Card(
-            margin: const EdgeInsets.only(bottom: 10),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text('الفترة', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      for (final o in const [
-                        [0, 'اليوم'],
-                        [1, 'يومين'],
-                        [2, '3 أيام'],
-                        [-1, 'الكل'],
-                      ])
-                        ChoiceChip(
-                          label: Text(o[1] as String),
-                          selected: days == o[0],
-                          onSelected: busy ? null : (_) => setState(() => days = o[0] as int),
-                        ),
-                    ],
-                  ),
-                  const Divider(height: 20),
-                  const Text('المصدر والإخراج',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                  const SizedBox(height: 6),
-                  Text('المصدر: ${pdfDir ?? 'واتساب - مستندات (تلقائي)'}',
-                      textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton.tonalIcon(
-                          onPressed: busy ? null : pickDir,
-                          icon: const Icon(Icons.folder_open),
-                          label: const Text('فولدر الفحص'),
-                        ),
-                      ),
-                      if (pdfDir != null) ...[
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: busy
-                              ? null
-                              : () {
-                                  savePdfDir(null);
-                                  setState(() => pdfDir = null);
-                                },
-                          child: const Text('واتساب'),
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Text('الإخراج: $destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}',
-                      textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton.tonalIcon(
-                          onPressed: busy ? null : pickOut,
-                          icon: const Icon(Icons.drive_file_move_outline),
-                          label: const Text('مكان الإخراج'),
-                        ),
-                      ),
-                      if (destDir != defaultMDest) ...[
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: busy ? null : useDefaultOut,
-                          child: const Text('الافتراضي'),
-                        ),
-                      ],
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      const Expanded(child: Text('تجاهل الملفات اللي اتفحصت قبل كده')),
-                      Switch(
-                        value: skipDone,
-                        onChanged: busy ? null : (v) => setState(() => skipDone = v),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
+          _settingsCard([
+            _periodRow(days, busy, (d) => setState(() => days = d)),
+            const Divider(height: 10),
+            _pathRow(Icons.folder_open, 'المصدر', pdfDir ?? 'واتساب - مستندات (تلقائي)',
+                busy ? null : pickDir,
+                onReset: pdfDir != null && !busy
+                    ? () {
+                        savePdfDir(null);
+                        setState(() => pdfDir = null);
+                      }
+                    : null),
+            _pathRow(Icons.drive_file_move_outline, 'الإخراج',
+                '$destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}', busy ? null : pickOut,
+                onReset: destDir != defaultMDest && !busy ? useDefaultOut : null),
+          ]),
+          _statusBox(status),
+          const SizedBox(height: 6),
           Row(
             children: [
+              const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              const SizedBox(width: 10),
               Expanded(
-                child: SizedBox(
-                  height: 52,
-                  child: FilledButton.icon(
-                    onPressed: busy ? null : () => start(),
-                    icon: const Icon(Icons.play_arrow),
-                    label: Text(pendCount > 0 ? 'فحص / متابعة (فاضل $pendCount)' : 'فحص وإعادة تسمية'),
-                  ),
-                ),
-              ),
-              if (busy) ...[
-                const SizedBox(width: 8),
-                SizedBox(
-                  height: 52,
-                  child: OutlinedButton.icon(
-                    onPressed: stopReq ? null : () => setState(() => stopReq = true),
-                    icon: const Icon(Icons.stop),
-                    label: const Text('إيقاف'),
-                  ),
-                ),
-              ],
-            ],
-          ),
-          if (busy) ...[
-            const SizedBox(height: 8),
-            LinearProgressIndicator(value: progressValue > 0 ? progressValue : null),
-          ],
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade200,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(status),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: (busy && !namingDone) || named == 0 ? null : shareAll,
-                  icon: const Icon(Icons.chat),
-                  label: Text('إرسال الكل ($named)'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: openDest,
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('فتح الفولدر'),
+                child: Wrap(
+                  spacing: 6,
+                  children: [
+                    ChoiceChip(
+                      label: Text('الكل (${results.length})', style: const TextStyle(fontSize: 13)),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      selected: !reviewOnly,
+                      onSelected: (_) => setState(() => reviewOnly = false),
+                    ),
+                    ChoiceChip(
+                      label: Text('مراجعة ($reviewN)', style: const TextStyle(fontSize: 13)),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      selected: reviewOnly,
+                      onSelected: (_) => setState(() => reviewOnly = true),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Row(
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
             children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: reviewN == 0 && !reviewOnly
-                      ? null
-                      : () => setState(() => reviewOnly = !reviewOnly),
-                  icon: Icon(reviewOnly ? Icons.list : Icons.fact_check),
-                  label: Text(reviewOnly ? 'عرض الكل' : 'مراجعة ($reviewN)'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: busy ? null : clearAll,
-                  icon: const Icon(Icons.delete_sweep),
-                  label: const Text('مسح الكل'),
-                ),
-              ),
+              _mini(Icons.chat, 'إرسال الكل ($named)',
+                  (busy && !namingDone) || named == 0 ? null : shareAll,
+                  filled: true),
+              if (reviewOnly && reviewN > 0)
+                _mini(Icons.done_all, 'الباقي صح ($reviewN)', busy ? null : markRestOk),
             ],
           ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: shareLog,
-            icon: const Icon(Icons.bug_report_outlined),
-            label: const Text('مشاركة اللوج'),
+          const Padding(
+            padding: EdgeInsets.only(top: 4, bottom: 2),
+            child: Text('اسحب أي ملف لتعليمه: صح ✓ أو غلط ✗',
+                style: TextStyle(fontSize: 11, color: Colors.black54)),
           ),
           if (missing.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -4672,87 +4650,95 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             Builder(builder: (context) {
               final e = int.tryParse(r.ctl.text.trim());
               final match = (e == null || r.pending || r.excluded) ? null : e == r.count;
-              return Card(
-                margin: const EdgeInsets.symmetric(vertical: 4),
-                color: r.excluded
-                    ? Colors.grey.shade300
-                    : (match == null
-                        ? null
-                        : (match ? Colors.green.shade100 : Colors.red.shade100)),
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                ListTile(
-                  onTap: () => openPdf(r.openPath),
-                  title: Text(r.newName ?? '؟ ${r.pdfName}',
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          decoration: r.excluded ? TextDecoration.lineThrough : null)),
-                  subtitle: Text('الأصل: ${r.pdfName}\n'
-                      '${r.excluded ? 'مستبعد (علامة غلط)' : r.pending ? 'عدد إيصالات الدفع: لسه بيتعدّ...' : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
-                      '${r.notes.isEmpty ? '' : '\n⚠️ ${r.notes.join('\n⚠️ ')}'}'),
-                  isThreeLine: true,
-                  trailing: SizedBox(
-                    width: 150,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          tooltip: 'إرسال الملف',
-                          icon: const Icon(Icons.share, color: Colors.teal),
-                          onPressed: r.newName == null || r.excluded ? null : () => shareOne(r),
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          tooltip: 'إعادة العد',
-                          icon: const Icon(Icons.refresh),
-                          onPressed: busy ? null : () => recount(r),
-                        ),
-                        SizedBox(
-                          width: 56,
-                          child: TextField(
-                            controller: r.ctl,
-                            keyboardType: TextInputType.number,
-                            textAlign: TextAlign.center,
-                            decoration: InputDecoration(
-                              isDense: true,
-                              hintText: 'الصح',
-                              border: const OutlineInputBorder(),
-                              filled: match != null,
-                              fillColor: match == null
-                                  ? null
-                                  : (match ? Colors.green.shade300 : Colors.red.shade300),
+              return Dismissible(
+                key: ValueKey('t_${r.key}'),
+                confirmDismiss: (dir) async {
+                  setVerdict(r, dir == DismissDirection.startToEnd ? 1 : -1, toggle: false);
+                  return false;
+                },
+                background: Container(
+                  color: Colors.green.shade300,
+                  alignment: AlignmentDirectional.centerStart,
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: const Text('صح ✓', style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                secondaryBackground: Container(
+                  color: Colors.red.shade300,
+                  alignment: AlignmentDirectional.centerEnd,
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: const Text('غلط ✗', style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                child: Card(
+                  margin: const EdgeInsets.symmetric(vertical: 2),
+                  color: r.excluded
+                      ? Colors.grey.shade300
+                      : (match == null
+                          ? null
+                          : (match ? Colors.green.shade100 : Colors.red.shade100)),
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                    onTap: () => openPdf(r.openPath),
+                    title: Text(r.newName ?? '؟ ${r.pdfName}',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            decoration: r.excluded ? TextDecoration.lineThrough : null)),
+                    subtitle: Text('${r.verdict > 0 ? '✓ اتراجع: صح\n' : ''}الأصل: ${r.pdfName}\n'
+                        '${r.excluded ? 'مستبعد (علامة غلط)' : r.pending ? 'عدد إيصالات الدفع: لسه بيتعدّ...' : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
+                        '${r.notes.isEmpty ? '' : '\n⚠️ ${r.notes.join('\n⚠️ ')}'}'),
+                    trailing: SizedBox(
+                      width: 100,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 56,
+                            child: TextField(
+                              controller: r.ctl,
+                              keyboardType: TextInputType.number,
+                              textAlign: TextAlign.center,
+                              decoration: InputDecoration(
+                                isDense: true,
+                                hintText: 'الصح',
+                                border: const OutlineInputBorder(),
+                                filled: match != null,
+                                fillColor: match == null
+                                    ? null
+                                    : (match ? Colors.green.shade300 : Colors.red.shade300),
+                              ),
+                              onChanged: (v) {
+                                saveMState(results);
+                                setState(() {});
+                              },
                             ),
-                            onChanged: (v) {
-                              saveMState(results);
-                              setState(() {});
-                            },
                           ),
-                        ),
-                      ],
+                          PopupMenuButton<String>(
+                            tooltip: 'المزيد',
+                            padding: EdgeInsets.zero,
+                            onSelected: (v) {
+                              if (v == 'share') {
+                                shareOne(r);
+                              } else if (v == 'recount') {
+                                recount(r);
+                              } else if (v == 'clear') {
+                                setVerdict(r, 0, toggle: false);
+                              }
+                            },
+                            itemBuilder: (_) => [
+                              PopupMenuItem(
+                                  value: 'share',
+                                  enabled: r.newName != null && !r.excluded,
+                                  child: const Text('إرسال الملف')),
+                              PopupMenuItem(
+                                  value: 'recount', enabled: !busy, child: const Text('إعادة العد')),
+                              if (r.verdict != 0)
+                                const PopupMenuItem(value: 'clear', child: Text('إلغاء علامة صح/غلط')),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                  child: Row(
-                    children: [
-                      ChoiceChip(
-                        label: const Text('صح ✓'),
-                        selected: r.verdict > 0,
-                        selectedColor: Colors.green.shade300,
-                        onSelected: (_) => setVerdict(r, 1),
-                      ),
-                      const SizedBox(width: 8),
-                      ChoiceChip(
-                        label: const Text('غلط ✗'),
-                        selected: r.verdict < 0,
-                        selectedColor: Colors.red.shade300,
-                        onSelected: (_) => setVerdict(r, -1),
-                      ),
-                    ],
-                  ),
-                ),
-                ]),
               );
             }),
         ],
