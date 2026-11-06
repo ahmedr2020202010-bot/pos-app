@@ -2290,6 +2290,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
     sourceNote = '';
 
+    // فولدر اخترته بإيدك (مش واتساب): أي ملف PDF جواه بيتفحص، بأي اسم وبأي تاريخ
+    if (customDir != null && customDir != outputDir) {
+      final cpdfs = <File>[];
+      try {
+        for (final e in Directory(customDir!).listSync().whereType<File>()) {
+          final n = baseName(e.path);
+          if (!n.startsWith('.') && n.toLowerCase().endsWith('.pdf')) cpdfs.add(e);
+        }
+      } catch (_) {}
+      cpdfs.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
+      var pdfPages = 0;
+      final used = <String>[];
+      for (final pf in cpdfs) {
+        setState(() => status = 'بقرأ صفحات ملف PDF: ${baseName(pf.path)}...');
+        final pages = await extractPdfPages(pf);
+        if (pages.isEmpty) continue;
+        todo.addAll(pages);
+        pdfPages += pages.length;
+        used.add(baseName(pf.path));
+      }
+      if (used.isNotEmpty) {
+        sourceNote = '• المصدر: ملف PDF ${used.take(3).join(' ، ')}${used.length > 3 ? ' ...' : ''} ($pdfPages صفحة)';
+      }
+    }
+
     // مفيش صور؟ دوّر على PDF اسمه "الاسكندريه + تاريخ النهارده"
     if (todo.isEmpty) {
       setState(() => status = 'مفيش صور. بدوّر على ملف PDF اسمه "الاسكندريه ${todayToken()}"...');
@@ -2315,10 +2340,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (todo.isEmpty) {
       setState(() {
         busy = false;
-        status = (dirs.isEmpty
-                ? 'تعذر العثور على مجلد صور الواتساب تلقائياً.'
-                : 'لا توجد صور في مجلد الواتساب بالفترة المحددة.') +
-            '\nولا يوجد ملف PDF باسم "الاسكندريه ${todayToken()}".';
+        status = customDir != null
+            ? 'مفيش صور (في الفترة المحددة) ولا ملفات PDF في المجلد المختار.'
+            : (dirs.isEmpty
+                    ? 'تعذر العثور على مجلد صور الواتساب تلقائياً.'
+                    : 'لا توجد صور في مجلد الواتساب بالفترة المحددة.') +
+                '\nولا يوجد ملف PDF باسم "الاسكندريه ${todayToken()}".';
       });
       return;
     }
@@ -3533,11 +3560,13 @@ class MResult {
   String? tidUsed, dayUsed, monthUsed;
   bool idOk = true;
   bool cntOk = true;
+  int verdict = 0; // 0 = لسه ما اتراجعش، 1 = صح (يفضل مع ملفات اليوم)، -1 = غلط (مستبعد)
   final TextEditingController ctl = TextEditingController();
   MResult(this.pdfName);
 
-  bool get pending => count < 0;
-  bool get ok => idOk && cntOk;
+  bool get excluded => verdict < 0;
+  bool get pending => count < 0 && !excluded;
+  bool get ok => verdict != 0 || (idOk && cntOk);
   String get key => '$pdfName:$size';
   List<String> get notes => [...idNotes, ...cntNotes];
 
@@ -3556,6 +3585,7 @@ class MResult {
         'cntNotes': cntNotes,
         'idOk': idOk,
         'cntOk': cntOk,
+        'verdict': verdict,
         'exp': ctl.text,
       };
 
@@ -3574,6 +3604,7 @@ class MResult {
     r.cntNotes.addAll(((j['cntNotes'] as List?) ?? const []).map((e) => e.toString()));
     r.idOk = j['idOk'] != false;
     r.cntOk = j['cntOk'] != false;
+    r.verdict = (j['verdict'] as num?)?.toInt() ?? 0;
     r.ctl.text = (j['exp'] ?? '').toString();
     return r;
   }
@@ -3672,6 +3703,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   int days = 0;
   bool skipDone = true;
   bool reviewOnly = false;
+  bool namingDone = false; // التسمية خلصت (حتى لو العد لسه شغال): زرار الإرسال يتفعل
   bool busy = false;
   bool stopReq = false;
   double progressValue = 0;
@@ -3802,7 +3834,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   // ───── المشاركة: كل الملفات مرة واحدة، أو ملف ملف ─────
   Future<void> shareAll() async {
     final files = results
-        .where((r) => r.newName != null && r.openPath != null && File(r.openPath!).existsSync())
+        .where((r) => !r.excluded && r.newName != null && r.openPath != null && File(r.openPath!).existsSync())
         .map((r) => XFile(r.openPath!, mimeType: 'application/pdf'))
         .toList();
     if (files.isEmpty) {
@@ -3812,6 +3844,33 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       return;
     }
     await Share.shareXFiles(files, text: 'إيصالات الدفع (${files.length} ملف)');
+  }
+
+  // صح = يفضل مع ملفات اليوم، غلط = يتشال من الإرسال والعد والفولدر. الضغط تاني بيلغي الاختيار
+  void setVerdict(MResult r, int v) {
+    final nv = r.verdict == v ? 0 : v;
+    final wasExcluded = r.excluded;
+    r.verdict = nv;
+    final op = r.openPath;
+    try {
+      if (nv < 0 && !wasExcluded) {
+        // مسح النسخة المتسمية بس (مش الأصلي أبداً)
+        if (op != null && op != r.srcPath && op.startsWith(destDir)) File(op).deleteSync();
+      } else if (nv >= 0 && wasExcluded && r.newName != null) {
+        final src = File(r.srcPath);
+        if (op != null && op != r.srcPath && src.existsSync()) {
+          if (File(op).existsSync()) {
+            r.openPath = r.srcPath; // فيه ملف تاني واخد الاسم ده
+          } else {
+            Directory(File(op).parent.path).createSync(recursive: true);
+            src.copySync(op);
+          }
+        }
+      }
+    } catch (_) {}
+    saveMState(results);
+    setState(() {});
+    if (wasExcluded && nv >= 0 && r.pending && !busy) start(resumeOnly: true);
   }
 
   Future<void> shareOne(MResult r) async {
@@ -3890,7 +3949,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         await _chan.invokeMethod('keepScreenOn', {'on': false});
       } catch (_) {}
       if (_life != AppLifecycleState.resumed) {
-        final total = results.fold<int>(0, (a, r) => a + (r.count > 0 ? r.count : 0));
+        final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
         try {
           await _chan.invokeMethod('notify', {
             'title': 'A2R POS - انتهى فحص إيصالات الدفع',
@@ -3921,8 +3980,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         if (!resumeOnly && lf.existsSync() && lf.lengthSync() > 300000) lf.deleteSync();
       } catch (_) {}
       _dbg('PHASE1 start resumeOnly=$resumeOnly');
+      namingDone = resumeOnly;
       if (!resumeOnly) idle = await _identifyAll(rec);
       _dbg('PHASE1 done');
+      if (mounted) setState(() => namingDone = true);
       // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف، وبتتحفظ بعد كل ملف
       _dbg('PHASE2 start');
       await _countAll(rec);
@@ -3937,8 +3998,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     results.sort(_cmpM);
     saveMState(results);
     final pend = results.where((r) => r.pending).length;
-    final total = results.fold<int>(0, (a, r) => a + (r.count > 0 ? r.count : 0));
-    final named = results.where((r) => r.newName != null).length;
+    final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
+    final named = results.where((r) => r.newName != null && !r.excluded).length;
     if (!mounted) return;
     setState(() {
       busy = false;
@@ -4152,7 +4213,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   Future<void> _resolveDuplicates() async {
     final groups = <String, List<MResult>>{};
     for (final r in results) {
-      if (r.tidUsed != null && r.newName != null) {
+      if (r.tidUsed != null && r.newName != null && !r.excluded) {
         groups.putIfAbsent(r.tidUsed!, () => <MResult>[]).add(r);
       }
     }
@@ -4192,7 +4253,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     final groups = <String, List<MResult>>{};
     for (final r in results) {
-      if (r.tidUsed != null && r.newName != null) {
+      if (r.tidUsed != null && r.newName != null && !r.excluded) {
         groups.putIfAbsent(r.tidUsed!, () => <MResult>[]).add(r);
       }
     }
@@ -4240,7 +4301,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     var final0 = name;
     // "_2" بس لو فعلاً ملف تاني (من نفس الفحص) واخد نفس الاسم؛ أي ملف قديم في الفولدر بنكتب فوقه
     var k = 2;
-    while (results.any((x) => x != r && x.newName == final0)) {
+    while (results.any((x) => x != r && !x.excluded && x.newName == final0)) {
       final0 = '${name}_$k';
       k++;
     }
@@ -4269,6 +4330,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     for (var i = 0; i < todo.length; i++) {
       if (stopReq) break;
       final r = todo[i];
+      if (r.excluded) continue; // اتعلّم غلط وإحنا بنعد
       r.tries++;
       saveMState(results);
       setState(() {
@@ -4370,7 +4432,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   List<String> missingMachines() {
-    final got = results.map((r) => r.orderNum).whereType<int>().toSet();
+    final got = results.where((r) => !r.excluded).map((r) => r.orderNum).whereType<int>().toSet();
     final out = <String>[];
     for (var n = 1; n <= 19; n++) {
       if (!got.contains(n)) out.add('$n ${terminals[numToTid[n]]!.unitName}');
@@ -4410,7 +4472,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final missing = results.isEmpty ? <String>[] : missingMachines();
     final reviewN = results.where((r) => !r.ok).length;
     final pendCount = results.where((r) => r.pending).length;
-    final named = results.where((r) => r.newName != null).length;
+    final named = results.where((r) => r.newName != null && !r.excluded).length;
     return Scaffold(
       appBar: AppBar(title: const Text('إيصالات الدفع')),
       body: ListView(
@@ -4549,7 +4611,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             children: [
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: busy || named == 0 ? null : shareAll,
+                  onPressed: (busy && !namingDone) || named == 0 ? null : shareAll,
                   icon: const Icon(Icons.chat),
                   label: Text('إرسال الكل ($named)'),
                 ),
@@ -4609,18 +4671,23 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           for (final r in results.where((r) => !reviewOnly || !r.ok))
             Builder(builder: (context) {
               final e = int.tryParse(r.ctl.text.trim());
-              final match = (e == null || r.pending) ? null : e == r.count;
+              final match = (e == null || r.pending || r.excluded) ? null : e == r.count;
               return Card(
                 margin: const EdgeInsets.symmetric(vertical: 4),
-                color: match == null
-                    ? null
-                    : (match ? Colors.green.shade100 : Colors.red.shade100),
-                child: ListTile(
+                color: r.excluded
+                    ? Colors.grey.shade300
+                    : (match == null
+                        ? null
+                        : (match ? Colors.green.shade100 : Colors.red.shade100)),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                ListTile(
                   onTap: () => openPdf(r.openPath),
                   title: Text(r.newName ?? '؟ ${r.pdfName}',
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          decoration: r.excluded ? TextDecoration.lineThrough : null)),
                   subtitle: Text('الأصل: ${r.pdfName}\n'
-                      '${r.pending ? 'عدد إيصالات الدفع: لسه بيتعدّ...' : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
+                      '${r.excluded ? 'مستبعد (علامة غلط)' : r.pending ? 'عدد إيصالات الدفع: لسه بيتعدّ...' : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
                       '${r.notes.isEmpty ? '' : '\n⚠️ ${r.notes.join('\n⚠️ ')}'}'),
                   isThreeLine: true,
                   trailing: SizedBox(
@@ -4632,7 +4699,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                           visualDensity: VisualDensity.compact,
                           tooltip: 'إرسال الملف',
                           icon: const Icon(Icons.share, color: Colors.teal),
-                          onPressed: r.newName == null ? null : () => shareOne(r),
+                          onPressed: r.newName == null || r.excluded ? null : () => shareOne(r),
                         ),
                         IconButton(
                           visualDensity: VisualDensity.compact,
@@ -4665,6 +4732,27 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                     ),
                   ),
                 ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                  child: Row(
+                    children: [
+                      ChoiceChip(
+                        label: const Text('صح ✓'),
+                        selected: r.verdict > 0,
+                        selectedColor: Colors.green.shade300,
+                        onSelected: (_) => setVerdict(r, 1),
+                      ),
+                      const SizedBox(width: 8),
+                      ChoiceChip(
+                        label: const Text('غلط ✗'),
+                        selected: r.verdict < 0,
+                        selectedColor: Colors.red.shade300,
+                        onSelected: (_) => setVerdict(r, -1),
+                      ),
+                    ],
+                  ),
+                ),
+                ]),
               );
             }),
         ],
