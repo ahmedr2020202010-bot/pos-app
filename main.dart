@@ -4686,19 +4686,22 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                         '${r.excluded ? 'مستبعد (علامة غلط)' : r.pending ? 'عدد إيصالات الدفع: لسه بيتعدّ...' : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
                         '${r.notes.isEmpty ? '' : '\n⚠️ ${r.notes.join('\n⚠️ ')}'}'),
                     trailing: SizedBox(
-                      width: 100,
+                      width: 118,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           SizedBox(
-                            width: 56,
+                            width: 66,
                             child: TextField(
                               controller: r.ctl,
                               keyboardType: TextInputType.number,
                               textAlign: TextAlign.center,
                               decoration: InputDecoration(
                                 isDense: true,
+                                contentPadding:
+                                    const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
                                 hintText: 'الصح',
+                                hintStyle: const TextStyle(fontSize: 13),
                                 border: const OutlineInputBorder(),
                                 filled: match != null,
                                 fillColor: match == null
