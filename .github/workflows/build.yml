@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # غيّر رقم الإصدار من هنا (رقم البناء بيزيد لوحده مع كل بناء)
+  APP_VERSION: "1.1.0"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -361,6 +365,17 @@ jobs:
           }
           EOK2
           printf '\ndependencies {\n    implementation("androidx.core:core:1.13.1")\n}\n' >> android/app/build.gradle.kts
+          # ---- رقم الإصدار ----
+          sed -i "s/^version: .*/version: ${APP_VERSION}+${GITHUB_RUN_NUMBER}/" pubspec.yaml
+          grep -n "^version" pubspec.yaml
+          # ---- أيقونة التطبيق: لو فيه icon.png في الريبو ----
+          if [ -f ../icon.png ]; then
+            mkdir -p assets
+            cp ../icon.png assets/icon.png
+            flutter pub add --dev flutter_launcher_icons
+            printf '\nflutter_launcher_icons:\n  android: true\n  ios: false\n  image_path: "assets/icon.png"\n' >> pubspec.yaml
+            dart run flutter_launcher_icons
+          fi
 
       - name: Gradle - also resolve plugins from Maven Central
         run: |
@@ -386,17 +401,27 @@ jobs:
       - name: Build APK
         run: |
           cd app
+          VER="${APP_VERSION}+${GITHUB_RUN_NUMBER}"
           ok=0
-          for i in 1 2 3; do
-            if flutter build apk --debug; then ok=1; break; fi
-            echo "Build attempt $i failed, retrying in 30s..."
+          # نسخة release (أصغر بكتير) لمعالجات arm64 (كل الموبايلات الحديثة)
+          for i in 1 2; do
+            if flutter build apk --release --target-platform android-arm64 --dart-define=APP_VERSION=$VER; then ok=1; break; fi
+            echo "Release attempt $i failed, retrying in 30s..."
             sleep 30
           done
-          test "$ok" = 1
+          # لو فشلت release: نسخة debug احتياطي
+          if [ "$ok" != 1 ]; then
+            echo "Release failed, falling back to debug build"
+            flutter build apk --debug --dart-define=APP_VERSION=$VER && ok=2
+          fi
+          test "$ok" != 0
 
       - name: Publish APK to Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest app/build/app/outputs/flutter-apk/app-debug.apk --title "A2R POS" --notes "latest build" --target ${{ github.sha }}
+          OUT=app/build/app/outputs/flutter-apk
+          if [ -f "$OUT/app-release.apk" ]; then cp "$OUT/app-release.apk" A2R-POS.apk; else cp "$OUT/app-debug.apk" A2R-POS.apk; fi
+          ls -lh A2R-POS.apk
+          gh release create latest A2R-POS.apk --title "A2R POS ${APP_VERSION} (${GITHUB_RUN_NUMBER})" --notes "latest build" --target ${{ github.sha }}
