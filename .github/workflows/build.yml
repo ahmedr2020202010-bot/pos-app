@@ -416,12 +416,29 @@ jobs:
           fi
           test "$ok" != 0
 
-      - name: Publish APK to Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare APK file
         run: |
-          gh release delete latest --cleanup-tag --yes || true
           OUT=app/build/app/outputs/flutter-apk
           if [ -f "$OUT/app-release.apk" ]; then cp "$OUT/app-release.apk" A2R-POS.apk; else cp "$OUT/app-debug.apk" A2R-POS.apk; fi
           ls -lh A2R-POS.apk
-          gh release create latest A2R-POS.apk --title "A2R POS ${APP_VERSION} (${GITHUB_RUN_NUMBER})" --notes "latest build" --target ${{ github.sha }}
+
+      # الطريقة المضمونة: الـ APK بيتحفظ في صفحة التشغيل نفسها (Artifacts) ليوم واحد
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: A2R-POS-apk
+          path: A2R-POS.apk
+          retention-days: 1
+
+      # محاولة نشره في Releases (لو فشلت مش هتوقّع البناء)
+      - name: Publish APK to Release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" A2R-POS.apk --title "A2R POS ${APP_VERSION} (${GITHUB_RUN_NUMBER})" --notes "build ${GITHUB_RUN_NUMBER}" --latest --target ${{ github.sha }}
+          gh release list --limit 100 --json tagName --jq '.[3:][].tagName' | while read t; do
+            gh release delete "$t" --cleanup-tag --yes || true
+          done
