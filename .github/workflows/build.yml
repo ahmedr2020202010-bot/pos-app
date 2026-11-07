@@ -41,11 +41,11 @@ jobs:
           cp main.dart app/lib/main.dart
           cd app
           flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing
-          sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|<application|<application android:largeHeap=\"true\"|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
-          echo '-dontwarn com.google.mlkit.vision.text.**' > android/app/proguard-rules.pro
+          printf '%s\n' '-dontwarn com.google.mlkit.vision.text.**' '-keep class com.google.mlkit.** { *; }' '-keep class com.google.android.gms.internal.mlkit_vision_text_common.** { *; }' '-keep class com.google.android.gms.internal.mlkit_vision_text_bundled_common.** { *; }' > android/app/proguard-rules.pro
           sed -i 's|signingConfig = signingConfigs.getByName("debug")|&\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")|' android/app/build.gradle.kts
           grep -n "proguard" android/app/build.gradle.kts
           rm -rf test
@@ -405,7 +405,7 @@ jobs:
           ok=0
           # نسخة release (أصغر بكتير) لمعالجات arm64 (كل الموبايلات الحديثة)
           for i in 1 2; do
-            if flutter build apk --release --target-platform android-arm64 --dart-define=APP_VERSION=$VER; then ok=1; break; fi
+            if flutter build apk --release --no-shrink --target-platform android-arm64 --dart-define=APP_VERSION=$VER; then ok=1; break; fi
             echo "Release attempt $i failed, retrying in 30s..."
             sleep 30
           done
