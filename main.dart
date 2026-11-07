@@ -2803,7 +2803,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
         }
       } catch (e) {
-        warnings.add('${baseName(f.path)}: فشلت القراءة');
+        warnings.add('${baseName(f.path)}: فشلت القراءة (${e.toString().split('\n').first})');
       }
 
       if (!mounted) return;
