@@ -4481,6 +4481,78 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     saveMState(results);
     setState(() {});
     if (wasExcluded && nv >= 0 && r.pending && !busy) start(resumeOnly: true);
+    // علّمته صح بس التطبيق مش عارف ماكينته: اسأل عليها وسمّيه وعدّه
+    if (nv > 0 && r.newName == null && r.tidUsed == null && !busy) assignMachine(r);
+  }
+
+  // تحديد الماكينة بإيدك لملف مش معروف: بيتسمّى وبيتعدّ وبيدخل في إيصالات اليوم
+  Future<void> assignMachine(MResult r) async {
+    if (busy) return;
+    int? guess = r.orderNum;
+    guess ??= int.tryParse(RegExp(r'^\s*(\d{1,2})').firstMatch(r.pdfName)?.group(1) ?? '');
+    if (guess != null && (guess < 1 || guess > 19)) guess = null;
+    int? sel = guess;
+    final picked = await showDialog<int>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          title: const Text('ده إيصال أنهي ماكينة؟'),
+          content: DropdownButton<int>(
+            isExpanded: true,
+            value: sel,
+            hint: const Text('اختار الماكينة'),
+            items: [
+              for (var i = 1; i <= 19; i++)
+                DropdownMenuItem(
+                  value: i,
+                  child: Text('ماكينة $i - ${terminals[numToTid[i]]?.unitName ?? ''}'),
+                ),
+            ],
+            onChanged: (v) => setS(() => sel = v),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+            FilledButton(
+              onPressed: sel == null ? null : () => Navigator.pop(ctx, sel),
+              child: const Text('تمام'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null) return;
+    final tid = numToTid[picked];
+    String? day = r.dayUsed, month = r.monthUsed;
+    if (day == null || month == null) {
+      // التاريخ من اسم الملف (آخر شكل 7.11)، وإلا تاريخ النهاردة
+      final ms = RegExp(r'(\d{1,2})\.(\d{1,2})').allMatches(r.pdfName).toList();
+      for (final m in ms.reversed) {
+        final d = int.parse(m.group(1)!), mo = int.parse(m.group(2)!);
+        if (d >= 1 && d <= 31 && mo >= 1 && mo <= 12) {
+          day = '$d';
+          month = '$mo';
+          break;
+        }
+      }
+      day ??= '${DateTime.now().day}';
+      month ??= '${DateTime.now().month}';
+    }
+    final srcF = File(r.srcPath).existsSync() ? File(r.srcPath) : File(r.openPath ?? r.srcPath);
+    try {
+      await _applyName(r, srcF, tid, day, month);
+    } catch (e) {
+      r.idOk = false;
+      r.idNotes.add('فشل التسمية: ${e.toString().split('\n').first}');
+    }
+    r.verdict = 1;
+    r.cntNotes.clear();
+    r.count = -1; // يتعدّ من جديد
+    r.tries = 0;
+    r.detail = '';
+    saveMState(results);
+    if (!mounted) return;
+    setState(() {});
+    await start(resumeOnly: true);
   }
 
   Future<void> markRestOk() async {
@@ -4827,6 +4899,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       // مش واضح إنه إيصال ماكينة (توكيل / ملف تاني): تحت المراجعة، من غير تسمية ولا عد
       r.tidUsed = null;
       r.newName = null;
+      if (id.day != null && id.month != null) {
+        r.dayUsed = id.day;
+        r.monthUsed = id.month;
+      }
       r.idOk = false;
       r.idNotes.add('الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه');
       r.count = 0;
@@ -5308,6 +5384,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                                 shareOne(r);
                               } else if (v == 'recount') {
                                 recount(r);
+                              } else if (v == 'assign') {
+                                assignMachine(r);
                               } else if (v == 'clear') {
                                 setVerdict(r, 0, toggle: false);
                               }
@@ -5317,6 +5395,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                                   value: 'share',
                                   enabled: r.newName != null && !r.excluded,
                                   child: const Text('إرسال الملف')),
+                              PopupMenuItem(
+                                  value: 'assign', enabled: !busy, child: const Text('تحديد الماكينة')),
                               PopupMenuItem(
                                   value: 'recount', enabled: !busy, child: const Text('إعادة العد')),
                               if (r.verdict != 0)
