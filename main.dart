@@ -1682,6 +1682,10 @@ class ReceiptItem {
   bool conflict;
   bool skip;
   double? alt; // قراءة تانية مختلفة للمبلغ (للمراجعة)
+  bool dupSuspect; // مشكوك إنه مكرر: بيدخل المراجعة ومش بيتحسب لحد ما تقرر
+  bool userExcluded; // انت استبعدته في المراجعة
+  String? dupDecision; // 'keep' | 'drop' (قرارك بيتحفظ للمرة الجاية)
+  int? dupOf; // رقم الماكينة اللي شبهه
 
   ReceiptItem({
     required this.path,
@@ -1700,15 +1704,24 @@ class ReceiptItem {
     this.conflict = false,
     this.skip = false,
     this.alt,
+    this.dupSuspect = false,
+    this.userExcluded = false,
+    this.dupDecision,
+    this.dupOf,
   }) : batches = batches ?? <double>[];
 
+  // داخل في الإجماليات والـ PDF؟
+  bool get counts => !skip && !dupSuspect && !userExcluded;
+
   bool get needsReview =>
-      amount <= 0 ||
-      row == null ||
-      !ok ||
-      alt != null ||
-      how == 'auto-number' ||
-      how == 'conflict';
+      dupSuspect ||
+      (!userExcluded &&
+          (amount <= 0 ||
+              row == null ||
+              !ok ||
+              alt != null ||
+              how == 'auto-number' ||
+              how == 'conflict'));
 }
 
 // ───────────────────── التصحيحات اليدوية (بتفضل محفوظة) ─────────────────────
@@ -1726,7 +1739,11 @@ void saveFix(ReceiptItem item) {
   if (item.key.isEmpty) return;
   try {
     final m = loadFixes();
-    m[item.key] = {'val': item.amount, 'tid': item.tid};
+    m[item.key] = {
+      'val': item.amount,
+      'tid': item.tid,
+      if (item.dupDecision != null) 'dup': item.dupDecision,
+    };
     File(fixPath)
       ..createSync(recursive: true)
       ..writeAsStringSync(jsonEncode(m));
@@ -2049,7 +2066,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final changed = await Navigator.push<bool>(
       context,
-      MaterialPageRoute(builder: (_) => ReviewPage(items: list)),
+      MaterialPageRoute(builder: (_) => ReviewPage(items: list, allItems: processedItems)),
+    );
+    if (changed == true) {
+      await rebuildFiles();
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
+  // القلم: شاشة كاملة فيها الإيصال بزوم + تعديل المبلغ والماكينة
+  Future<void> editReceipt(ReceiptItem item) async {
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ReviewPage(items: [item], allItems: processedItems, single: true),
+      ),
     );
     if (changed == true) {
       await rebuildFiles();
@@ -2181,11 +2213,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final c = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
       return c != 0 ? c : (a.suffix ?? 1).compareTo(b.suffix ?? 1);
     });
-    final mainItems =
-        processedItems.where((r) => r.date == null || r.date == reportDate).toList();
+    final mainItems = processedItems
+        .where((r) => r.counts && (r.date == null || r.date == reportDate))
+        .toList();
     final otherByDate = <String, List<ReceiptItem>>{};
     for (final r in processedItems) {
-      if (r.date != null && r.date != reportDate) {
+      if (r.counts && r.date != null && r.date != reportDate) {
         otherByDate.putIfAbsent(r.date!, () => <ReceiptItem>[]).add(r);
       }
     }
@@ -2290,7 +2323,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt';
+    final dup = item.dupSuspect
+        ? '\n⚠️ مشكوك إنه مكرر (نفس مبلغ ماكينة ${item.dupOf ?? ''}) - مش محسوب لحد ما تراجعه'
+        : item.userExcluded
+            ? '\n🚫 مستبعد (مكرر)'
+            : '';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt$dup';
   }
 
   String warningsText() {
@@ -2308,6 +2346,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       var total = 0.0;
       for (final r in processedItems) {
         final flags = <String>[];
+        if (r.dupSuspect) flags.add('مشكوك إنه مكرر - مش محسوب لحد ما تراجعه');
+        if (r.userExcluded) flags.add('مستبعد (مكرر)');
         if (r.amount <= 0) flags.add('المبلغ غير مقروء');
         if (r.row == null) flags.add('الوحدة غير معروفة');
         if (!r.ok && r.amount > 0) flags.add('المبلغ يحتاج مراجعة');
@@ -2316,7 +2356,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         if (r.batches.length > 1) flags.add('${r.batches.length} باتشات');
         if (r.alt != null) flags.add('قراءة تانية: ${r.alt!.toStringAsFixed(2)}');
-        if (r.amount > 0 && r.row != null) total += r.amount;
+        if (r.amount > 0 && r.row != null && r.counts) total += r.amount;
         final mark = flags.isEmpty ? '✓' : '⚠️';
         final extra = flags.isEmpty ? '' : '   [${flags.join(' | ')}]';
         sb.writeln('$mark ${baseName(r.path)}  ${r.unitName ?? '??'}  '
@@ -2610,6 +2650,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             item.ok = true;
             item.alt = null;
             item.how = 'manual';
+            final dd = fx['dup'];
+            if (dd is String) item.dupDecision = dd;
           }
           rawReceipts.add(item);
         } else if (skipPay) {
@@ -2658,9 +2700,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } else if (r.amount > 0 &&
           (prev.amount - r.amount).abs() < 0.005 &&
           sameDay(prev, r)) {
-        r.skip = true; // نفس الماكينة ونفس المبلغ = إيصال مكرر
-        warnings.add('${baseName(r.path)}: نفس الماكينة $n ونفس المبلغ '
-            '${r.amount.toStringAsFixed(2)} (إيصال مكرر) - تم استبعاده');
+        if (r.dupDecision == 'drop') {
+          r.skip = true; // انت قررت قبل كده إنه مكرر
+          warnings.add('${baseName(r.path)}: إيصال مكرر للماكينة $n (استبعدته قبل كده)');
+        } else if (r.dupDecision == 'keep') {
+          r.origTid = r.tid; // انت قررت قبل كده إنه باتش تاني حقيقي
+          r.tid = null;
+          r.conflict = true;
+        } else {
+          // نفس الماكينة ونفس المبلغ = مشكوك إنه مكرر: بيدخل المراجعة (مش بيتستبعد)
+          r.dupSuspect = true;
+          r.dupOf = n;
+          warnings.add('${baseName(r.path)}: نفس الماكينة $n ونفس المبلغ '
+              '${r.amount.toStringAsFixed(2)} (مشكوك إنه مكرر) - راجعه من زر المراجعة');
+        }
       } else {
         r.origTid = r.tid;
         r.tid = null;
@@ -2682,7 +2735,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     for (final r in rawReceipts) {
       if (r.skip || r.tid != null || r.row == null) continue;
-      if (r.conflict && (r.how == 'terminal' || r.how == 'fuzzy')) {
+      if (r.conflict &&
+          (r.how == 'terminal' || r.how == 'fuzzy' || r.dupDecision == 'keep')) {
         giveSuffix(r); // نفس الماكينة بمبلغ مختلف = باتش إضافي
         continue;
       }
@@ -2740,10 +2794,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
     final moves = <ReceiptItem>[];
     final newNames = <ReceiptItem, String>{};
+    var dupN = 0;
     for (final r in kept) {
       if (r.tid == null || r.orderNum == null) continue;
       final ext = r.path.split('.').last;
-      final sfx = r.suffix != null ? '_${r.suffix}' : '';
+      final sfx = r.suffix != null
+          ? '_${r.suffix}'
+          : (r.dupSuspect ? '_dup${++dupN}' : '');
       final target = '$rawImagesDir/${r.orderNum}$sfx.$ext';
       if (r.path != target) {
         moves.add(r);
@@ -2923,6 +2980,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               child: ListTile(
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ReceiptZoomPage(
+                      path: item.path,
+                      title: 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? ''}',
+                    ),
+                  ),
+                ),
                 leading: Image.file(
                   File(item.path),
                   width: 48,
@@ -2941,7 +3007,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       Icon(Icons.warning_amber, color: Colors.orange.shade800),
                     IconButton(
                       icon: const Icon(Icons.edit, color: Colors.teal),
-                      onPressed: () => editReceiptDialog(item),
+                      onPressed: busy ? null : () => editReceipt(item),
                     ),
                   ],
                 ),
@@ -3046,9 +3112,81 @@ class _FolderPickerState extends State<FolderPicker> {
 
 
 // ───────────────────── شاشة المراجعة ─────────────────────
+// ───────── صورة بتتكبّر (قرصة بصباعين + دبل تاب) علشان تشوف تفاصيل الباتش ─────────
+class ZoomableImage extends StatefulWidget {
+  final String path;
+  const ZoomableImage({super.key, required this.path});
+
+  @override
+  State<ZoomableImage> createState() => _ZoomableImageState();
+}
+
+class _ZoomableImageState extends State<ZoomableImage> {
+  final _tc = TransformationController();
+  Offset _tap = Offset.zero;
+
+  @override
+  void dispose() {
+    _tc.dispose();
+    super.dispose();
+  }
+
+  void _toggle() {
+    if (_tc.value.getMaxScaleOnAxis() > 1.05) {
+      _tc.value = Matrix4.identity();
+    } else {
+      const s = 3.0;
+      final tx = -_tap.dx * (s - 1);
+      final ty = -_tap.dy * (s - 1);
+      _tc.value = Matrix4(s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onDoubleTapDown: (d) => _tap = d.localPosition,
+      onDoubleTap: _toggle,
+      child: InteractiveViewer(
+        transformationController: _tc,
+        minScale: 1,
+        maxScale: 12,
+        child: Center(
+          child: Image.file(
+            File(widget.path),
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.high,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ReceiptZoomPage extends StatelessWidget {
+  final String path;
+  final String title;
+  const ReceiptZoomPage({super.key, required this.path, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text(title, style: const TextStyle(fontSize: 15)),
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+      ),
+      body: SafeArea(child: ZoomableImage(path: path)),
+    );
+  }
+}
+
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
-  const ReviewPage({super.key, required this.items});
+  final List<ReceiptItem>? allItems; // كل الإيصالات (لحساب رقم الباتش الإضافي)
+  final bool single; // فتحناها من القلم لإيصال واحد
+  const ReviewPage({super.key, required this.items, this.allItems, this.single = false});
 
   @override
   State<ReviewPage> createState() => _ReviewPageState();
@@ -3113,7 +3251,51 @@ class _ReviewPageState extends State<ReviewPage> {
     saveFix(it);
     changed = true;
     done.add(it);
-    if (next && idx < widget.items.length - 1) {
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (next && idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  // قرار الإيصال المشكوك إنه مكرر: استبعده، أو احتسبه كباتش إضافي
+  void resolveDup(bool keep) {
+    final it = item;
+    final all = widget.allItems ?? widget.items;
+    if (keep) {
+      var k = 2;
+      bool used(int n) => all.any((x) =>
+          !identical(x, it) && !x.skip && x.orderNum == it.orderNum && (x.suffix ?? 1) == n);
+      while (used(k)) {
+        k++;
+      }
+      it.suffix = k;
+      it.how = 'extra-batch';
+      it.dupSuspect = false;
+      it.userExcluded = false;
+      it.dupDecision = 'keep';
+      try {
+        final cut = it.path.lastIndexOf('/');
+        final dot = it.path.lastIndexOf('.');
+        final ext = dot > cut ? it.path.substring(dot) : '.jpg';
+        final dst = '${it.path.substring(0, cut + 1)}${it.orderNum}_$k$ext';
+        if (dst != it.path && !File(dst).existsSync()) {
+          it.path = File(it.path).renameSync(dst).path;
+        }
+      } catch (_) {}
+    } else {
+      it.dupSuspect = false;
+      it.userExcluded = true;
+      it.dupDecision = 'drop';
+    }
+    saveFix(it);
+    changed = true;
+    done.add(it);
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (idx < widget.items.length - 1) {
       go(idx + 1);
     } else {
       setState(() {});
@@ -3140,11 +3322,29 @@ class _ReviewPageState extends State<ReviewPage> {
     final it = item;
     final image = Container(
       color: Colors.black12,
-      child: InteractiveViewer(
-        maxScale: 6,
-        child: Center(
-          child: Image.file(File(it.path), key: ValueKey('${it.path}#$rev'), fit: BoxFit.contain),
-        ),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: ZoomableImage(key: ValueKey('${it.path}#$rev'), path: it.path),
+          ),
+          Positioned(
+            top: 4,
+            left: 4,
+            child: IconButton.filledTonal(
+              tooltip: 'ملء الشاشة',
+              icon: const Icon(Icons.fullscreen),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ReceiptZoomPage(
+                    path: it.path,
+                    title: 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? ''}',
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
 
@@ -3153,6 +3353,50 @@ class _ReviewPageState extends State<ReviewPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (it.dupSuspect || it.userExcluded)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                border: Border.all(color: Colors.orange.shade700),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    it.userExcluded
+                        ? '🚫 الإيصال ده مستبعد (مكرر).'
+                        : '⚠️ مشكوك إنه مكرر: نفس الماكينة ${it.orderNum ?? ''} ونفس المبلغ. '
+                            'مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن.',
+                    style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => resolveDup(true),
+                          child: const Text('مش مكرر - احتسبه باتش إضافي',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                      if (!it.userExcluded) ...[
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => resolveDup(false),
+                            child: const Text('مكرر - استبعده',
+                                textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
           Text(
             'المقروء: ${it.amount > 0 ? it.amount.toStringAsFixed(2) : 'غير مقروء'} ج.م'
             '${it.batches.length > 1 ? '  (= ${it.batches.map((b) => b.toStringAsFixed(2)).join(' + ')})' : ''}',
@@ -3257,8 +3501,8 @@ class _ReviewPageState extends State<ReviewPage> {
               }
               return Column(
                 children: [
-                  Expanded(flex: 3, child: image),
-                  Expanded(flex: 2, child: form),
+                  Expanded(flex: 5, child: image),
+                  Expanded(flex: 3, child: form),
                 ],
               );
             },
