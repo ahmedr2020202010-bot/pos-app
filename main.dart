@@ -4332,21 +4332,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pend = results.where((r) => r.pending).length;
     if (results.isNotEmpty) {
       status = pend > 0
-          ? 'فيه $pend ملف لسه ما اتعدّش، هيكمّل من مكانه...'
+          ? 'فيه $pend ملف لسه ما اتعدّش. اضغط \"بدء العد\" لما تحب.'
           : 'آخر نتيجة: ${results.length} ملف.';
     }
-    if (pend > 0) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _autoResume());
-    }
-  }
-
-  Future<void> _autoResume() async {
-    if (!mounted || busy) return;
-    try {
-      if (await Permission.manageExternalStorage.isGranted) {
-        await start(resumeOnly: true);
-      }
-    } catch (_) {}
   }
 
   @override
@@ -4480,7 +4468,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     } catch (_) {}
     saveMState(results);
     setState(() {});
-    if (wasExcluded && nv >= 0 && r.pending && !busy) start(resumeOnly: true);
     // علّمته صح بس التطبيق مش عارف ماكينته: اسأل عليها وسمّيه وعدّه
     if (nv > 0 && r.newName == null && r.tidUsed == null && !busy) assignMachine(r);
   }
@@ -4551,8 +4538,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.detail = '';
     saveMState(results);
     if (!mounted) return;
-    setState(() {});
-    await start(resumeOnly: true);
+    setState(() => status = 'اتسمّى ماكينة $picked. اضغط \"بدء العد\" لعدّ إيصالاته.');
   }
 
   Future<void> markRestOk() async {
@@ -4626,7 +4612,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   // ───── التشغيل ─────
-  Future<void> start({bool resumeOnly = false}) async {
+  Future<void> start({bool resumeOnly = false, bool count = false}) async {
     if (busy) return;
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
@@ -4644,7 +4630,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       await _chan.invokeMethod('keepScreenOn', {'on': true});
     } catch (_) {}
     try {
-      await _run(resumeOnly);
+      await _run(resumeOnly, count);
     } finally {
       try {
         await _chan.invokeMethod('stopKeepAlive');
@@ -4664,7 +4650,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
-  Future<void> _run(bool resumeOnly) async {
+  Future<void> _run(bool resumeOnly, bool count) async {
     setState(() {
       busy = true;
       stopReq = false;
@@ -4688,10 +4674,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (!resumeOnly) idle = await _identifyAll(rec);
       _dbg('PHASE1 done');
       if (mounted) setState(() => namingDone = true);
-      // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف، وبتتحفظ بعد كل ملف
-      _dbg('PHASE2 start');
-      await _countAll(rec);
-      _dbg('PHASE2 done');
+      // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف: مش بتشتغل غير لما تضغط "بدء العد"
+      if (count) {
+        _dbg('PHASE2 start');
+        await _countAll(rec);
+        _dbg('PHASE2 done');
+      }
       _flagDuplicates();
     } finally {
       await rec.close();
@@ -4712,8 +4700,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         status = 'اتوقف. فاضل $pend ملف لسه ما اتعدّش، اضغط "فحص" وهيكمّل من مكانه.';
       } else if (results.isEmpty && idle != null) {
         status = idle;
+      } else if (!count) {
+        status = 'تمت التسمية: ${results.length} ملف، $named اتسمّى واتنسخ.'
+            '${pend > 0 ? ' اضغط \"بدء العد\" لعدّ إيصالات $pend ملف.' : ''}';
       } else {
-        status = 'اكتمل: ${results.length} ملف، $named اتسمّى واتنسخ، إجمالي $total إيصال.'
+        status = 'اكتمل العد: ${results.length} ملف، $named اتسمّى، إجمالي $total إيصال.'
             '${pend > 0 ? ' (فاضل $pend لسه)' : ''}';
       }
     });
@@ -5136,7 +5127,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.count = -1;
     r.tries = 0;
     saveMState(results);
-    await start(resumeOnly: true);
+    if (mounted) setState(() => status = 'اتعلّم للعد. اضغط \"بدء العد\".');
   }
 
   List<String> missingMachines() {
@@ -5222,10 +5213,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 icon: const Icon(Icons.stop),
                 label: const Text('إيقاف'),
               )
-            : FilledButton.icon(
-                onPressed: () => start(),
-                icon: const Icon(Icons.play_arrow),
-                label: Text(pendCount > 0 ? 'فحص / متابعة (فاضل $pendCount)' : 'فحص وإعادة تسمية'),
+            : Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => start(),
+                      icon: const Icon(Icons.drive_file_rename_outline),
+                      label: const Text('فحص وتسمية'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: pendCount > 0 ? () => start(resumeOnly: true, count: true) : null,
+                      icon: const Icon(Icons.play_arrow),
+                      label: Text(pendCount > 0 ? 'بدء العد ($pendCount)' : 'بدء العد'),
+                    ),
+                  ),
+                ],
               ),
         busy: busy,
         progress: progressValue,
@@ -5345,7 +5350,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                             fontWeight: FontWeight.bold,
                             decoration: r.excluded ? TextDecoration.lineThrough : null)),
                     subtitle: Text('${r.verdict > 0 ? '✓ اتراجع: صح\n' : ''}الأصل: ${r.pdfName}\n'
-                        '${r.excluded ? 'مستبعد (علامة غلط)' : r.pending ? 'عدد إيصالات الدفع: لسه بيتعدّ...' : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
+                        '${r.excluded ? 'مستبعد (علامة غلط)' : r.pending ? (busy ? 'عدد إيصالات الدفع: بيتعدّ...' : 'عدد إيصالات الدفع: لسه ما اتعدّش (اضغط بدء العد)') : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
                         '${r.notes.isEmpty ? '' : '\n⚠️ ${r.notes.join('\n⚠️ ')}'}'),
                     trailing: SizedBox(
                       width: 118,
