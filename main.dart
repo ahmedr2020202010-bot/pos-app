@@ -202,15 +202,71 @@ class PosApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    return ValueListenableBuilder<String>(
+      valueListenable: appTheme,
+      builder: (context, themeName, _) => MaterialApp(
       title: 'A2R POS',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
+      theme: _buildTheme(themeName),
       builder: (context, child) =>
           Directionality(textDirection: TextDirection.rtl, child: child!),
       home: const RootPage(),
+    ),
     );
   }
+}
+
+// ───────── الثيمات: الحالي (تيل) والجديد (نيلي) - بتتبدّل من القايمة ⋮ ─────────
+String _loadTheme() {
+  try {
+    final t = _readCfg()['theme'];
+    return t == 'indigo' ? 'indigo' : 'teal';
+  } catch (_) {
+    return 'teal';
+  }
+}
+
+final ValueNotifier<String> appTheme = ValueNotifier<String>(_loadTheme());
+
+void toggleAppTheme() {
+  final next = appTheme.value == 'teal' ? 'indigo' : 'teal';
+  appTheme.value = next;
+  final m = _readCfg();
+  m['theme'] = next;
+  _writeCfg(m);
+}
+
+String themeLabel() =>
+    appTheme.value == 'teal' ? 'الثيم: التيل (الحالي) ← النيلي' : 'الثيم: النيلي ← التيل (الحالي)';
+
+ThemeData _buildTheme(String name) {
+  if (name != 'indigo') {
+    return ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true);
+  }
+  final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFF3949AB));
+  return ThemeData(
+    colorScheme: scheme,
+    useMaterial3: true,
+    scaffoldBackgroundColor: const Color(0xFFF4F5FB),
+    appBarTheme: AppBarTheme(
+      backgroundColor: scheme.primary,
+      foregroundColor: scheme.onPrimary,
+      elevation: 0,
+    ),
+    cardTheme: CardThemeData(
+      color: Colors.white,
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+    ),
+  );
 }
 
 class RootPage extends StatefulWidget {
@@ -3012,6 +3068,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 useWhatsApp();
               } else if (v == 'out') {
                 useDefaultOut();
+              } else if (v == 'theme') {
+                toggleAppTheme();
               } else if (v == 'clear') {
                 clearAll();
               }
@@ -3022,6 +3080,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 PopupMenuItem(value: 'src', enabled: !busy, child: const Text('المصدر: رجوع لواتساب')),
               if (customOut != null)
                 PopupMenuItem(value: 'out', enabled: !busy, child: const Text('الإخراج: الافتراضي')),
+              PopupMenuItem(value: 'theme', child: Text(themeLabel())),
               PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
             ],
           ),
@@ -3166,7 +3225,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     if (item.needsReview)
                       Icon(Icons.warning_amber, color: Colors.orange.shade800),
                     IconButton(
-                      icon: const Icon(Icons.edit, color: Colors.teal),
+                      icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
                       onPressed: busy ? null : () => editReceipt(item),
                     ),
                   ],
@@ -5062,6 +5121,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 setState(() => pdfDir = null);
               } else if (v == 'out') {
                 useDefaultOut();
+              } else if (v == 'theme') {
+                toggleAppTheme();
               } else if (v == 'clear') {
                 clearAll();
               }
@@ -5072,6 +5133,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 PopupMenuItem(value: 'src', enabled: !busy, child: const Text('المصدر: رجوع لواتساب')),
               if (destDir != defaultMDest)
                 PopupMenuItem(value: 'out', enabled: !busy, child: const Text('الإخراج: الافتراضي')),
+              PopupMenuItem(value: 'theme', child: Text(themeLabel())),
               PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
             ],
           ),
