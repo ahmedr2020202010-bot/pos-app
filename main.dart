@@ -1687,6 +1687,11 @@ class ReceiptItem {
   String? dupDecision; // 'keep' | 'drop' (قرارك بيتحفظ للمرة الجاية)
   int? dupOf; // رقم الماكينة اللي شبهه
   String? unusual; // إجمالي بعيد عن المعتاد (للمراجعة)
+  bool ignoredDoc; // صورة اتجاهلها التطبيق (شكلها إيصال دفع/مستند): بتدخل المراجعة
+  String? ign; // 'keep' | 'drop' قرارك في الصورة المتجاهلة
+  bool dateOdd; // تاريخه مختلف عن أغلب الإيصالات
+  String? dateMain; // التاريخ الأغلب
+  String? dateFix; // التاريخ اللي انت أكدته
 
   ReceiptItem({
     required this.path,
@@ -1709,21 +1714,29 @@ class ReceiptItem {
     this.userExcluded = false,
     this.dupDecision,
     this.dupOf,
+    this.ignoredDoc = false,
+    this.ign,
+    this.dateOdd = false,
   }) : batches = batches ?? <double>[];
 
   // داخل في الإجماليات والـ PDF؟
-  bool get counts => !skip && !dupSuspect && !userExcluded;
+  bool get counts => !skip && !dupSuspect && !userExcluded && !ignoredDoc;
+
+  // الماكينة/الوحدة متحددة بطريقة مش مؤكدة (تلقائي / بالاسم فقط)
+  bool get weakId =>
+      !(how == 'terminal' || how == 'fuzzy' || how == 'manual' || how == 'extra-batch');
 
   bool get needsReview =>
+      ignoredDoc ||
       dupSuspect ||
+      dateOdd ||
       (!userExcluded &&
           (amount <= 0 ||
               row == null ||
               !ok ||
               alt != null ||
               unusual != null ||
-              how == 'auto-number' ||
-              how == 'conflict'));
+              weakId));
 }
 
 // ───────────────────── التصحيحات اليدوية (بتفضل محفوظة) ─────────────────────
@@ -1745,11 +1758,29 @@ void saveFix(ReceiptItem item) {
       'val': item.amount,
       'tid': item.tid,
       if (item.dupDecision != null) 'dup': item.dupDecision,
+      if (item.ign != null) 'ign': item.ign,
+      if (item.dateFix != null) 'date': item.dateFix,
     };
     File(fixPath)
       ..createSync(recursive: true)
       ..writeAsStringSync(jsonEncode(m));
   } catch (_) {}
+}
+
+// صورة كان التطبيق متجاهلها: ادخلها كباتش (هتكمّل المبلغ والماكينة بإيدك)
+void keepIgnored(ReceiptItem it) {
+  try {
+    if (!it.path.startsWith('$rawImagesDir/')) {
+      Directory(rawImagesDir).createSync(recursive: true);
+      final dst = '$rawImagesDir/wa_${baseName(it.path)}';
+      if (!File(dst).existsSync()) File(it.path).copySync(dst);
+      it.path = dst;
+    }
+  } catch (_) {}
+  it.ignoredDoc = false;
+  it.userExcluded = false;
+  it.ign = 'keep';
+  saveFix(it);
 }
 
 // احتساب إيصال (مشكوك أو مستبعد) كباتش إضافي للماكينة
@@ -2400,13 +2431,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
+    final extra = StringBuffer();
+    if (item.ignoredDoc) {
+      extra.write('\n📄 اتجاهلته: شكله إيصال دفع/مستند مش باتش - راجعه');
+    }
+    if (item.dateOdd) {
+      extra.write('\n📅 تاريخه ${item.date} والأغلب ${item.dateMain}');
+    }
+    if (!item.ignoredDoc && !item.userExcluded && !item.dupSuspect && item.weakId && item.row != null) {
+      extra.write('\n❓ الماكينة/الوحدة اتحددت تلقائياً - اتأكد');
+    }
     final unu = item.unusual != null ? '\n📊 ${item.unusual}' : '';
     final dup = item.dupSuspect
         ? '\n⚠️ مشكوك إنه مكرر (نفس مبلغ ماكينة ${item.dupOf ?? ''}) - مش محسوب لحد ما تراجعه'
         : item.userExcluded
             ? '\n🚫 مستبعد (مكرر)'
             : '';
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt$dup$unu';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt$dup$unu$extra';
   }
 
   String warningsText() {
@@ -2425,7 +2466,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (final r in processedItems) {
         final flags = <String>[];
         if (r.dupSuspect) flags.add('مشكوك إنه مكرر - مش محسوب لحد ما تراجعه');
-        if (r.userExcluded) flags.add('مستبعد (مكرر)');
+        if (r.userExcluded) flags.add('مستبعد');
+        if (r.ignoredDoc) flags.add('صورة متجاهلة - محتاجة قرار');
+        if (r.dateOdd) flags.add('تاريخ مختلف ${r.date}');
         if (r.unusual != null) flags.add('إجمالي بعيد عن المعتاد');
         if (r.amount <= 0) flags.add('المبلغ غير مقروء');
         if (r.row == null) flags.add('الوحدة غير معروفة');
@@ -2598,6 +2641,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (_) {}
     final fixes = loadFixes();
     final rawReceipts = <ReceiptItem>[];
+    final ignoredItems = <ReceiptItem>[];
 
     // ═════════ المرحلة 1: قراءة الصور ═════════
     for (var i = 0; i < todo.length; i++) {
@@ -2606,10 +2650,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         Directory(tmpDir).createSync(recursive: true);
         var workPath = f.path;
         var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
+        final fkey = '${baseName(f.path)}:${f.lengthSync()}';
+        final fxm = fixes[fkey];
+        final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
         var isReceipt = receiptScore(res.text) >= 2 || findTerminalIn([res.text]) != null;
-        // إيصال دفع أو مستند مش باتش/ملخص/ري برنت: نتجاهله
+        if (ign == 'keep') isReceipt = true; // قررت قبل كده إنها باتش
+        // إيصال دفع أو مستند مش باتش/ملخص/ري برنت: بيدخل المراجعة (مش بيتتجاهل نهائي)
         var skipPay = false;
-        if (isReceipt && classifyReceipt(res.text) == 'payment') {
+        if (isReceipt && ign != 'keep' && classifyReceipt(res.text) == 'payment') {
           isReceipt = false;
           skipPay = true;
         }
@@ -2731,10 +2779,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             item.how = 'manual';
             final dd = fx['dup'];
             if (dd is String) item.dupDecision = dd;
+            final ig = fx['ign'];
+            if (ig is String) item.ign = ig;
+            final fd = fx['date'];
+            if (fd is String) {
+              item.date = fd;
+              item.dateFix = fd;
+            }
           }
           rawReceipts.add(item);
         } else if (skipPay) {
           excludedPay.add(baseName(f.path));
+          if (ign != 'drop') {
+            ignoredItems.add(ReceiptItem(
+              path: f.path,
+              key: fkey,
+              how: 'none',
+              ignoredDoc: true,
+            ));
+          }
         }
       } catch (e) {
         warnings.add('${baseName(f.path)}: فشلت القراءة');
@@ -2750,6 +2813,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await recognizer.close();
 
     if (rawReceipts.isEmpty) {
+      processedItems.addAll(ignoredItems);
       setState(() {
         busy = false;
         status = 'تم فحص ${todo.length} صورة، ولم يتم العثور على إيصالات مطابقة.';
@@ -2759,10 +2823,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     // ═════════ المرحلة 2: التكرار وترقيم الماكينات ═════════
     setState(() => status = 'مراجعة التكرار وترقيم الماكينات...');
-    if (excludedPay.isNotEmpty) {
-      warnings.add('اتجاهلت ${excludedPay.length} صورة إيصال دفع أو مستند (مش باتش كلوز/ملخص/ري برنت): '
-          '${excludedPay.take(8).join('، ')}${excludedPay.length > 8 ? ' ...' : ''}');
-    }
     final prio = <String, int>{'manual': 0, 'terminal': 0, 'fuzzy': 1, 'file-number': 2};
     final withTid = rawReceipts.where((r) => r.tid != null).toList();
     withTid.sort((a, b) {
@@ -2850,8 +2910,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     for (final r in kept) {
       final nm = baseName(r.path);
-      if (mainDate != null && r.date != null && r.date != mainDate) {
-        warnings.add('$nm: تاريخ الإيصال ${r.date} بينما أغلب الإيصالات $mainDate');
+      if (mainDate != null && r.date != null && r.date != mainDate && r.dateFix == null) {
+        r.dateOdd = true; // بيدخل المراجعة
+        r.dateMain = mainDate;
       }
       if (r.row != null && r.amount > 0) {
         if (!r.ok) warnings.add('$nm: ${r.unitName} = ${r.amount.toStringAsFixed(2)} (راجع المبلغ يدوياً)');
@@ -2903,6 +2964,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     processedItems.addAll(kept);
+    processedItems.addAll(ignoredItems);
     await rebuildFiles();
     try {
       Directory(tmpDir).deleteSync(recursive: true);
@@ -3076,7 +3138,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   fit: BoxFit.cover,
                 ),
                 title: Text(
-                  'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                  item.ignoredDoc || item.ign == 'drop'
+                      ? 'مستند متجاهل - ${baseName(item.path)}'
+                      : 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
                 subtitle: Text(subtitleOf(item)),
@@ -3090,8 +3154,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         onPressed: busy
                             ? null
                             : () async {
-                                keepAsExtraBatch(item, processedItems);
-                                await rebuildFiles();
+                                if (item.ign == 'drop') {
+                                  keepIgnored(item);
+                                  setState(() {});
+                                } else {
+                                  keepAsExtraBatch(item, processedItems);
+                                  await rebuildFiles();
+                                }
                               },
                       ),
                     if (item.needsReview)
@@ -3332,6 +3401,7 @@ class _ReviewPageState extends State<ReviewPage> {
     it.batches = [it.amount];
     it.ok = true;
     it.alt = null;
+    if (it.ignoredDoc) keepIgnored(it);
     it.how = 'manual';
     it.unusual = null;
     if (order != null) {
@@ -3346,6 +3416,48 @@ class _ReviewPageState extends State<ReviewPage> {
     if (widget.single) {
       Navigator.pop(context, true);
     } else if (next && idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  // صورة متجاهلة: ادخلها كباتش، أو تجاهلها نهائي
+  void resolveIgnored(bool keep) {
+    final it = item;
+    if (keep) {
+      keepIgnored(it);
+      changed = true;
+      setState(() {});
+      return;
+    }
+    it.ignoredDoc = false;
+    it.userExcluded = true;
+    it.ign = 'drop';
+    saveFix(it);
+    changed = true;
+    done.add(it);
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  // تاريخ مختلف: سيبه بتاريخه، أو انقله لتاريخ الأغلب
+  void resolveDate(bool toMain) {
+    final it = item;
+    if (toMain && it.dateMain != null) it.date = it.dateMain;
+    it.dateFix = it.date;
+    it.dateOdd = false;
+    saveFix(it);
+    changed = true;
+    done.add(it);
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (idx < widget.items.length - 1) {
       go(idx + 1);
     } else {
       setState(() {});
@@ -3468,6 +3580,95 @@ class _ReviewPageState extends State<ReviewPage> {
                     ],
                   ),
                 ],
+              ),
+            ),
+          if (it.ignoredDoc)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                border: Border.all(color: Colors.orange.shade700),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '📄 التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش. '
+                    'زوّم وشوف: لو باتش حقيقي ادخله وكمّل المبلغ والماكينة.',
+                    style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => resolveIgnored(true),
+                          child: const Text('ده باتش - ادخله',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => resolveIgnored(false),
+                          child: const Text('مش باتش - تجاهله',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          if (it.dateOdd)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                border: Border.all(color: Colors.orange.shade700),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '📅 تاريخ الإيصال ${it.date} بينما أغلب الإيصالات ${it.dateMain}.',
+                    style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => resolveDate(true),
+                          child: Text('خليه بتاريخ ${it.dateMain}',
+                              textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => resolveDate(false),
+                          child: const Text('التاريخ صح - سيبه',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          if (it.weakId && !it.ignoredDoc && !it.dupSuspect && !it.userExcluded && it.row != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                it.how == 'auto-number' || it.how == 'conflict'
+                    ? '❓ رقم الماكينة اتحدد تلقائياً (${it.orderNum}) - اتأكد منه واضغط حفظ.'
+                    : '❓ الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ.',
+                style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
               ),
             ),
           if (it.unusual != null)
