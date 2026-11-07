@@ -1686,6 +1686,7 @@ class ReceiptItem {
   bool userExcluded; // انت استبعدته في المراجعة
   String? dupDecision; // 'keep' | 'drop' (قرارك بيتحفظ للمرة الجاية)
   int? dupOf; // رقم الماكينة اللي شبهه
+  String? unusual; // إجمالي بعيد عن المعتاد (للمراجعة)
 
   ReceiptItem({
     required this.path,
@@ -1720,6 +1721,7 @@ class ReceiptItem {
               row == null ||
               !ok ||
               alt != null ||
+              unusual != null ||
               how == 'auto-number' ||
               how == 'conflict'));
 }
@@ -1747,6 +1749,80 @@ void saveFix(ReceiptItem item) {
     File(fixPath)
       ..createSync(recursive: true)
       ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+// احتساب إيصال (مشكوك أو مستبعد) كباتش إضافي للماكينة
+void keepAsExtraBatch(ReceiptItem it, List<ReceiptItem> all) {
+  var k = 2;
+  bool used(int n) => all.any((x) =>
+      !identical(x, it) && !x.skip && x.counts && x.orderNum == it.orderNum && (x.suffix ?? 1) == n);
+  while (used(k)) {
+    k++;
+  }
+  it.suffix = k;
+  it.how = 'extra-batch';
+  it.dupSuspect = false;
+  it.userExcluded = false;
+  it.dupDecision = 'keep';
+  try {
+    final cut = it.path.lastIndexOf('/');
+    final dot = it.path.lastIndexOf('.');
+    final ext = dot > cut ? it.path.substring(dot) : '.jpg';
+    final dst = '${it.path.substring(0, cut + 1)}${it.orderNum}_$k$ext';
+    if (dst != it.path && !File(dst).existsSync()) {
+      it.path = File(it.path).renameSync(dst).path;
+    }
+  } catch (_) {}
+  saveFix(it);
+}
+
+// إجمالي ماكينة بعيد جداً عن متوسط الأيام اللي فاتت = غالباً قراءة غلط -> مراجعة
+void checkUnusual(List<ReceiptItem> items, String reportDate) {
+  for (final r in items) {
+    r.unusual = null;
+  }
+  try {
+    final cfg = _readCfg();
+    final hist = <String, Map<String, dynamic>>{};
+    final raw = cfg['hist'];
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        if (v is Map) hist[k.toString()] = Map<String, dynamic>.from(v);
+      });
+    }
+    final today = <int, double>{};
+    for (final r in items) {
+      if (r.orderNum != null && r.amount > 0) {
+        today[r.orderNum!] = (today[r.orderNum!] ?? 0) + r.amount;
+      }
+    }
+    for (final e in today.entries) {
+      final prev = <double>[];
+      hist.forEach((d, m) {
+        if (d == reportDate) return;
+        final v = m['${e.key}'];
+        if (v is num && v > 0) prev.add(v.toDouble());
+      });
+      if (prev.length < 3) continue;
+      final avg = prev.reduce((a, b) => a + b) / prev.length;
+      if (avg < 1) continue;
+      if (e.value > avg * 2.5 || e.value < avg / 2.5) {
+        final msg = 'إجمالي ماكينة ${e.key} (${e.value.toStringAsFixed(2)}) بعيد عن متوسط '
+            'الأيام اللي فاتت (${avg.toStringAsFixed(0)}) - اتأكد من المبلغ';
+        for (final r in items) {
+          if (r.orderNum == e.key && r.how != 'manual') r.unusual = msg;
+        }
+      }
+    }
+    if (reportDate != 'اليوم') {
+      hist[reportDate] = {for (final e in today.entries) '${e.key}': e.value};
+      while (hist.length > 30) {
+        hist.remove(hist.keys.first);
+      }
+      cfg['hist'] = hist;
+      _writeCfg(cfg);
+    }
   } catch (_) {}
 }
 
@@ -2216,6 +2292,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final mainItems = processedItems
         .where((r) => r.counts && (r.date == null || r.date == reportDate))
         .toList();
+    checkUnusual(mainItems, reportDate);
     final otherByDate = <String, List<ReceiptItem>>{};
     for (final r in processedItems) {
       if (r.counts && r.date != null && r.date != reportDate) {
@@ -2323,12 +2400,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
+    final unu = item.unusual != null ? '\n📊 ${item.unusual}' : '';
     final dup = item.dupSuspect
         ? '\n⚠️ مشكوك إنه مكرر (نفس مبلغ ماكينة ${item.dupOf ?? ''}) - مش محسوب لحد ما تراجعه'
         : item.userExcluded
             ? '\n🚫 مستبعد (مكرر)'
             : '';
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt$dup';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$bt$alt$dup$unu';
   }
 
   String warningsText() {
@@ -2348,6 +2426,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final flags = <String>[];
         if (r.dupSuspect) flags.add('مشكوك إنه مكرر - مش محسوب لحد ما تراجعه');
         if (r.userExcluded) flags.add('مستبعد (مكرر)');
+        if (r.unusual != null) flags.add('إجمالي بعيد عن المعتاد');
         if (r.amount <= 0) flags.add('المبلغ غير مقروء');
         if (r.row == null) flags.add('الوحدة غير معروفة');
         if (!r.ok && r.amount > 0) flags.add('المبلغ يحتاج مراجعة');
@@ -2701,8 +2780,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           (prev.amount - r.amount).abs() < 0.005 &&
           sameDay(prev, r)) {
         if (r.dupDecision == 'drop') {
-          r.skip = true; // انت قررت قبل كده إنه مكرر
-          warnings.add('${baseName(r.path)}: إيصال مكرر للماكينة $n (استبعدته قبل كده)');
+          r.userExcluded = true; // انت قررت قبل كده إنه مكرر (بيفضل ظاهر وتقدر ترجّعه)
+          r.dupOf = n;
+          warnings.add('${baseName(r.path)}: إيصال مكرر للماكينة $n (استبعدته قبل كده - تقدر ترجّعه)');
         } else if (r.dupDecision == 'keep') {
           r.origTid = r.tid; // انت قررت قبل كده إنه باتش تاني حقيقي
           r.tid = null;
@@ -2800,7 +2880,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final ext = r.path.split('.').last;
       final sfx = r.suffix != null
           ? '_${r.suffix}'
-          : (r.dupSuspect ? '_dup${++dupN}' : '');
+          : ((r.dupSuspect || r.userExcluded) ? '_dup${++dupN}' : '');
       final target = '$rawImagesDir/${r.orderNum}$sfx.$ext';
       if (r.path != target) {
         moves.add(r);
@@ -3003,6 +3083,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (item.userExcluded)
+                      IconButton(
+                        tooltip: 'رجّعه (احتسبه)',
+                        icon: const Icon(Icons.undo, color: Colors.red),
+                        onPressed: busy
+                            ? null
+                            : () async {
+                                keepAsExtraBatch(item, processedItems);
+                                await rebuildFiles();
+                              },
+                      ),
                     if (item.needsReview)
                       Icon(Icons.warning_amber, color: Colors.orange.shade800),
                     IconButton(
@@ -3242,6 +3333,7 @@ class _ReviewPageState extends State<ReviewPage> {
     it.ok = true;
     it.alt = null;
     it.how = 'manual';
+    it.unusual = null;
     if (order != null) {
       it.orderNum = order;
       it.tid = numToTid[order];
@@ -3265,32 +3357,13 @@ class _ReviewPageState extends State<ReviewPage> {
     final it = item;
     final all = widget.allItems ?? widget.items;
     if (keep) {
-      var k = 2;
-      bool used(int n) => all.any((x) =>
-          !identical(x, it) && !x.skip && x.orderNum == it.orderNum && (x.suffix ?? 1) == n);
-      while (used(k)) {
-        k++;
-      }
-      it.suffix = k;
-      it.how = 'extra-batch';
-      it.dupSuspect = false;
-      it.userExcluded = false;
-      it.dupDecision = 'keep';
-      try {
-        final cut = it.path.lastIndexOf('/');
-        final dot = it.path.lastIndexOf('.');
-        final ext = dot > cut ? it.path.substring(dot) : '.jpg';
-        final dst = '${it.path.substring(0, cut + 1)}${it.orderNum}_$k$ext';
-        if (dst != it.path && !File(dst).existsSync()) {
-          it.path = File(it.path).renameSync(dst).path;
-        }
-      } catch (_) {}
+      keepAsExtraBatch(it, all);
     } else {
       it.dupSuspect = false;
       it.userExcluded = true;
       it.dupDecision = 'drop';
+      saveFix(it);
     }
-    saveFix(it);
     changed = true;
     done.add(it);
     if (widget.single) {
@@ -3396,6 +3469,12 @@ class _ReviewPageState extends State<ReviewPage> {
                   ),
                 ],
               ),
+            ),
+          if (it.unusual != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text('⚠️ ${it.unusual}  (لو المبلغ صح اضغط حفظ)',
+                  style: TextStyle(color: Colors.orange.shade900, fontSize: 13)),
             ),
           Text(
             'المقروء: ${it.amount > 0 ? it.amount.toStringAsFixed(2) : 'غير مقروء'} ج.م'
