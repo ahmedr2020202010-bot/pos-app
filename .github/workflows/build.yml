@@ -422,16 +422,38 @@ jobs:
           if [ -f "$OUT/app-release.apk" ]; then cp "$OUT/app-release.apk" A2R-POS.apk; else cp "$OUT/app-debug.apk" A2R-POS.apk; fi
           ls -lh A2R-POS.apk
 
-      # الطريقة المضمونة: الـ APK بيتحفظ في صفحة التشغيل نفسها (Artifacts) ليوم واحد
+      # ---- 3 طرق لتسليم الـ APK: لو واحدة فشلت التانية تشتغل ----
+
+      # 1) فرع اسمه apk فيه الملف (بيتكتب فوقه كل مرة، فمفيش تراكم)
+      - name: Publish APK to branch apk
+        id: br
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/apkpub
+          cp A2R-POS.apk /tmp/apkpub/
+          echo "version ${APP_VERSION} build ${GITHUB_RUN_NUMBER}" > /tmp/apkpub/VERSION.txt
+          cd /tmp/apkpub
+          git init -q -b apk
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add .
+          git commit -q -m "APK build ${GITHUB_RUN_NUMBER}"
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push -f origin apk
+
+      # 2) Artifact في صفحة التشغيل (ليوم واحد)
       - name: Upload APK as artifact
+        id: art
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: A2R-POS-apk
           path: A2R-POS.apk
           retention-days: 1
 
-      # محاولة نشره في Releases (لو فشلت مش هتوقّع البناء)
+      # 3) Release
       - name: Publish APK to Release
+        id: rel
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -442,3 +464,12 @@ jobs:
           gh release list --limit 100 --json tagName --jq '.[3:][].tagName' | while read t; do
             gh release delete "$t" --cleanup-tag --yes || true
           done
+
+      - name: Check at least one delivery worked
+        if: always()
+        run: |
+          echo "branch=${{ steps.br.outcome }} artifact=${{ steps.art.outcome }} release=${{ steps.rel.outcome }}"
+          if [ "${{ steps.br.outcome }}" != "success" ] && [ "${{ steps.art.outcome }}" != "success" ] && [ "${{ steps.rel.outcome }}" != "success" ]; then
+            echo "ERROR: no delivery method worked"
+            exit 1
+          fi
