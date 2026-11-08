@@ -2914,10 +2914,8 @@ class _StructPage {
   final Map<String, int> types = {};
 }
 
-const _anchorRank = {'logo': 0, 'term': 1, 'rrn': 2, 'amount': 3, 'appr': 4};
-
 // عدّ الإيصالات بالهيكل: كل إيصال له شعار + Terminal ID + RRN + AMOUNT + Approved (مرة واحدة)
-// بنجمع العلامات دي ونقسمها أعمدة، وكل ما التسلسل (من فوق لتحت) يرجع لورا = إيصال جديد
+// بنجمع العلامات دي ونقسمها أعمدة، وفي كل عمود أكتر علامة متكررة = عدد الإيصالات
 _StructPage _structCount(RecognizedText res) {
   final out = _StructPage();
   final lines = toLines(res);
@@ -2964,22 +2962,22 @@ _StructPage _structCount(RecognizedText res) {
   final cols = <List<_SA>>[];
   var cur = <_SA>[ded.first];
   for (var i = 1; i < ded.length; i++) {
-    if (ded[i].cx - cur.last.cx > w * 0.06) {
+    if (ded[i].cx - cur.last.cx > w * 0.07) {
       cols.add(cur);
       cur = <_SA>[];
     }
     cur.add(ded[i]);
   }
   cols.add(cur);
+  // لكل عمود: كل علامة بتظهر مرة واحدة في كل إيصال، فأكبر عدد لأي علامة = عدد الإيصالات في العمود
+  // (لو علامة اتقرت ناقصة التانية بتعوّض، ومش بيتأثر بميل الإيصال ولا بترتيب القراءة)
   var n = 0;
   for (final c in cols) {
-    c.sort((a, b) => a.cy.compareTo(b.cy));
-    int? prev;
+    final cnt = <String, int>{};
     for (final a in c) {
-      final rk = _anchorRank[a.t]!;
-      if (prev == null || rk <= prev) n++;
-      prev = rk;
+      cnt[a.t] = (cnt[a.t] ?? 0) + 1;
     }
+    n += cnt.values.reduce((a, b) => a > b ? a : b);
   }
   out.sm = n;
   return out;
@@ -5722,6 +5720,15 @@ int? _batchAutoOf(MResult r) => r.orderNum == null ? null : closingTxn.value[r.o
 int? _batchOf(MResult r) => _batchManual(r) ?? _batchAutoOf(r);
 bool _batchIsAuto(MResult r) => _batchManual(r) == null && _batchAutoOf(r) != null;
 
+// مطابقة الباتش: لو انت راجعت الملف يدوي وعلّمته صح ✓ يتحسب مطابق (أخضر) حتى لو العدد المقروء مختلف عن رقم الباتش.
+// null = مفيش حاجة نقارنها. الرقم اللي بتكتبه بإيدك في خانة "الصح" بيغلب الرقم التلقائي من التقفيل.
+bool? _batchMatch(MResult r) {
+  if (r.excluded || r.pending) return null;
+  if (r.verdict > 0) return true;
+  final d = _batchDiff(r);
+  return d == null ? null : d == 0;
+}
+
 int? _batchDiff(MResult r) {
   final b = _batchOf(r);
   if (b == null || r.pending || r.excluded) return null;
@@ -5741,7 +5748,13 @@ String _mSummary(BuildContext c, MResult r) {
   final bt = _batchOf(r);
   final d = _batchDiff(r);
   if (bt != null && d != null) {
-    b.write('\n${_l(c, 'الباتش', 'Batch')}: $bt${_batchIsAuto(r) ? _l(c, ' (من التقفيل)', ' (from closing)') : ''} • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • ${_diffText(c, d)}');
+    final tag = _batchIsAuto(r)
+        ? _l(c, ' (من التقفيل)', ' (from closing)')
+        : (_batchManual(r) != null ? _l(c, ' (يدوي)', ' (manual)') : '');
+    final res = (r.verdict > 0 && d != 0)
+        ? _l(c, 'راجعته يدوي: صح ✓', 'Manually reviewed: OK ✓')
+        : _diffText(c, d);
+    b.write('\n${_l(c, 'الباتش', 'Batch')}: $bt$tag • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • $res');
   }
   return b.toString();
 }
@@ -5901,8 +5914,8 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: _tintBg(context, _diffColor(bd), soft: true),
-                  border: Border.all(color: _tintBorder(context, _diffColor(bd))),
+                  color: _tintBg(context, r.verdict > 0 ? Colors.green : _diffColor(bd), soft: true),
+                  border: Border.all(color: _tintBorder(context, r.verdict > 0 ? Colors.green : _diffColor(bd))),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Column(
@@ -5910,8 +5923,10 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                     kv(_l(context, 'الباتش', 'Batch'),
                         '$bt${_batchIsAuto(r) ? _l(context, ' (من التقفيل)', ' (from closing)') : ''}'),
                     kv(_l(context, 'الفعلي', 'Actual'), '${r.count}'),
-                    kv(_l(context, 'الفرق', 'Difference'), _diffText(context, bd),
-                        color: _tintFg(context, _diffColor(bd))),
+                    kv(
+                        _l(context, 'الفرق', 'Difference'),
+                        '${_diffText(context, bd)}${r.verdict > 0 && bd != 0 ? _l(context, ' • راجعته يدوي: صح ✓', ' • manually reviewed: OK ✓') : ''}',
+                        color: _tintFg(context, r.verdict > 0 ? Colors.green : _diffColor(bd))),
                   ],
                 ),
               ),
@@ -6043,12 +6058,12 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
     final excl = all.where((r) => r.excluded).length;
     final pend = all.where((r) => r.pending).length;
     final linked = counted.where((r) => _batchOf(r) != null).toList();
-    final matched = linked.where((r) => _batchDiff(r) == 0).length;
+    final matched = linked.where((r) => _batchMatch(r) == true).length;
     final diffs = linked.length - matched;
     final batchSum = linked.fold<int>(0, (a, r) => a + _batchOf(r)!);
     final actualSum = linked.fold<int>(0, (a, r) => a + r.count);
     final shown = all
-        .where((r) => filter == 0 || (filter == 1 && !r.ok) || (filter == 2 && (_batchDiff(r) ?? 0) != 0))
+        .where((r) => filter == 0 || (filter == 1 && !r.ok) || (filter == 2 && _batchMatch(r) == false))
         .toList();
 
     Widget stat(String label, String value, MaterialColor c) => Container(
@@ -6988,7 +7003,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         total += sp.sm;
         totalMx += sp.mx;
         if (sp.sm == 0) empty.add(i + 1);
-        if (sp.sm != sp.mx) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
+        if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
         col.pageH = sp.h;
         col.pages.add(<Anchor>[]);
         _collect(res, 0, 1, col);
@@ -7014,7 +7029,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     if (diff.isNotEmpty) {
       r.cntNotes.add('صفحات الطريقتين اختلفوا فيها: ${diff.join('، ')} (راجعها لو العدد مهم)');
-      if ((total - totalMx).abs() > 3) r.cntOk = false;
     }
     // نقارن بتسلسل الـ RRN بس لو الأرقام اتقرت كفاية
     if (sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen) {
@@ -7023,9 +7037,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.cntNotes.add('العدد $total بس التسلسل ${sc.rangeLen}'
           '${sc.seqMissing.isNotEmpty ? ' - أرقام مش لاقيها: $miss${sc.seqMissing.length > 10 ? ' ...' : ''}' : ''}');
     }
-    if (sc.otherDay.isNotEmpty) {
+    if (sc.otherDay.length >= 3 && sc.otherDay.length >= total * 0.1) {
       r.cntOk = false;
-      r.cntNotes.add('مش تبع نفس اليوم: ${sc.otherDay.join(' ، ')}');
+      r.cntNotes.add('مش تبع نفس اليوم: ${sc.otherDay.take(5).join(' ، ')}');
     }
     if (sc.nonPayment) {
       r.cntNotes.add('فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)');
@@ -7346,8 +7360,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           const SizedBox(height: 10),
           for (final r in results.where((r) => !reviewOnly || !r.ok))
             Builder(builder: (context) {
-              final e = _batchOf(r);
-              final match = (e == null || r.pending || r.excluded) ? null : e == r.count;
+              final match = _batchMatch(r);
               return Dismissible(
                 key: ValueKey('t_${r.key}'),
                 confirmDismiss: (dir) async {
