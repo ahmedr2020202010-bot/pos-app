@@ -403,6 +403,193 @@ const List<String> kSeedNamesAr = ['تيل', 'أزرق', 'نيلي', 'أخضر',
 const List<String> kSeedNamesEn = ['Teal', 'Blue', 'Indigo', 'Green', 'Orange', 'Purple', 'A2R (brand)'];
 
 // ───────── حالة مشتركة بين التابين ─────────
+final ValueNotifier<Map<int, int>> closingTxn = ValueNotifier<Map<int, int>>(<int, int>{}); // رقم الماكينة -> عدد معاملات الباتش
+final ValueNotifier<int> wipeSignal = ValueNotifier<int>(0); // بيتغير لما "مسح كل حاجة" يخلص
+bool homeBusyG = false;
+bool machBusyG = false;
+
+void _publishClosing(List<ReceiptItem> items) {
+  final sums = <int, int>{};
+  final bad = <int>{};
+  for (final it in items) {
+    if (!it.counts) continue;
+    final n = it.orderNum ?? (it.tid != null ? terminals[it.tid]?.orderNum : null);
+    if (n == null) continue;
+    final t = it.txn;
+    if (t == null) {
+      bad.add(n);
+      continue;
+    }
+    sums[n] = (sums[n] ?? 0) + t;
+  }
+  for (final n in bad) {
+    sums.remove(n);
+  }
+  final cur = closingTxn.value;
+  var same = cur.length == sums.length;
+  if (same) {
+    for (final e in sums.entries) {
+      if (cur[e.key] != e.value) {
+        same = false;
+        break;
+      }
+    }
+  }
+  if (same) return;
+  WidgetsBinding.instance.addPostFrameCallback((_) => closingTxn.value = sums);
+}
+
+// تأكيد قبل الإرسال لو فيه حاجات لسه مفتوحة
+Future<bool> confirmSend(BuildContext context, {int review = 0, int missing = 0, int pending = 0}) async {
+  if (review == 0 && missing == 0 && pending == 0) return true;
+  final ar = AppSettings.of(context).isAr;
+  final lines = <String>[
+    if (review > 0) (ar ? '• $review محتاج مراجعة' : '• $review need review'),
+    if (missing > 0) (ar ? '• $missing ماكينة ناقصة' : '• $missing missing machine(s)'),
+    if (pending > 0) (ar ? '• $pending لسه ما اتعدّش' : '• $pending not counted yet'),
+  ];
+  final r = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: w.Text(ar ? 'لسه فيه حاجات مفتوحة' : 'Some things are still open'),
+      content: w.Text('${lines.join('\n')}\n\n${ar ? 'تبعت برضه؟' : 'Send anyway?'}'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: w.Text(ar ? 'رجوع' : 'Back')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: w.Text(ar ? 'ابعت برضه' : 'Send anyway')),
+      ],
+    ),
+  );
+  return r == true;
+}
+
+// مسح كل حاجة: ملفات الإخراج + الصور + نتايج الفحص + التصحيحات + اللوج + الكاش والملفات المؤقتة (الإعدادات واللغة والثيم بيفضلوا)
+Future<void> wipeEverything(BuildContext context) async {
+  final ar = AppSettings.of(context).isAr;
+  final m = ScaffoldMessenger.of(context);
+  if (homeBusyG || machBusyG) {
+    m.showSnackBar(SnackBar(
+        content: w.Text(ar ? 'استنى لحد ما المعالجة تخلص أو وقّفها الأول.' : 'Wait for processing to finish or stop it first.')));
+    return;
+  }
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: w.Text(ar ? 'مسح كل حاجة؟' : 'Wipe everything?'),
+      content: w.Text(ar
+          ? 'هيتمسح نهائي:\n• ملفات الإخراج (الإكسيل والـ PDF)\n• الصور المرتبة والنسخ المتسمية لإيصالات الدفع\n• نتايج الفحص والتصحيحات المحفوظة\n• اللوج\n• الكاش والملفات المؤقتة\n\nمش هيتمس: ملفات واتساب الأصلية، والإعدادات (اللغة والثيم والفولدرات).'
+          : 'This will permanently delete:\n• Output files (Excel and PDF)\n• Sorted images and renamed payment receipt copies\n• Scan results and saved corrections\n• The log\n• Cache and temporary files\n\nNot touched: original WhatsApp files and settings (language, theme, folders).'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: w.Text(ar ? 'إلغاء' : 'Cancel')),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          onPressed: () => Navigator.pop(ctx, true),
+          child: w.Text(ar ? 'امسح كل حاجة' : 'Wipe everything'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return;
+
+  var files = 0;
+  var bytes = 0;
+  bool delFile(File f) {
+    try {
+      bytes += f.lengthSync();
+      f.deleteSync();
+      files++;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void wipeTree(String path) {
+    try {
+      final d = Directory(path);
+      if (!d.existsSync()) return;
+      for (final e in d.listSync(recursive: true, followLinks: false)) {
+        if (e is File) delFile(e);
+      }
+      try {
+        d.deleteSync(recursive: true);
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  void wipeFlat(String path, bool Function(File) only) {
+    try {
+      final d = Directory(path);
+      if (!d.existsSync()) return;
+      for (final e in d.listSync(followLinks: false)) {
+        if (e is File && only(e)) delFile(e);
+      }
+    } catch (_) {}
+  }
+
+  bool appOut(File f) {
+    final n = baseName(f.path);
+    final l = n.toLowerCase();
+    return n == 'review_report.txt' ||
+        n == 'ocr_debug.txt' ||
+        ((l.endsWith('.xlsx') || l.endsWith('.pdf')) && _normAr(n).contains('اسكندري'));
+  }
+
+  final protectedDirs = <String>{root, baseDir, '$root/Download', '$root/Documents', '$root/DCIM', '$root/Pictures'};
+  for (final dir in {outputDir, defaultOutputDir}) {
+    if (protectedDirs.contains(dir)) {
+      wipeFlat(dir, appOut);
+    } else if (dir == defaultOutputDir) {
+      wipeTree(dir);
+    } else {
+      wipeFlat(dir, (f) => true);
+    }
+  }
+  wipeTree(rawImagesDir);
+  wipeTree('$baseDir/.scans');
+  wipeTree(tmpDir);
+  wipeTree(defaultMDest);
+  // نسخ إيصالات الدفع المتسمية لو الفولدر مخصص
+  try {
+    final dest = loadMOut();
+    if (dest != defaultMDest) {
+      for (final r in loadMState()) {
+        final p = r.openPath;
+        if (r.newName != null && p != null && p != r.srcPath && p.startsWith(dest)) {
+          final f = File(p);
+          if (f.existsSync()) delFile(f);
+        }
+        r.ctl.dispose();
+      }
+    }
+  } catch (_) {}
+  for (final p in [fixPath, mStatePath, '$baseDir/id_debug.txt']) {
+    final f = File(p);
+    if (f.existsSync()) delFile(f);
+  }
+  try {
+    final cfg = _readCfg();
+    cfg.remove('doneM');
+    _writeCfg(cfg);
+  } catch (_) {}
+  // الكاش والملفات المؤقتة بتاعة التطبيق
+  try {
+    for (final e in Directory.systemTemp.listSync(followLinks: false)) {
+      if (e is File) {
+        delFile(e);
+      } else if (e is Directory) {
+        wipeTree(e.path);
+      }
+    }
+  } catch (_) {}
+  imageCache.clear();
+  imageCache.clearLiveImages();
+  closingTxn.value = <int, int>{};
+  wipeSignal.value++;
+  final mb = (bytes / 1048576).toStringAsFixed(1);
+  m.showSnackBar(SnackBar(
+      content: w.Text(ar ? 'تم المسح: $files ملف ($mb ميجا) 🧹' : 'Wiped: $files files ($mb MB) 🧹')));
+}
+
 final ValueNotifier<int> sharedDays = ValueNotifier<int>(0); // الفترة (اليوم/يومين/...) واحدة للتابين
 final ValueNotifier<int> homeBadge = ValueNotifier<int>(0); // عدد اللي محتاج مراجعة في التقفيل
 final ValueNotifier<int> machBadge = ValueNotifier<int>(0); // عدد اللي محتاج مراجعة في إيصالات الدفع
@@ -1472,6 +1659,42 @@ String? findDateIn(List<String> texts) {
   return null;
 }
 
+// عدد معاملات الباتش من إيصال الإقفال: "GRAND TOTALS / Sale (010)" (ولو اتقرا مجموع الكروت بيتطابق معاه)
+int? _txnNum(String s) {
+  final t = s.trim().replaceAll(RegExp(r'[Oo]'), '0').replaceAll(RegExp(r'[Il|]'), '1');
+  return int.tryParse(t);
+}
+
+int? batchTxnOf(List<String> texts) {
+  final grandRe = RegExp(r'GRAND|TOTALS', caseSensitive: false);
+  final paren = RegExp(r'\(\s*([0-9OoIl|]{1,5})\s*\)');
+  final grands = <int>[];
+  final sums = <int>[];
+  for (final raw in texts) {
+    final gm = grandRe.firstMatch(raw);
+    if (gm != null) {
+      final m = paren.firstMatch(raw.substring(gm.start));
+      final v = m == null ? null : _txnNum(m.group(1)!);
+      if (v != null && v > 0 && v < 100000) grands.add(v);
+    }
+    final pre = gm != null ? raw.substring(0, gm.start) : raw;
+    var sum = 0, n = 0;
+    for (final m in RegExp(r'TOTAL(?!\s*NET)[^()\n]{0,12}\(\s*([0-9OoIl|]{1,5})\s*\)', caseSensitive: false)
+        .allMatches(pre)) {
+      final v = _txnNum(m.group(1)!);
+      if (v != null) {
+        sum += v;
+        n++;
+      }
+    }
+    if (n > 0 && sum > 0) sums.add(sum);
+  }
+  final g = mostCommon(grands)?.key;
+  final s = mostCommon(sums)?.key;
+  if (g != null && s != null && g != s) return null; // القراءتين متعارضتين: الأفضل تكتبه بإيدك
+  return g ?? s;
+}
+
 class Analysis {
   String? tid;
   String how;
@@ -1482,6 +1705,7 @@ class Analysis {
   List<double> batches;
   String? date;
   String debug = '';
+  int? txn; // عدد معاملات الباتش (من إيصال الإقفال)
   Analysis(this.tid, this.how, this.row, this.unitName, this.val, this.ok,
       this.batches, this.date);
 }
@@ -1492,6 +1716,7 @@ Analysis analyzeLines(List<OcrLine> all) {
   final multi = pieces.length > 1;
   final allTexts = <String>[];
   final batches = <double>[];
+  final txns = <int?>[];
   var allOk = true;
   final seen = <String>{};
 
@@ -1511,6 +1736,7 @@ Analysis analyzeLines(List<OcrLine> all) {
     if (b != null && seen.contains(key)) continue; // نفس الباتش اتصور مرتين
     seen.add(key);
     batches.add(r.val);
+    txns.add(batchTxnOf(r.texts));
     allOk = allOk && r.ok;
   }
   var total = round2(batches.fold(0.0, (a, b) => a + b));
@@ -1526,6 +1752,9 @@ Analysis analyzeLines(List<OcrLine> all) {
       batches
         ..clear()
         ..add(r.val);
+      txns
+        ..clear()
+        ..add(batchTxnOf(r.texts));
     }
   }
 
@@ -1555,6 +1784,7 @@ Analysis analyzeLines(List<OcrLine> all) {
   }
   final result = Analysis(tid, how, row, name, total, ok, batches, date);
   result.debug = dbg.toString();
+  result.txn = (txns.isNotEmpty && txns.every((e) => e != null)) ? txns.fold<int>(0, (a, e) => a + e!) : null;
   return result;
 }
 
@@ -1574,11 +1804,13 @@ double? mergeSecondRead(Analysis a, Analysis b) {
     a.how = b.how;
   }
   a.date ??= b.date;
+  a.txn ??= b.txn;
   if (b.val <= 0) return null;
   if (a.val <= 0) {
     a.val = b.val;
     a.ok = b.ok;
     a.batches = [...b.batches];
+    a.txn = b.txn ?? a.txn;
     return null;
   }
   if ((a.val - b.val).abs() < 0.005) return null; // القراءتين متطابقتين
@@ -1587,6 +1819,7 @@ double? mergeSecondRead(Analysis a, Analysis b) {
     a.val = b.val;
     a.ok = true;
     a.batches = [...b.batches];
+    a.txn = b.txn ?? a.txn;
     return null;
   }
   if (a.ok && !b.ok) return null; // الأولى مؤكدة، نتجاهل التانية
@@ -2439,6 +2672,7 @@ class ReceiptItem {
   bool dateOdd; // تاريخه مختلف عن أغلب الإيصالات
   String? dateMain; // التاريخ الأغلب
   String? dateFix; // التاريخ اللي انت أكدته
+  int? txn; // عدد معاملات الباتش المقروء من إيصال الإقفال
 
   ReceiptItem({
     required this.path,
@@ -2845,6 +3079,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
+    wipeSignal.addListener(_onWipe);
     customDir = loadFolder();
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
@@ -2855,6 +3090,100 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => days = sharedDays.value);
   }
 
+  void _onWipe() {
+    if (!mounted) return;
+    setState(() {
+      processedItems.clear();
+      missingTerminals = [];
+      warnings.clear();
+      excludedPay.clear();
+      standardXlsxPath = null;
+      generatedPdfPath = null;
+      extraPdfPaths = [];
+      reviewOnly = false;
+      sourceNote = '';
+      status = 'تم مسح كل حاجة. اضغط "بدء المعالجة الشاملة" لبدء يوم جديد.';
+    });
+  }
+
+  Future<void> _onSwipe(ReceiptItem it, bool approve) async {
+    if (busy) return;
+    if (approve) {
+      if (it.dupSuspect) {
+        keepAsExtraBatch(it, processedItems);
+        await rebuildFiles();
+      } else if (it.dateOdd) {
+        it.dateFix = it.date;
+        it.dateOdd = false;
+        saveFix(it);
+        await rebuildFiles();
+      } else {
+        if (it.amount <= 0 || it.row == null) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: w.Text(_l(context, 'كمّل المبلغ والماكينة من زر القلم الأول.',
+                  'Fill in the amount and machine with the pencil button first.'))));
+          return;
+        }
+        it.ok = true;
+        it.alt = null;
+        it.unusual = null;
+        if (it.how != 'extra-batch') it.how = 'manual';
+        saveFix(it);
+        setState(() {});
+      }
+    } else {
+      if (it.dupSuspect) {
+        it.dupSuspect = false;
+        it.userExcluded = true;
+        it.dupDecision = 'drop';
+        saveFix(it);
+        await rebuildFiles();
+      } else if (it.dateOdd) {
+        if (it.dateMain != null) it.date = it.dateMain;
+        it.dateFix = it.date;
+        it.dateOdd = false;
+        saveFix(it);
+        await rebuildFiles();
+      } else {
+        await editReceipt(it);
+      }
+    }
+  }
+
+  // سحب إيصال المراجعة: صح ✓ / غلط ✗ (غلط = استبعاد لو مكرر، وإلا بيفتح التصحيح)
+  Widget _swipeWrap(ReceiptItem item, Widget card) {
+    if (item.ignoredDoc || item.userExcluded || !item.needsReview) return card;
+    final okLabel = item.dupSuspect
+        ? _l(context, 'احتسبه باتش ✓', 'Count it ✓')
+        : (item.dateOdd ? _l(context, 'سيب تاريخه ✓', 'Keep date ✓') : _l(context, 'صح ✓', 'OK ✓'));
+    final badLabel = item.dupSuspect
+        ? _l(context, 'مكرر - استبعده ✗', 'Duplicate ✗')
+        : (item.dateOdd ? _l(context, 'تاريخ الأغلب ✗', 'Use main date ✗') : _l(context, 'غلط - صحّحه ✗', 'Wrong - fix ✗'));
+    return Dismissible(
+      key: ValueKey('sw_${item.path}'),
+      direction: busy ? DismissDirection.none : DismissDirection.horizontal,
+      confirmDismiss: (dir) async {
+        await _onSwipe(item, dir == DismissDirection.startToEnd);
+        return false;
+      },
+      background: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        color: _tintBg(context, Colors.green, strong: true),
+        alignment: AlignmentDirectional.centerStart,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: w.Text(okLabel, style: const TextStyle(fontWeight: FontWeight.bold)),
+      ),
+      secondaryBackground: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        color: _tintBg(context, Colors.red, strong: true),
+        alignment: AlignmentDirectional.centerEnd,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: w.Text(badLabel, style: const TextStyle(fontWeight: FontWeight.bold)),
+      ),
+      child: card,
+    );
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
@@ -2863,6 +3192,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     sharedDays.removeListener(_syncDays);
+    wipeSignal.removeListener(_onWipe);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -2942,6 +3272,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
       );
+      return;
+    }
+    if (!await confirmSend(context,
+        review: processedItems.where((e) => e.needsReview).length, missing: missingTerminals.length)) {
       return;
     }
     await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية');
@@ -3117,6 +3451,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (File(p).existsSync()) files.add(XFile(p));
     }
     if (files.isNotEmpty) {
+      if (!await confirmSend(context,
+          review: processedItems.where((e) => e.needsReview).length, missing: missingTerminals.length)) {
+        return;
+      }
       await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3659,6 +3997,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             batches: a.batches,
             alt: alt,
           );
+          item.txn = a.txn;
 
           // تصحيح يدوي محفوظ من مرة سابقة
           final fx = fixes[key];
@@ -3902,6 +4241,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final pdf = latestOutput('.pdf');
     final reviewCount = processedItems.where((e) => e.needsReview).length;
     _syncBadge(homeBadge, reviewCount);
+    _publishClosing(processedItems);
+    homeBusyG = busy;
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 54,
@@ -3922,8 +4263,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 useWhatsApp();
               } else if (v == 'out') {
                 useDefaultOut();
-              } else if (v == 'clear') {
-                clearAll();
+              } else if (v == 'wipe') {
+                wipeEverything(context);
               }
             },
             itemBuilder: (_) => [
@@ -3940,7 +4281,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   value: 'log',
                   child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
-              PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
+              PopupMenuItem(
+                  value: 'wipe',
+                  enabled: !busy,
+                  child: w.Text(AppSettings.of(context).isAr ? '🧹 مسح كل حاجة (كاش + مؤقت)' : '🧹 Wipe everything (cache + temp)')),
             ],
           ),
         ],
@@ -3976,6 +4320,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 6),
           if (processedItems.isNotEmpty) ...[
             _filterRow(reviewOnly, processedItems.length, reviewCount, (v) => setState(() => reviewOnly = v)),
+            if (reviewCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: w.Text(
+                    _l(context, '💡 اسحب إيصال المراجعة: صح ✓ في ناحية وغلط ✗ في الناحية التانية',
+                        '💡 Swipe a review receipt: OK ✓ one way, wrong ✗ the other'),
+                    style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              ),
             const SizedBox(height: 6),
           ],
           Wrap(
@@ -4044,7 +4396,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ],
           const SizedBox(height: 10),
           for (final item in processedItems.where((e) => !reviewOnly || e.needsReview))
-            Card(
+            _swipeWrap(item, Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               child: ListTile(
                 onTap: () => Navigator.push(
@@ -4097,7 +4449,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ],
                 ),
               ),
-            ),
+            )),
         ],
       ),
     );
@@ -5365,7 +5717,10 @@ _St _statusOf(MResult r) {
 }
 
 // الباتش = العدد اللي مكتوب في خانة "الصح" (من إيصال الباتش)، والفعلي = العدد اللي التطبيق عدّه
-int? _batchOf(MResult r) => int.tryParse(r.ctl.text.trim());
+int? _batchManual(MResult r) => int.tryParse(r.ctl.text.trim());
+int? _batchAutoOf(MResult r) => r.orderNum == null ? null : closingTxn.value[r.orderNum!];
+int? _batchOf(MResult r) => _batchManual(r) ?? _batchAutoOf(r);
+bool _batchIsAuto(MResult r) => _batchManual(r) == null && _batchAutoOf(r) != null;
 
 int? _batchDiff(MResult r) {
   final b = _batchOf(r);
@@ -5386,7 +5741,7 @@ String _mSummary(BuildContext c, MResult r) {
   final bt = _batchOf(r);
   final d = _batchDiff(r);
   if (bt != null && d != null) {
-    b.write('\n${_l(c, 'الباتش', 'Batch')}: $bt • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • ${_diffText(c, d)}');
+    b.write('\n${_l(c, 'الباتش', 'Batch')}: $bt${_batchIsAuto(r) ? _l(c, ' (من التقفيل)', ' (from closing)') : ''} • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • ${_diffText(c, d)}');
   }
   return b.toString();
 }
@@ -5527,8 +5882,9 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
                 isDense: true,
-                labelText: _l(context, 'عدد معاملات الباتش (من إيصال التقفيل)',
-                    'Batch transaction count (from the closing receipt)'),
+                labelText: _l(context, 'عدد معاملات الباتش (بيتقري من التقفيل، اكتب رقم لو عايز تغيّره)',
+                    'Batch transaction count (read from closing; type a number to override)'),
+                hintText: _batchAutoOf(r)?.toString(),
               ),
               onChanged: (_) {
                 widget.onChanged();
@@ -5538,8 +5894,8 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
             const SizedBox(height: 8),
             if (bd == null || bt == null)
               w.Text(
-                  _l(context, 'اكتب عدد معاملات الباتش هنا علشان نقارنه بالعدد الفعلي.',
-                      'Enter the batch transaction count here to compare it with the actual count.'),
+                  _l(context, 'مفيش عدد باتش اتقرا من التقفيل لماكينة دي. اكتبه هنا علشان نقارنه بالعدد الفعلي.',
+                      'No batch count was read from closing for this machine. Enter it here to compare with the actual count.'),
                   style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
             else
               Container(
@@ -5551,7 +5907,8 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 ),
                 child: Column(
                   children: [
-                    kv(_l(context, 'الباتش', 'Batch'), '$bt'),
+                    kv(_l(context, 'الباتش', 'Batch'),
+                        '$bt${_batchIsAuto(r) ? _l(context, ' (من التقفيل)', ' (from closing)') : ''}'),
                     kv(_l(context, 'الفعلي', 'Actual'), '${r.count}'),
                     kv(_l(context, 'الفرق', 'Difference'), _diffText(context, bd),
                         color: _tintFg(context, _diffColor(bd))),
@@ -5751,8 +6108,8 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
                   const SizedBox(height: 6),
                   if (linked.isEmpty)
                     w.Text(
-                        _l(context, 'اكتب عدد معاملات الباتش في خانة "الصح" لكل ماكينة (أو من تقرير الإيصال) وهيظهر الربط هنا.',
-                            'Enter the batch transaction count in the "Correct" field of each machine (or in the receipt report) and the link will show here.'),
+                        _l(context, 'عدد الباتش بيتقري تلقائي من إيصالات تاب التقفيل. لو ما ظهرش اكتبه في خانة "الصح" أو في تقرير الإيصال.',
+                            'The batch count is read automatically from the closing tab receipts. If it is missing, type it in the "Correct" field or in the receipt report.'),
                         style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
                   else ...[
                     kv(_l(context, 'ماكينات مربوطة', 'Linked machines'), '${linked.length} / ${counted.length}'),
@@ -5854,6 +6211,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     pdfDir = loadPdfDir();
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
+    wipeSignal.addListener(_onWipe);
+    closingTxn.addListener(_onClosing);
     results.addAll(loadMState());
     results.sort(_cmpM);
     final pend = results.where((r) => r.pending).length;
@@ -5867,6 +6226,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   @override
   void dispose() {
     sharedDays.removeListener(_syncDays);
+    wipeSignal.removeListener(_onWipe);
+    closingTxn.removeListener(_onClosing);
     WidgetsBinding.instance.removeObserver(this);
     for (final r in results) {
       r.ctl.dispose();
@@ -5883,6 +6244,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   void _syncDays() {
     if (!mounted || busy || days == sharedDays.value) return;
     setState(() => days = sharedDays.value);
+  }
+
+  void _onWipe() {
+    if (!mounted) return;
+    for (final r in results) {
+      r.ctl.dispose();
+    }
+    setState(() {
+      results.clear();
+      progressValue = 0;
+      namingDone = false;
+      reviewOnly = false;
+      status = 'تم مسح كل حاجة. اضغط "فحص وإعادة تسمية" لبدء يوم جديد.';
+    });
+  }
+
+  void _onClosing() {
+    if (mounted) setState(() {});
   }
 
   Future<void> openPdf(String? path) async {
@@ -5972,6 +6351,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('مفيش ملفات مسمّاة لمشاركتها.')),
       );
+      return;
+    }
+    if (!await confirmSend(context,
+        review: results.where((r) => !r.ok).length,
+        missing: missingMachines().length,
+        pending: results.where((r) => r.pending).length)) {
       return;
     }
     await Share.shareXFiles(files, text: 'إيصالات الدفع (${files.length} ملف)');
@@ -6821,6 +7206,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pendCount = results.where((r) => r.pending).length;
     final named = results.where((r) => r.newName != null && !r.excluded).length;
     _syncBadge(machBadge, reviewN);
+    machBusyG = busy;
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 54,
@@ -6845,8 +7231,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               } else if (v == 'fast') {
                 toggleFastCount();
                 setState(() {});
-              } else if (v == 'clear') {
-                clearAll();
+              } else if (v == 'wipe') {
+                wipeEverything(context);
               }
             },
             itemBuilder: (_) => [
@@ -6864,7 +7250,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
               PopupMenuItem(value: 'fast', child: Text(fastCount ? 'العد: سريع ← الدقيق (القديم)' : 'العد: دقيق ← السريع')),
-              PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
+              PopupMenuItem(
+                  value: 'wipe',
+                  enabled: !busy,
+                  child: w.Text(AppSettings.of(context).isAr ? '🧹 مسح كل حاجة (كاش + مؤقت)' : '🧹 Wipe everything (cache + temp)')),
             ],
           ),
         ],
@@ -6957,7 +7346,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           const SizedBox(height: 10),
           for (final r in results.where((r) => !reviewOnly || !r.ok))
             Builder(builder: (context) {
-              final e = int.tryParse(r.ctl.text.trim());
+              final e = _batchOf(r);
               final match = (e == null || r.pending || r.excluded) ? null : e == r.count;
               return Dismissible(
                 key: ValueKey('t_${r.key}'),
@@ -7010,7 +7399,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                                 isDense: true,
                                 contentPadding:
                                     const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-                                hintText: tr('الصح'),
+                                hintText: _batchAutoOf(r)?.toString() ?? tr('الصح'),
                                 hintStyle: const TextStyle(fontSize: 13),
                                 border: const OutlineInputBorder(),
                                 filled: match != null,
