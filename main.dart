@@ -5168,6 +5168,664 @@ int _cmpM(MResult a, MResult b) {
   return c != 0 ? c : (a.newName ?? a.pdfName).compareTo(b.newName ?? b.pdfName);
 }
 
+// ───────────────────── تقرير إيصالات الدفع ─────────────────────
+String _l(BuildContext c, String ar, String en) => AppSettings.of(c).isAr ? ar : en;
+
+class _NoteKind {
+  final String key;
+  final int sev; // 2 = لازم تراجع، 1 = انتبه، 0 = معلومة
+  final IconData icon;
+  final String titleAr, titleEn, whyAr, whyEn, fixAr, fixEn;
+  const _NoteKind(this.key, this.sev, this.icon, this.titleAr, this.titleEn, this.whyAr, this.whyEn,
+      this.fixAr, this.fixEn);
+}
+
+const List<_NoteKind> _kNoteKinds = [
+  _NoteKind(
+      'seq',
+      2,
+      Icons.format_list_numbered,
+      'العدد مش مطابق لتسلسل الإيصالات',
+      'Count does not match the receipt sequence',
+      'أرقام الإيصالات (RRN) متتالية، فالعدد المتوقع هو من أول رقم لآخر رقم. العدد اللي اتعدّ مختلف عنه، يعني غالباً فيه إيصال ناقص في الملف أو التطبيق ما قراش إيصال.',
+      'Receipt numbers (RRN) are consecutive, so the expected count is first-to-last number. The counted number differs, so a receipt is probably missing from the file or was not read.',
+      'افتح الملف وراجع الأرقام اللي مش لاقيها (مكتوبة تحت)، وسجّل العدد الصح في خانة "الصح" لو اتأكدت.',
+      'Open the file and check the missing numbers listed below, then enter the right count in the "Correct" field if you are sure.'),
+  _NoteKind(
+      'otherday',
+      2,
+      Icons.event_busy,
+      'فيه إيصالات من يوم تاني',
+      'Receipts from another day',
+      'تاريخ بعض الإيصالات مختلف عن يوم باقي الملف، فممكن تكون اتضافت بالغلط أو الملف فيه أكتر من يوم.',
+      'Some receipts have a different date from the rest of the file; they may have been added by mistake or the file spans more than one day.',
+      'راجع التواريخ المذكورة، ولو الملف مش بتاع اليوم علّمه غلط ✗.',
+      'Check the dates listed; if the file is not for this day, mark it wrong ✗.'),
+  _NoteKind(
+      'machconf',
+      2,
+      Icons.compare_arrows,
+      'تعارض في رقم الماكينة',
+      'Machine mismatch',
+      'اسم الملف اتحدد لماكينة، لكن الإيصالات جواه بتقول إنها ماكينة تانية.',
+      'The file was named for one machine, but the receipts inside belong to another machine.',
+      'استخدم "تحديد الماكينة" من القايمة واختار الماكينة الصح.',
+      'Use "Assign machine" from the menu and pick the right machine.'),
+  _NoteKind(
+      'readfail',
+      2,
+      Icons.error_outline,
+      'فشل في قراءة صفحات',
+      'Pages failed to read',
+      'التطبيق ما قدرش يقرا صفحة أو أكتر (أو اتقفل أثناء العد)، فالعدد ممكن يكون ناقص.',
+      'The app could not read one or more pages (or it closed during counting), so the count may be incomplete.',
+      'اضغط "إعادة العد" وبعدين "بدء العد". لو اتكرر راجع الملف بنفسك.',
+      'Tap "Recount" then "Start counting". If it repeats, check the file yourself.'),
+  _NoteKind(
+      'emptypages',
+      1,
+      Icons.insert_drive_file_outlined,
+      'صفحات من غير إيصالات',
+      'Pages without receipts',
+      'فيه صفحات في الملف التطبيق ما لقاش فيها أي إيصال (ممكن تكون صفحة فاضية أو صورة مش واضحة).',
+      'Some pages had no receipts detected (they may be blank or unclear).',
+      'افتح الصفحات المذكورة وتأكد إنها فعلاً فاضية.',
+      'Open the listed pages and make sure they are really empty.'),
+  _NoteKind(
+      'methoddiff',
+      1,
+      Icons.difference_outlined,
+      'تضارب بين طريقتين للعد',
+      'Two counting methods disagree',
+      'التطبيق بيعد بطريقتين للتأكد، وفي صفحات معينة النتيجة اختلفت.',
+      'The app counts with two methods to double-check, and on some pages the results differ.',
+      'راجع الصفحات المذكورة لو العدد مهم ليك.',
+      'Check the listed pages if the exact count matters.'),
+  _NoteKind(
+      'nonpay',
+      0,
+      Icons.info_outline,
+      'مستند إقفال أو ملخص',
+      'Closing or summary document',
+      'الملف فيه إيصال إقفال أو ملخص أو إعادة طباعة. التطبيق تجاهله ومش محسوب في العدد.',
+      'The file contains a closing, summary or reprint receipt. The app ignored it and it is not counted.',
+      'مفيش حاجة مطلوبة، ده طبيعي.',
+      'Nothing to do, this is normal.'),
+  _NoteKind(
+      'nofile',
+      2,
+      Icons.folder_off_outlined,
+      'الملف الأصلي مش موجود',
+      'Original file not found',
+      'الملف اتمسح أو اتنقل من مكانه، فالتطبيق مش قادر يعدّه.',
+      'The file was deleted or moved, so the app cannot count it.',
+      'رجّع الملف مكانه أو اعمل فحص من جديد.',
+      'Put the file back or scan again.'),
+  _NoteKind(
+      'datefail',
+      1,
+      Icons.calendar_month_outlined,
+      'التاريخ مش واضح',
+      'Date not clear',
+      'التطبيق ما قدرش يقرا تاريخ اليوم من الملف.',
+      'The app could not read the date from the file.',
+      'افتح الملف وتأكد من التاريخ بنفسك.',
+      'Open the file and check the date yourself.'),
+  _NoteKind(
+      'namefail',
+      2,
+      Icons.drive_file_rename_outline,
+      'فشلت التسمية',
+      'Naming failed',
+      'التطبيق ما قدرش يتعرف على الماكينة فمسمّاش الملف.',
+      'The app could not identify the machine so it did not rename the file.',
+      'استخدم "تحديد الماكينة" من القايمة.',
+      'Use "Assign machine" from the menu.'),
+  _NoteKind(
+      'idweak',
+      2,
+      Icons.help_outline,
+      'الماكينة مش مؤكدة',
+      'Machine not confirmed',
+      'رقم الماكينة (Terminal ID) ما اتقراش بوضوح، فالتطبيق خمّن الماكينة من بيانات تانية أو لقاها في أكتر من ملف.',
+      'The Terminal ID was not read clearly, so the app guessed the machine from other data or found it in more than one file.',
+      'اتأكد من الماكينة، ولو غلط استخدم "تحديد الماكينة".',
+      'Verify the machine; if wrong, use "Assign machine".'),
+  _NoteKind(
+      'other',
+      1,
+      Icons.report_problem_outlined,
+      'ملاحظة تانية',
+      'Other note',
+      'ملاحظة من التطبيق مش متصنفة.',
+      'An unclassified note from the app.',
+      'اقراها وقرر لو محتاجة مراجعة.',
+      'Read it and decide whether it needs review.'),
+];
+
+final List<List<Object>> _noteRules = [
+  [RegExp(r'^العدد \d+ بس التسلسل'), 'seq'],
+  [RegExp(r'مش تبع نفس اليوم'), 'otherday'],
+  [RegExp(r'العد لقى ماكينة'), 'machconf'],
+  [RegExp(r'صفحة فشلت قراءتها|فشل العد|العد وقف'), 'readfail'],
+  [RegExp(r'صفحات ما لقيتش فيها إيصالات'), 'emptypages'],
+  [RegExp(r'الطريقتين اختلفوا'), 'methoddiff'],
+  [RegExp(r'إقفال/ملخص'), 'nonpay'],
+  [RegExp(r'الملف الأصلي مش موجود'), 'nofile'],
+  [RegExp(r'مش قادر أعرف التاريخ'), 'datefail'],
+  [RegExp(r'فشل التسمية|فشل التعريف'), 'namefail'],
+  [RegExp(r'Terminal ID|مش واضح|مش قادر أعرف الماكينة|نفس ماكينة|اتعرفت كمان|الوحدة اتحددت'), 'idweak'],
+];
+
+_NoteKind _noteKindOf(String n) {
+  for (final r in _noteRules) {
+    if ((r[0] as RegExp).hasMatch(n)) {
+      return _kNoteKinds.firstWhere((k) => k.key == r[1]);
+    }
+  }
+  return _kNoteKinds.last;
+}
+
+class _MStats {
+  int? pages, full, partial, seqMin, seqMax, seqLen;
+}
+
+_MStats _statsOf(MResult r) {
+  final s = _MStats();
+  final d = r.detail;
+  int? g(RegExp re) {
+    final m = re.firstMatch(d);
+    return m == null ? null : int.tryParse(m.group(1)!);
+  }
+
+  s.pages = g(RegExp(r'(\d+)\s*صفحة'));
+  s.full = g(RegExp(r'RRN\s*(?:مقروء|كامل)\s*(\d+)'));
+  s.partial = g(RegExp(r'ناقص القراءة\s*(\d+)'));
+  final m = RegExp(r'التسلسل\s*(\d+)-(\d+)\s*\((\d+)\)').firstMatch(d);
+  if (m != null) {
+    s.seqMin = int.tryParse(m.group(1)!);
+    s.seqMax = int.tryParse(m.group(2)!);
+    s.seqLen = int.tryParse(m.group(3)!);
+  }
+  return s;
+}
+
+class _St {
+  final String ar, en;
+  final MaterialColor color;
+  const _St(this.ar, this.en, this.color);
+}
+
+_St _statusOf(MResult r) {
+  if (r.excluded) return const _St('مستبعد', 'Excluded', Colors.grey);
+  if (r.pending) return const _St('لسه ما اتعدّش', 'Not counted yet', Colors.blueGrey);
+  if (r.verdict > 0) return const _St('اتراجع: صح', 'Reviewed: OK', Colors.green);
+  if (r.ok) return const _St('سليم', 'OK', Colors.green);
+  return const _St('محتاج مراجعة', 'Needs review', Colors.orange);
+}
+
+// الباتش = العدد اللي مكتوب في خانة "الصح" (من إيصال الباتش)، والفعلي = العدد اللي التطبيق عدّه
+int? _batchOf(MResult r) => int.tryParse(r.ctl.text.trim());
+
+int? _batchDiff(MResult r) {
+  final b = _batchOf(r);
+  if (b == null || r.pending || r.excluded) return null;
+  return b - r.count;
+}
+
+String _diffText(BuildContext c, int d) => d == 0
+    ? _l(c, 'مطابق ✓', 'Match ✓')
+    : (d > 0 ? _l(c, 'ناقص $d', 'Missing $d') : _l(c, 'زيادة ${-d}', 'Extra ${-d}'));
+
+MaterialColor _diffColor(int d) => d == 0 ? Colors.green : (d > 0 ? Colors.red : Colors.orange);
+
+String _mSummary(BuildContext c, MResult r) {
+  if (r.excluded) return _l(c, 'مستبعد (علامة غلط)', 'Excluded (marked wrong)');
+  if (r.pending) return _l(c, 'لسه ما اتعدّش (اضغط بدء العد)', 'Not counted yet (tap Start counting)');
+  final b = StringBuffer('${_l(c, 'عدد المعاملات', 'Transactions')}: ${r.count}');
+  final bt = _batchOf(r);
+  final d = _batchDiff(r);
+  if (bt != null && d != null) {
+    b.write('\n${_l(c, 'الباتش', 'Batch')}: $bt • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • ${_diffText(c, d)}');
+  }
+  return b.toString();
+}
+
+Widget _statusChip(BuildContext c, _St st) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      decoration: BoxDecoration(
+        color: _tintBg(c, st.color),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: _tintBorder(c, st.color)),
+      ),
+      child: w.Text(_l(c, st.ar, st.en),
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: _tintFg(c, st.color))),
+    );
+
+class ReceiptReportPage extends StatefulWidget {
+  final MResult r;
+  final bool canEdit;
+  final VoidCallback onChanged;
+  final VoidCallback onOpenPdf;
+  final VoidCallback onRecount;
+  final void Function(int) onVerdict;
+  const ReceiptReportPage({
+    super.key,
+    required this.r,
+    required this.canEdit,
+    required this.onChanged,
+    required this.onOpenPdf,
+    required this.onRecount,
+    required this.onVerdict,
+  });
+
+  @override
+  State<ReceiptReportPage> createState() => _ReceiptReportPageState();
+}
+
+class _ReceiptReportPageState extends State<ReceiptReportPage> {
+  @override
+  Widget build(BuildContext context) {
+    AppSettings.of(context);
+    final r = widget.r;
+    final cs = Theme.of(context).colorScheme;
+    final st = _statusOf(r);
+    final stats = _statsOf(r);
+    final bd = _batchDiff(r);
+    final bt = _batchOf(r);
+    final can = widget.canEdit;
+    final groups = <String, List<String>>{};
+    for (final n in r.notes) {
+      groups.putIfAbsent(_noteKindOf(n).key, () => <String>[]).add(n);
+    }
+    final kinds = groups.keys.map((k) => _kNoteKinds.firstWhere((e) => e.key == k)).toList()
+      ..sort((a, b) => b.sev.compareTo(a.sev));
+
+    Widget section(String t, List<Widget> kids) => Card(
+          margin: const EdgeInsets.only(bottom: 8),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                w.Text(t, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                const SizedBox(height: 8),
+                ...kids,
+              ],
+            ),
+          ),
+        );
+    Widget kv(String k, String v, {Color? color}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            children: [
+              Expanded(child: w.Text(k, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant))),
+              w.Text(v, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: color)),
+            ],
+          ),
+        );
+    String pad6(int? n) => (n ?? 0).toString().padLeft(6, '0');
+
+    final numbers = <Widget>[
+      kv(_l(context, 'عدد المعاملات المعدودة', 'Counted transactions'), r.pending ? '—' : '${r.count}'),
+      if (stats.pages != null) kv(_l(context, 'عدد الصفحات', 'Pages'), '${stats.pages}'),
+      if (stats.full != null) kv(_l(context, 'إيصالات مقروءة كاملة', 'Fully read receipts'), '${stats.full}'),
+      if (stats.partial != null)
+        kv(_l(context, 'إيصالات ناقصة القراءة', 'Partially read receipts'), '${stats.partial}',
+            color: stats.partial! > 0 ? Colors.orange : null),
+      if (stats.seqMin != null)
+        kv(_l(context, 'تسلسل الإيصالات', 'Receipt sequence'), '${pad6(stats.seqMin)} → ${pad6(stats.seqMax)}'),
+      if (stats.seqLen != null)
+        kv(_l(context, 'العدد المتوقع من التسلسل', 'Expected from sequence'), '${stats.seqLen}'),
+      if (stats.seqLen != null && !r.pending)
+        kv(
+            _l(context, 'الفرق عن التسلسل', 'Difference from sequence'),
+            r.count == stats.seqLen ? _l(context, 'مطابق ✓', 'Match ✓') : '${r.count - stats.seqLen!}',
+            color: r.count == stats.seqLen ? Colors.green : Colors.orange),
+    ];
+
+    return Scaffold(
+      appBar: AppBar(title: w.Text(_l(context, 'تقرير الإيصال', 'Receipt report'))),
+      body: ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
+          Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(r.newName ?? '؟ ${r.pdfName}',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      ),
+                      const SizedBox(width: 8),
+                      _statusChip(context, st),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  w.Text('${_l(context, 'الملف الأصلي', 'Original file')}: ${r.pdfName}',
+                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                ],
+              ),
+            ),
+          ),
+          section(_l(context, 'الأرقام', 'Numbers'), [
+            ...numbers,
+            if (r.detail.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(r.detail, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+              ),
+          ]),
+          section(_l(context, 'ربط الباتش', 'Batch link'), [
+            TextField(
+              controller: r.ctl,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                isDense: true,
+                labelText: _l(context, 'عدد معاملات الباتش (من إيصال التقفيل)',
+                    'Batch transaction count (from the closing receipt)'),
+              ),
+              onChanged: (_) {
+                widget.onChanged();
+                setState(() {});
+              },
+            ),
+            const SizedBox(height: 8),
+            if (bd == null || bt == null)
+              w.Text(
+                  _l(context, 'اكتب عدد معاملات الباتش هنا علشان نقارنه بالعدد الفعلي.',
+                      'Enter the batch transaction count here to compare it with the actual count.'),
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
+            else
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _tintBg(context, _diffColor(bd), soft: true),
+                  border: Border.all(color: _tintBorder(context, _diffColor(bd))),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  children: [
+                    kv(_l(context, 'الباتش', 'Batch'), '$bt'),
+                    kv(_l(context, 'الفعلي', 'Actual'), '${r.count}'),
+                    kv(_l(context, 'الفرق', 'Difference'), _diffText(context, bd),
+                        color: _tintFg(context, _diffColor(bd))),
+                  ],
+                ),
+              ),
+          ]),
+          section(_l(context, 'الملاحظات', 'Notes'), [
+            if (kinds.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _tintBg(context, Colors.green, soft: true),
+                  border: Border.all(color: _tintBorder(context, Colors.green)),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: w.Text(_l(context, 'مفيش ملاحظات ✓', 'No notes ✓'),
+                    style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, Colors.green))),
+              ),
+            for (final k in kinds)
+              Builder(builder: (context) {
+                final MaterialColor col = k.sev == 2 ? Colors.red : (k.sev == 1 ? Colors.orange : Colors.blue);
+                final sevLabel = k.sev == 2
+                    ? _l(context, 'لازم تراجع', 'Must review')
+                    : (k.sev == 1 ? _l(context, 'انتبه', 'Heads up') : _l(context, 'معلومة', 'Info'));
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: _tintBg(context, col, soft: true),
+                    border: Border.all(color: _tintBorder(context, col)),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(k.icon, size: 20, color: _tintFg(context, col)),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: w.Text(_l(context, k.titleAr, k.titleEn),
+                                style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, col))),
+                          ),
+                          w.Text(sevLabel, style: TextStyle(fontSize: 11, color: _tintFg(context, col))),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      w.Text(_l(context, k.whyAr, k.whyEn), style: const TextStyle(fontSize: 13)),
+                      const SizedBox(height: 6),
+                      for (final n in groups[k.key]!)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 2),
+                          child: Text('• $n', style: const TextStyle(fontSize: 12)),
+                        ),
+                      const SizedBox(height: 6),
+                      w.Text('${_l(context, 'تعمل إيه؟', 'What to do')}: ${_l(context, k.fixAr, k.fixEn)}',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                );
+              }),
+          ]),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _mini(Icons.picture_as_pdf, _l(context, 'فتح الملف', 'Open file'), widget.onOpenPdf, filled: true),
+              _mini(Icons.check, _l(context, 'صح ✓', 'OK ✓'), !can
+                  ? null
+                  : () {
+                      widget.onVerdict(1);
+                      setState(() {});
+                    }),
+              _mini(Icons.close, _l(context, 'غلط ✗', 'Wrong ✗'), !can
+                  ? null
+                  : () {
+                      widget.onVerdict(-1);
+                      setState(() {});
+                    }),
+              if (r.verdict != 0)
+                _mini(Icons.undo, _l(context, 'إلغاء العلامة', 'Clear mark'), !can
+                    ? null
+                    : () {
+                        widget.onVerdict(0);
+                        setState(() {});
+                      }),
+              _mini(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can
+                  ? null
+                  : () {
+                      widget.onRecount();
+                      setState(() {});
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".',
+                              'Marked for counting. Go back and tap "Start counting".'))));
+                    }),
+            ],
+          ),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+}
+
+class MachinesReportPage extends StatefulWidget {
+  final List<MResult> results;
+  final List<String> missing;
+  final Future<void> Function(MResult) openReport;
+  const MachinesReportPage({
+    super.key,
+    required this.results,
+    required this.missing,
+    required this.openReport,
+  });
+
+  @override
+  State<MachinesReportPage> createState() => _MachinesReportPageState();
+}
+
+class _MachinesReportPageState extends State<MachinesReportPage> {
+  int filter = 0; // 0 الكل، 1 مراجعة، 2 فروق الباتش
+
+  @override
+  Widget build(BuildContext context) {
+    AppSettings.of(context);
+    final cs = Theme.of(context).colorScheme;
+    final all = widget.results;
+    final counted = all.where((r) => !r.excluded && !r.pending).toList();
+    final totalTx = counted.fold<int>(0, (a, r) => a + r.count);
+    final reviewN = all.where((r) => !r.ok).length;
+    final excl = all.where((r) => r.excluded).length;
+    final pend = all.where((r) => r.pending).length;
+    final linked = counted.where((r) => _batchOf(r) != null).toList();
+    final matched = linked.where((r) => _batchDiff(r) == 0).length;
+    final diffs = linked.length - matched;
+    final batchSum = linked.fold<int>(0, (a, r) => a + _batchOf(r)!);
+    final actualSum = linked.fold<int>(0, (a, r) => a + r.count);
+    final shown = all
+        .where((r) => filter == 0 || (filter == 1 && !r.ok) || (filter == 2 && (_batchDiff(r) ?? 0) != 0))
+        .toList();
+
+    Widget stat(String label, String value, MaterialColor c) => Container(
+          width: 108,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          decoration: BoxDecoration(
+            color: _tintBg(context, c, soft: true),
+            border: Border.all(color: _tintBorder(context, c)),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Column(
+            children: [
+              w.Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: _tintFg(context, c))),
+              const SizedBox(height: 2),
+              w.Text(label,
+                  textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: _tintFg(context, c))),
+            ],
+          ),
+        );
+    Widget kv(String k, String v, {Color? color}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            children: [
+              Expanded(child: w.Text(k, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant))),
+              w.Text(v, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: color)),
+            ],
+          ),
+        );
+
+    return Scaffold(
+      appBar: AppBar(title: w.Text(_l(context, 'تقرير إيصالات الدفع', 'Payment receipts report'))),
+      body: ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              stat(_l(context, 'إجمالي المعاملات', 'Total transactions'), '$totalTx', Colors.blue),
+              stat(_l(context, 'ملفات', 'Files'), '${all.length}', Colors.blueGrey),
+              stat(_l(context, 'اتعدّت', 'Counted'), '${counted.length}', Colors.green),
+              stat(_l(context, 'محتاج مراجعة', 'Need review'), '$reviewN', reviewN > 0 ? Colors.orange : Colors.green),
+              stat(_l(context, 'مستبعد', 'Excluded'), '$excl', Colors.grey),
+              stat(_l(context, 'لسه ما اتعدّتش', 'Not counted'), '$pend', pend > 0 ? Colors.amber : Colors.green),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Card(
+            margin: EdgeInsets.zero,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  w.Text(_l(context, 'ربط الباتش', 'Batch link'),
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                  const SizedBox(height: 6),
+                  if (linked.isEmpty)
+                    w.Text(
+                        _l(context, 'اكتب عدد معاملات الباتش في خانة "الصح" لكل ماكينة (أو من تقرير الإيصال) وهيظهر الربط هنا.',
+                            'Enter the batch transaction count in the "Correct" field of each machine (or in the receipt report) and the link will show here.'),
+                        style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
+                  else ...[
+                    kv(_l(context, 'ماكينات مربوطة', 'Linked machines'), '${linked.length} / ${counted.length}'),
+                    kv(_l(context, 'مطابقة', 'Matching'), '$matched', color: Colors.green),
+                    kv(_l(context, 'فيها فرق', 'With a difference'), '$diffs',
+                        color: diffs > 0 ? Colors.red : Colors.green),
+                    kv(_l(context, 'إجمالي الباتشات', 'Batch total'), '$batchSum'),
+                    kv(_l(context, 'إجمالي الفعلي', 'Actual total'), '$actualSum'),
+                    kv(_l(context, 'صافي الفرق', 'Net difference'), _diffText(context, batchSum - actualSum),
+                        color: _tintFg(context, _diffColor(batchSum - actualSum))),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          if (widget.missing.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _tintBg(context, Colors.amber),
+                border: Border.all(color: _tintBorder(context, Colors.amber)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: w.Text(
+                  '⚠️ ${_l(context, 'ماكينات ما وصلش ملفها', 'Machines with no file')} (${widget.missing.length}): ${widget.missing.join(' ، ')}',
+                  style: const TextStyle(fontSize: 13)),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            children: [
+              for (final o in [
+                [0, _l(context, 'الكل', 'All')],
+                [1, _l(context, 'مراجعة ($reviewN)', 'Review ($reviewN)')],
+                [2, _l(context, 'فروق الباتش ($diffs)', 'Batch differences ($diffs)')],
+              ])
+                ChoiceChip(
+                  label: w.Text(o[1] as String, style: const TextStyle(fontSize: 13)),
+                  visualDensity: VisualDensity.compact,
+                  selected: filter == o[0],
+                  onSelected: (_) => setState(() => filter = o[0] as int),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          for (final r in shown)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 2),
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                onTap: () async {
+                  await widget.openReport(r);
+                  if (mounted) setState(() {});
+                },
+                title: Text(r.newName ?? '؟ ${r.pdfName}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: w.Text(_mSummary(context, r)),
+                trailing: _statusChip(context, _statusOf(r)),
+              ),
+            ),
+          if (shown.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Center(child: w.Text(_l(context, 'مفيش ملفات في الفلتر ده.', 'No files in this filter.'))),
+            ),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+}
+
 class MachinesPage extends StatefulWidget {
   const MachinesPage({super.key});
 
@@ -6094,6 +6752,40 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     return out;
   }
 
+  Future<void> openReport(MResult r) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ReceiptReportPage(
+          r: r,
+          canEdit: !busy,
+          onChanged: () {
+            saveMState(results);
+            if (mounted) setState(() {});
+          },
+          onOpenPdf: () => openPdf(r.openPath),
+          onRecount: () => recount(r),
+          onVerdict: (v) => setVerdict(r, v, toggle: false),
+        ),
+      ),
+    );
+    if (mounted) setState(() {});
+  }
+
+  Future<void> openOverview() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MachinesReportPage(
+          results: results,
+          missing: missingMachines(),
+          openReport: openReport,
+        ),
+      ),
+    );
+    if (mounted) setState(() {});
+  }
+
   Future<void> shareLog() async {
     final f = File('$baseDir/id_debug.txt');
     if (!f.existsSync()) {
@@ -6238,6 +6930,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               _mini(Icons.chat, 'إرسال الكل ($named)',
                   (busy && !namingDone) || named == 0 ? null : shareAll,
                   filled: true),
+              _mini(Icons.insights, _l(context, 'التقرير', 'Report'), results.isEmpty ? null : openOverview,
+                  filled: true),
               if (reviewOnly && reviewN > 0)
                 _mini(Icons.done_all, 'الباقي صح ($reviewN)', busy ? null : markRestOk),
             ],
@@ -6292,14 +6986,15 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                           : (match ? _tintBg(context, Colors.green) : _tintBg(context, Colors.red))),
                   child: ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                    onTap: () => openPdf(r.openPath),
+                    onTap: () => openReport(r),
                     title: Text(r.newName ?? '؟ ${r.pdfName}',
                         style: TextStyle(
                             fontWeight: FontWeight.bold,
                             decoration: r.excluded ? TextDecoration.lineThrough : null)),
-                    subtitle: Text('${r.verdict > 0 ? '✓ اتراجع: صح\n' : ''}الأصل: ${r.pdfName}\n'
-                        '${r.excluded ? 'مستبعد (علامة غلط)' : r.pending ? (busy ? 'عدد إيصالات الدفع: بيتعدّ...' : 'عدد إيصالات الدفع: لسه ما اتعدّش (اضغط بدء العد)') : 'عدد إيصالات الدفع: ${r.count}  (${r.detail})'}'
-                        '${r.notes.isEmpty ? '' : '\n⚠️ ${r.notes.join('\n⚠️ ')}'}'),
+                    subtitle: w.Text(
+                        '${r.verdict > 0 ? _l(context, '✓ اتراجع: صح\n', '✓ Reviewed: OK\n') : ''}'
+                        '${r.pending && busy ? _l(context, 'بيتعدّ...', 'Counting...') : _mSummary(context, r)}'
+                        '${r.notes.isEmpty ? '' : '\n${_l(context, '⚠️ ${r.notes.length} ملاحظة - اضغط لفتح التقرير', '⚠️ ${r.notes.length} note(s) - tap to open the report')}'}'),
                     trailing: SizedBox(
                       width: 118,
                       child: Row(
@@ -6333,7 +7028,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                             tooltip: tr('المزيد'),
                             padding: EdgeInsets.zero,
                             onSelected: (v) {
-                              if (v == 'share') {
+                              if (v == 'report') {
+                                openReport(r);
+                              } else if (v == 'open') {
+                                openPdf(r.openPath);
+                              } else if (v == 'share') {
                                 shareOne(r);
                               } else if (v == 'recount') {
                                 recount(r);
@@ -6344,6 +7043,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                               }
                             },
                             itemBuilder: (_) => [
+                              PopupMenuItem(
+                                  value: 'report',
+                                  child: w.Text(_l(context, 'تقرير الإيصال', 'Receipt report'))),
+                              PopupMenuItem(
+                                  value: 'open',
+                                  child: w.Text(_l(context, 'فتح الملف', 'Open file'))),
                               PopupMenuItem(
                                   value: 'share',
                                   enabled: r.newName != null && !r.excluded,
