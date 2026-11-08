@@ -5,7 +5,8 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/widgets.dart' as w show Text;
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
@@ -14,9 +15,11 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await appSettings.load();
   FlutterError.onError = (d) {
     _dbg('FLUTTER_ERROR ${d.exceptionAsString()}');
     FlutterError.presentError(d);
@@ -122,6 +125,34 @@ Widget _periodRow(int days, bool busy, void Function(int) onPick) => Row(
       ],
     );
 
+Widget _filterRow(bool reviewOnly, int all, int review, void Function(bool) onPick) => Row(
+      children: [
+        const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Wrap(
+            spacing: 6,
+            children: [
+              ChoiceChip(
+                label: Text('الكل ($all)', style: const TextStyle(fontSize: 13)),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                selected: !reviewOnly,
+                onSelected: (_) => onPick(false),
+              ),
+              ChoiceChip(
+                label: Text('مراجعة ($review)', style: const TextStyle(fontSize: 13)),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                selected: reviewOnly,
+                onSelected: (_) => onPick(true),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+
 Widget _pathRow(IconData icon, String label, String path, VoidCallback? onPick,
     {VoidCallback? onReset}) {
   final bs = TextButton.styleFrom(
@@ -141,7 +172,10 @@ Widget _pathRow(IconData icon, String label, String path, VoidCallback? onPick,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+              Builder(
+                builder: (c) => Text(label,
+                    style: TextStyle(fontSize: 11, color: Theme.of(c).colorScheme.onSurfaceVariant)),
+              ),
               Text(path,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -173,10 +207,15 @@ Widget _switchRow(String label, bool v, void Function(bool)? onChanged) => Switc
       onChanged: onChanged,
     );
 
-Widget _statusBox(String text) => Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
-      child: Text(text, style: const TextStyle(fontSize: 13)),
+Widget _statusBox(String text) => Builder(
+      builder: (c) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: Theme.of(c).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(text, style: const TextStyle(fontSize: 13)),
+      ),
     );
 
 Widget _bottomBar(Widget button, {bool busy = false, double? progress}) => Material(
@@ -205,16 +244,35 @@ class PosApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'A2R POS',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
-      builder: (context, child) =>
-          Directionality(textDirection: TextDirection.rtl, child: child!),
-      home: const RootPage(),
+    return ListenableBuilder(
+      listenable: appSettings,
+      builder: (context, _) => MaterialApp(
+        title: kAppName,
+        debugShowCheckedModeBanner: false,
+        theme: _buildTheme(Brightness.light),
+        darkTheme: _buildTheme(Brightness.dark),
+        themeMode: appSettings.themeMode,
+        builder: (context, child) => _LangScope(
+          notifier: appSettings,
+          child: Directionality(
+            textDirection: appSettings.isAr ? TextDirection.rtl : TextDirection.ltr,
+            child: child!,
+          ),
+        ),
+        home: const RootPage(),
+      ),
     );
   }
 }
+
+Widget _badged(ValueNotifier<int> n, IconData icon) => ValueListenableBuilder<int>(
+      valueListenable: n,
+      builder: (_, v, __) => Badge(
+        isLabelVisible: v > 0,
+        label: w.Text('$v'),
+        child: Icon(icon),
+      ),
+    );
 
 class RootPage extends StatefulWidget {
   const RootPage({super.key});
@@ -228,16 +286,702 @@ class _RootPageState extends State<RootPage> {
 
   @override
   Widget build(BuildContext context) {
+    AppSettings.of(context);
     return Scaffold(
       body: IndexedStack(index: tab, children: const [HomePage(), MachinesPage()]),
       bottomNavigationBar: NavigationBar(
         height: 60,
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.receipt_long), label: 'التقفيل'),
-          NavigationDestination(icon: Icon(Icons.folder_copy), label: 'إيصالات الدفع'),
+        destinations: [
+          NavigationDestination(
+            icon: _badged(homeBadge, Icons.receipt_long),
+            label: tr('التقفيل'),
+          ),
+          NavigationDestination(
+            icon: _badged(machBadge, Icons.folder_copy),
+            label: tr('إيصالات الدفع'),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+const String kAppName = 'A2R POS';
+const String kAppAuthor = 'Ahmed Ramadan - Alexandria';
+
+// ───────────────────── الإعدادات: اللغة + الدارك مود ─────────────────────
+class AppSettings extends ChangeNotifier with WidgetsBindingObserver {
+  ThemeMode themeMode = ThemeMode.system; // system = حسب النظام
+  String? langCode; // null = حسب لغة النظام
+  int seedIndex = kDefaultSeed;
+  SharedPreferences? _prefs;
+
+  bool get isAr {
+    final code = langCode ?? WidgetsBinding.instance.platformDispatcher.locale.languageCode;
+    return code == 'ar';
+  }
+
+  Future<void> load() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      _prefs = p;
+      final t = p.getString('theme_mode');
+      themeMode = t == 'dark' ? ThemeMode.dark : (t == 'light' ? ThemeMode.light : ThemeMode.system);
+      final l = p.getString('lang');
+      langCode = (l == 'ar' || l == 'en') ? l : null;
+      final sd = p.getInt('seed') ?? kDefaultSeed;
+      seedIndex = (sd >= 0 && sd < kSeeds.length) ? sd : kDefaultSeed;
+    } catch (_) {}
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeLocales(List<Locale>? locales) {
+    if (langCode == null) notifyListeners(); // بنتبع لغة النظام
+  }
+
+  void setLang(String? code) {
+    langCode = code;
+    try {
+      if (code == null) {
+        _prefs?.remove('lang');
+      } else {
+        _prefs?.setString('lang', code);
+      }
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  void setMode(ThemeMode m) {
+    themeMode = m;
+    try {
+      _prefs?.setString('theme_mode', m == ThemeMode.dark ? 'dark' : (m == ThemeMode.light ? 'light' : 'system'));
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  void setSeed(int i) {
+    seedIndex = i;
+    try {
+      _prefs?.setInt('seed', i);
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  void toggleLang() {
+    langCode = isAr ? 'en' : 'ar';
+    try {
+      _prefs?.setString('lang', langCode!);
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  void setDark(bool dark) {
+    themeMode = dark ? ThemeMode.dark : ThemeMode.light;
+    try {
+      _prefs?.setString('theme_mode', dark ? 'dark' : 'light');
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  // أي ويدجت بتنده عليها بتتسجّل وبتتحدّث لوحدها لما اللغة تتغير
+  static AppSettings of(BuildContext context) {
+    final s = context.dependOnInheritedWidgetOfExactType<_LangScope>();
+    return s?.notifier ?? appSettings;
+  }
+}
+
+final AppSettings appSettings = AppSettings();
+
+// لون هوية التطبيق (A2R): أزرق ملكي. بيتضاف في آخر القايمة علشان اللي اختار لون قبل كده يفضل لونه.
+const Color kBrandSeed = Color(0xFF2B59C3);
+const int kDefaultSeed = 6; // مكان kBrandSeed في kSeeds
+const List<Color> kSeeds = [Colors.teal, Colors.blue, Colors.indigo, Colors.green, Colors.orange, Colors.purple, kBrandSeed];
+const List<String> kSeedNamesAr = ['تيل', 'أزرق', 'نيلي', 'أخضر', 'برتقالي', 'بنفسجي', 'A2R (الهوية)'];
+const List<String> kSeedNamesEn = ['Teal', 'Blue', 'Indigo', 'Green', 'Orange', 'Purple', 'A2R (brand)'];
+
+// ───────── حالة مشتركة بين التابين ─────────
+final ValueNotifier<int> sharedDays = ValueNotifier<int>(0); // الفترة (اليوم/يومين/...) واحدة للتابين
+final ValueNotifier<int> homeBadge = ValueNotifier<int>(0); // عدد اللي محتاج مراجعة في التقفيل
+final ValueNotifier<int> machBadge = ValueNotifier<int>(0); // عدد اللي محتاج مراجعة في إيصالات الدفع
+
+void _syncBadge(ValueNotifier<int> n, int v) {
+  if (n.value == v) return;
+  WidgetsBinding.instance.addPostFrameCallback((_) => n.value = v);
+}
+
+Future<void> shareDebugLog(BuildContext context) async {
+  final m = ScaffoldMessenger.of(context);
+  final f = File('$baseDir/id_debug.txt');
+  if (!f.existsSync()) {
+    m.showSnackBar(const SnackBar(content: Text('مفيش لوج لسه. شغّل الفحص الأول.')));
+    return;
+  }
+  await Share.shareXFiles([XFile(f.path, mimeType: 'text/plain')], text: 'لوج التطبيق');
+}
+
+ThemeData _buildTheme(Brightness b) {
+  final cs = ColorScheme.fromSeed(seedColor: kSeeds[appSettings.seedIndex], brightness: b);
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: cs,
+    appBarTheme: AppBarTheme(
+      backgroundColor: cs.surface,
+      foregroundColor: cs.onSurface,
+      surfaceTintColor: Colors.transparent,
+      scrolledUnderElevation: 1,
+    ),
+    cardTheme: CardThemeData(
+      elevation: 0,
+      color: cs.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: cs.outlineVariant),
+      ),
+    ),
+    navigationBarTheme: NavigationBarThemeData(
+      backgroundColor: cs.surfaceContainer,
+      indicatorColor: cs.secondaryContainer,
+      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+    ),
+  );
+}
+
+class _LangScope extends InheritedNotifier<AppSettings> {
+  const _LangScope({Key? key, required AppSettings notifier, required Widget child})
+      : super(key: key, notifier: notifier, child: child);
+}
+
+// ───────────────────── الترجمة (عربي ← إنجليزي) ─────────────────────
+// النصوص مكتوبة بالعربي في الكود، وبتتترجم وقت العرض لما اللغة تكون إنجليزي.
+// أي نص عربي مش موجود في القاموس بيفضل زي ما هو.
+class Text extends StatelessWidget {
+  const Text(
+    this.data, {
+    super.key,
+    this.style,
+    this.textAlign,
+    this.textDirection,
+    this.softWrap,
+    this.overflow,
+    this.maxLines,
+  });
+
+  final String data;
+  final TextStyle? style;
+  final TextAlign? textAlign;
+  final TextDirection? textDirection;
+  final bool? softWrap;
+  final TextOverflow? overflow;
+  final int? maxLines;
+
+  @override
+  Widget build(BuildContext context) {
+    AppSettings.of(context);
+    return w.Text(
+      tr(data),
+      style: style,
+      textAlign: textAlign,
+      textDirection: textDirection,
+      softWrap: softWrap,
+      overflow: overflow,
+      maxLines: maxLines,
+    );
+  }
+}
+
+const String _arL = '\u0621-\u063A\u0641-\u064A\u064B-\u0652\u0671-\u06D3\u0640';
+final RegExp _hasArabic = RegExp('[$_arL]');
+final Map<String, String> _trCache = {};
+late final List<RegExp> _ruleRes = [for (final r in _kEnRules) RegExp(r[0])];
+late final List<RegExp> _phraseRes = [
+  for (final p in _kEnPhrases) RegExp('(?<![$_arL])${RegExp.escape(p[0])}(?![$_arL])')
+];
+
+String tr(String s) {
+  if (s.isEmpty || appSettings.isAr || !_hasArabic.hasMatch(s)) return s;
+  final cached = _trCache[s];
+  if (cached != null) return cached;
+  final r = _translateEn(s);
+  if (_trCache.length > 3000) _trCache.clear();
+  _trCache[s] = r;
+  return r;
+}
+
+String _translateEn(String s) {
+  final ex = _kEnExact[s];
+  if (ex != null) return ex;
+  var out = s;
+  for (var i = 0; i < _ruleRes.length; i++) {
+    final rep = _kEnRules[i][1];
+    out = out.replaceAllMapped(_ruleRes[i], (m) {
+      var t = rep;
+      for (var g = 1; g <= m.groupCount; g++) {
+        t = t.replaceAll('{$g}', m.group(g) ?? '');
+      }
+      return t;
+    });
+  }
+  for (var i = 0; i < _phraseRes.length; i++) {
+    final en = _kEnPhrases[i][1];
+    out = out.replaceAllMapped(_phraseRes[i], (_) => en);
+  }
+  return out.replaceAll('،', ',').replaceAll('؟', '?');
+}
+
+const Map<String, String> _kEnExact = {
+  'اليوم': 'Today',
+  'الكل': 'All',
+  'تمام': 'OK',
+  'لا': 'No',
+  'إلغاء': 'Cancel',
+  'مسح': 'Delete',
+  'حفظ': 'Save',
+  'عرض': 'View',
+  'الصح': 'Correct',
+  'تغيير': 'Change',
+  'تجريبي': 'Dev',
+  'يومين': '2 days',
+  '؟': '?',
+  'صح ✓': 'Correct ✓',
+  'غلط ✗': 'Wrong ✗',
+  'المزيد': 'More',
+  'المصدر': 'Source',
+  'الإخراج': 'Output',
+  'واتساب': 'WhatsApp',
+  'إكسيل': 'Excel',
+  'تدوير': 'Rotate',
+  'السابق': 'Previous',
+  'التالي': 'Next',
+  'إيقاف': 'Stop',
+  'مراجعة': 'Review',
+  'ماكينة': 'Machine',
+  'الاسكندريه': 'Alexandria'
+};
+
+const List<List<String>> _kEnRules = [
+  [r'(\d+) من (\d+)', '{1} of {2}'],
+  [r'إيصال (\d+) بتاريخ', 'Receipt {1} dated'],
+  [r'ناقص (\d+) ماكينة', 'missing {1} machine(s)'],
+  [r'مراجعة (\d+) / (\d+)', 'Review {1} / {2}'],
+  [r'فاضل (\d+) لسه', '{1} remaining']
+];
+
+// مرتبة من الأطول للأقصر علشان العبارات الطويلة تتبدّل الأول
+const List<List<String>> _kEnPhrases = [
+  ['Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع', 'Terminal ID unclear; unit determined from Merchant ID/name inside the PDF, review'],
+  ['الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه', 'This file does not look like a machine receipt (weak Terminal ID reading), review it'],
+  ['الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ', 'Unit was determined by name/merchant only - verify the machine and tap Save'],
+  ['اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.', 'Tap "Run full processing" to collect the images and generate the Excel and PDF.'],
+  ['التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش', 'The app ignored this image because it looks like a payment receipt or a document, not a batch'],
+  ['اضغط "فحص وإعادة تسمية" لفحص إيصالات الدفع من مستندات واتساب.', 'Tap "Scan & rename" to scan payment receipts from WhatsApp documents.'],
+  ['مفيش صور (في الفترة المحددة) ولا ملفات PDF في المجلد المختار', 'No images (in the selected period) and no PDF files in the selected folder'],
+  ['العد وقف أكتر من مرة (التطبيق اتقفل). من ⋮ اختار إعادة العد', 'Counting stopped more than once (the app closed). From ⋮ choose Recount'],
+  ['مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن', 'Not counted in the total until you decide. Zoom in on the batch and compare'],
+  ['اتعمل لها PDF منفصل لكل يوم، ومش داخلة في إجماليات يوم', 'a separate PDF was created for each day, and they are not included in the totals of day'],
+  ['زوّم وشوف: لو باتش حقيقي ادخله وكمّل المبلغ والماكينة', 'Zoom in and check: if it is a real batch, enter it and fill in the amount and machine'],
+  ['الـ PDF اتعرّف على نفس ماكينة ملف تاني، اتسمّى ماكينة', 'The PDF was identified as the same machine as another file, named machine'],
+  ['وهتتمسح نتيجة الفحص. (ملفات واتساب الأصلية مش هتتمس)', 'The scan result will also be deleted. (Original WhatsApp files will not be touched)'],
+  ['ظهرت في صورة تانية بمبلغ مختلف - اتحسبت كباتش إضافي', 'appeared in another image with a different amount - counted as an extra batch'],
+  ['فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)', 'Contains a closing/summary/reprint receipt (ignored, not counted)'],
+  ['فولدر الإخراج ده عام، فهيتمسح بس ملفات التطبيق منه', 'this output folder is shared, so only the app files will be deleted from it'],
+  ['عدد إيصالات الدفع: لسه ما اتعدّش (اضغط بدء العد)', 'Payment receipts count: not counted yet (tap Start counting)'],
+  ['مش لاقي فولدر مستندات واتساب. اختار فولدر بإيدك', 'Could not find the WhatsApp documents folder. Pick a folder manually'],
+  ['اتجاهلته: شكله إيصال دفع/مستند مش باتش - راجعه', 'Ignored: looks like a payment receipt/document, not a batch - review it'],
+  ['ملف لسه ما اتعدّش، اضغط "فحص" وهيكمّل من مكانه', 'file(s) not counted yet, tap "Scan" and it will continue where it left off'],
+  ['يجب منح إذن الوصول إلى جميع الملفات للمتابعة', 'You must grant all-files access to continue'],
+  ['لا توجد صور في مجلد الواتساب بالفترة المحددة', 'No images in the WhatsApp folder for the selected period'],
+  ['تعذر العثور على مجلد صور الواتساب تلقائياً', 'Could not find the WhatsApp images folder automatically'],
+  ['مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل', 'Cannot read the amount or the unit - tap Edit'],
+  ['ممكن إيصالات ناقصة أو مش اتقرت، راجع الملف', 'possibly missing receipts or unread ones, check the file'],
+  ['ملف لسه ما اتعدّش. اضغط "بدء العد" لما تحب', 'file(s) not counted yet. Tap "Start counting" when you want'],
+  ['الماكينة/الوحدة اتحددت تلقائياً - اتأكد', 'Machine/unit was determined automatically - verify'],
+  ['مشكوك إنه مكرر - مش محسوب لحد ما تراجعه', 'Possible duplicate - not counted until reviewed'],
+  ['صورة، ولم يتم العثور على إيصالات مطابقة', 'image(s), and no matching receipts were found'],
+  ['صفحة فشلت قراءتها، العدد ممكن يكون ناقص', 'page(s) failed to read, the count may be incomplete'],
+  ['كل الملفات في الفترة دي اتفحصت قبل كده', 'All files in this period were already scanned'],
+  ['جاري توليد الملفات وتحديث الشيتات...', 'Generating files and updating sheets...'],
+  ['لازم تسمح بالوصول لكل الملفات الأول', 'You need to allow access to all files first'],
+  ['الملف مش موجود. شغّل المعالجة الأول', 'File not found. Run the processing first'],
+  ['مراجعة التكرار وترقيم الماكينات...', 'Checking duplicates and numbering machines...'],
+  ['الوحدة اتحددت بالاسم/الميرشانت فقط', 'Unit was determined by name/merchant only'],
+  ['اسحب أي ملف لتعليمه: صح ✓ أو غلط ✗', 'Swipe any file to mark it: correct ✓ or wrong ✗'],
+  ['مقدرتش أفتح الفولدر. المسار اتنسخ', 'Could not open the folder. Path copied'],
+  ['تقرير إيصالات الإسكندرية (الرسمي)', 'Alexandria receipts report (official)'],
+  ['لم يتم إنشاء ملفات بعد لمشاركتها', 'No files have been created yet to share'],
+  ['ولا مضاف للتطبيق)، فمتعملش إكسيل', 'nor added to the app), so no Excel was created'],
+  ['مفيش صور. بدوّر على ملف PDF اسمه', 'No images. Looking for a PDF file named'],
+  ['مش قادر أعرف الماكينة من الـ PDF', 'Cannot identify the machine from the PDF'],
+  ['ملفات المراجعة غير متاحة حالياً', 'Review files are not available right now'],
+  ['مشكوك إنه مكرر (نفس مبلغ ماكينة', 'Possible duplicate (same amount as machine'],
+  ['مش قادر أعرف التاريخ من الـ PDF', 'Cannot identify the date from the PDF'],
+  ['استبعدته قبل كده - تقدر ترجّعه', 'excluded earlier - you can restore it'],
+  ['المرشح التاني من قراءة الـ PDF', 'second candidate from reading the PDF'],
+  ['مفيش لوج لسه. شغّل الفحص الأول', 'No log yet. Run the scan first'],
+  ['جاري البحث عن مجلدات الصور...', 'Searching for image folders...'],
+  ['إعادة تسمية الصور وترتيبها...', 'Renaming and sorting images...'],
+  ['اضغط "بدء العد" لعدّ إيصالاته', 'Tap "Start counting" to count its receipts'],
+  ['صفحات الطريقتين اختلفوا فيها:', 'Pages where the two methods differ:'],
+  ['اتعلّم للعد. اضغط "بدء العد".', 'Marked for counting. Tap "Start counting".'],
+  ['مشكوك إنه مكرر: نفس الماكينة', 'Possible duplicate: same machine'],
+  ['اضغط "بدء العد" لعدّ إيصالات', 'Tap "Start counting" to count receipts of'],
+  ['صفحات ما لقيتش فيها إيصالات:', 'Pages with no receipts found:'],
+  ['العد: سريع ← الدقيق (القديم)', 'Counting: fast, then precise (old)'],
+  ['عدد إيصالات الدفع: بيتعدّ...', 'Payment receipts count: counting...'],
+  ['تم توليد ملف الـ PDF المجمع', 'Combined PDF file generated'],
+  ['رقم الماكينة اتحدد تلقائياً', 'Machine number was determined automatically'],
+  ['مش مكرر - احتسبه باتش إضافي', 'Not a duplicate - count it as an extra batch'],
+  ['إيصال (رقمه مش واضح) بتاريخ', 'Receipt (number unclear) dated'],
+  ['مفيش ملفات مسمّاة لمشاركتها', 'No named files to share'],
+  ['مفيش ملفات PDF في الفترة دي', 'No PDF files in this period'],
+  ['مش قادر أكتب في الفولدر ده', 'Cannot write to this folder'],
+  ['مفيش إيصالات محتاجة مراجعة', 'No receipts need review'],
+  ['صورة متجاهلة - محتاجة قرار', 'Ignored image - needs a decision'],
+  ['مفيش برنامج يفتح الملف ده', 'No app can open this file'],
+  ['فيه إيصالات بتواريخ تانية', 'There are receipts with other dates'],
+  ['فحص الصور المقلوبة (أبطأ)', 'Check rotated images (slower)'],
+  ['جاري فحص إيصالات الدفع...', 'Scanning payment receipts...'],
+  ['واتساب - مستندات (تلقائي)', 'WhatsApp - documents (auto)'],
+  ['تقرير إيصالات الإسكندرية', 'Alexandria receipts report'],
+  ['جاري تجهيز صفحات الـ PDF', 'Preparing PDF pages'],
+  ['الإيصال ده مستبعد (مكرر)', 'This receipt is excluded (duplicate)'],
+  ['مفيش برنامج يفتح الـ PDF', 'No app can open the PDF'],
+  ['مش قادر أفتح الفولدر ده', 'Cannot open this folder'],
+  ['انتهى فحص إيصالات الدفع', 'Payment receipts scan finished'],
+  ['جاري البحث عن ملفات PDF', 'Searching for PDF files'],
+  ['مش محسوب لحد ما تراجعه', 'not counted until you review it'],
+  ['إجمالي بعيد عن المعتاد', 'Total far from usual'],
+  ['القراءة التانية للمبلغ', 'The second amount reading'],
+  ['صورة من الصور المرتبة', 'image(s) from the sorted images'],
+  ['اختر الماكينة (1..19)', 'Select machine (1..19)'],
+  ['جاري فحص الإيصالات...', 'Scanning receipts...'],
+  ['ولا يوجد ملف PDF باسم', 'and there is no PDF file named'],
+  ['لو المبلغ صح اضغط حفظ', 'if the amount is correct, tap Save'],
+  ['ده إيصال أنهي ماكينة؟', 'Which machine is this receipt for?'],
+  ['الملف الأصلي مش موجود', 'Original file not found'],
+  ['ماكينات ما وصلش ملفها', 'Machines with no file received'],
+  ['تعديل بيانات الإيصال', 'Edit receipt data'],
+  ['راجعه من زر المراجعة', 'review it using the review button'],
+  ['المصدر: رجوع لواتساب', 'Source: back to WhatsApp'],
+  ['بدء المعالجة الشاملة', 'Run full processing'],
+  ['بينما أغلب الإيصالات', 'while most receipts are'],
+  ['افتح الفولدر بواسطة', 'Open folder with'],
+  ['المبلغ يحتاج مراجعة', 'Amount needs review'],
+  ['إيصال مكرر للماكينة', 'Duplicate receipt for machine'],
+  ['مقدرتش أدوّر الصورة', 'Could not rotate the image'],
+  ['اتأكد منه واضغط حفظ', 'verify it and tap Save'],
+  ['للمراجعة (مش معدود)', 'For review (not counted)'],
+  ['راجعها لو العدد مهم', 'check them if the count matters'],
+  ['العد: دقيق ← السريع', 'Counting: precise, then fast'],
+  ['متصفح ملفات النظام', 'System file browser'],
+  ['حفظ وتحديث الملفات', 'Save and update files'],
+  ['بقرأ صفحات ملف PDF', 'Reading pages of PDF file'],
+  ['راجع المبلغ يدوياً', 'check the amount manually'],
+  ['الإخراج: الافتراضي', 'Output: default'],
+  ['اختيار هذا الفولدر', 'Choose this folder'],
+  ['مستبعد (علامة غلط)', 'Excluded (marked wrong)'],
+  ['عدد إيصالات الدفع:', 'Payment receipts count:'],
+  ['إلغاء علامة صح/غلط', 'Clear correct/wrong mark'],
+  ['مش موجود في فولدر', 'not found in folder'],
+  ['الوحدة غير معروفة', 'Unknown unit'],
+  ['فتح فولدر الإخراج', 'Open output folder'],
+  ['التاريخ صح - سيبه', 'The date is correct - keep it'],
+  ['مش تبع نفس اليوم:', 'Not from the same day:'],
+  ['بس التسمية ماكينة', 'but the naming says machine'],
+  ['لوج إيصالات الدفع', 'Payment receipts log'],
+  ['ميناء الإسكندرية', 'Alexandria Port'],
+  ['الأيام اللي فاتت', 'previous days'],
+  ['تم توليد الإكسيل', 'Excel generated'],
+  ['ملاحظات للمراجعة', 'Notes for review'],
+  ['المبلغ غير مقروء', 'Amount unreadable'],
+  ['مش باتش - تجاهله', 'Not a batch - ignore it'],
+  ['القراءة التانية:', 'Second reading:'],
+  ['أرقام مش لاقيها:', 'Numbers not found:'],
+  ['ملف على إنهم صح؟', 'file(s) as correct?'],
+  ['ملف ونتيجة الفحص', 'file(s) and the scan result'],
+  ['اتأكد من المبلغ', 'check the amount'],
+  ['مفيش حاجة للمسح', 'Nothing to delete'],
+  ['المبلغ الإجمالي', 'Total amount'],
+  ['الإجمالي العام:', 'Grand total:'],
+  ['المصدر: ملف PDF', 'Source: PDF file'],
+  ['واتساب (تلقائي)', 'WhatsApp (auto)'],
+  ['وحدة غير معروفة', 'Unknown unit'],
+  ['ده باتش - ادخله', 'This is a batch - include it'],
+  ['اتعرفت كمان في:', 'also identified in:'],
+  ['العد لقى ماكينة', 'Counting found machine'],
+  ['الملف مش موجود', 'File not found'],
+  ['ملف من الإخراج', 'file(s) from the output'],
+  ['تقرير المراجعة', 'Review report'],
+  ['فشل ملء القالب', 'Failed to fill the template'],
+  ['ماكينات ناقصة:', 'Missing machines:'],
+  ['مشكوك إنه مكرر', 'possible duplicate'],
+  ['رجّعه (احتسبه)', 'Restore (count it)'],
+  ['اكتب مبلغ صحيح', 'Enter a valid amount'],
+  ['مكرر - استبعده', 'Duplicate - exclude it'],
+  ['اختار الماكينة', 'Select machine'],
+  ['اتسمّى، إجمالي', 'named, total'],
+  ['تحديد الماكينة', 'Set machine'],
+  ['إيصالات الدفع', 'Payment receipts'],
+  ['إجمالي ماكينة', 'Total of machine'],
+  ['بعيد عن متوسط', 'is far from the average of'],
+  ['مستبعد (مكرر)', 'Excluded (duplicate)'],
+  ['رقم الماكينة:', 'Machine number:'],
+  ['ماكينات ناقصة', 'Missing machines'],
+  ['تاريخ الإيصال', 'Receipt date'],
+  ['اتسمّى ماكينة', 'Named machine'],
+  ['ملف مسمّى من:', 'named file(s) from:'],
+  ['اتسمّى واتنسخ', 'named and copied'],
+  ['تعريف الملفات', 'Identifying files'],
+  ['عدّ الإيصالات', 'Counting receipts'],
+  ['مديرية الأمن', 'Security Directorate'],
+  ['قراءة تانية:', 'Second reading:'],
+  ['فشلت القراءة', 'read failed'],
+  ['نفس الماكينة', 'Same machine'],
+  ['مستند متجاهل', 'Ignored document'],
+  ['اختيار فولدر', 'Choose folder'],
+  ['فشل التسمية:', 'Naming failed:'],
+  ['تمت التسمية:', 'Naming done:'],
+  ['فشل التعريف:', 'Identification failed:'],
+  ['ناقص القراءة', 'partial read'],
+  ['لوج التقفيل', 'Closing log'],
+  ['تاريخ مختلف', 'Different date'],
+  ['انتهى الفحص', 'Scan finished'],
+  ['ونفس المبلغ', 'and the same amount'],
+  ['راجع الصورة', 'check the image'],
+  ['خليه بتاريخ', 'Set it to date'],
+  ['حفظ والتالي', 'Save & next'],
+  ['اتوقف. فاضل', 'Stopped. Remaining'],
+  ['اكتمل العد:', 'Counting complete:'],
+  ['إرسال الملف', 'Send file'],
+  ['تغيير اللغة', 'Change language'],
+  ['مصطفى كامل', 'Mostafa Kamel'],
+  ['الإسكندرية', 'Alexandria'],
+  ['ملء الشاشة', 'Full screen'],
+  ['بس التسلسل', 'but the sequence'],
+  ['آخر نتيجة:', 'Last result:'],
+  ['فحص وتسمية', 'Scan & name'],
+  ['إرسال الكل', 'Send all'],
+  ['اتراجع: صح', 'Reviewed: correct'],
+  ['إعادة العد', 'Recount'],
+  ['برج العرب', 'Borg El Arab'],
+  ['خدمات مصر', 'Misr Services'],
+  ['مختلفة عن', 'differs from'],
+  ['اتأكد منه', 'verify it'],
+  ['غير مقروء', 'unreadable'],
+  ['الباقي صح', 'The rest are correct'],
+  ['مسح الكل', 'Delete all'],
+  ['غير محدد', 'Unspecified'],
+  ['للمراجعة', 'for review'],
+  ['الماكينة', 'Machine'],
+  ['المقروء:', 'Read:'],
+  ['استخدمها', 'Use it'],
+  ['فشل العد', 'Counting failed'],
+  ['عدّ سريع', 'Quick count'],
+  ['بدء العد', 'Start counting'],
+  ['التقفيل', 'Closing'],
+  ['المنتزه', 'El Montaza'],
+  ['محرم بك', 'Moharram Bek'],
+  ['القباري', 'El Qabbary'],
+  ['ماكينات', 'Machines'],
+  ['والأغلب', 'while most are'],
+  ['المبلغ:', 'Amount:'],
+  ['الإصدار', 'Version'],
+  ['افتراضي', 'default'],
+  ['التسلسل', 'Sequence'],
+  ['الفترة', 'Period'],
+  ['العجمي', 'El Agamy'],
+  ['هتتمسح', 'Will delete'],
+  ['تم مسح', 'Deleted'],
+  ['ماكينة', 'Machine'],
+  ['اكتمل!', 'Done!'],
+  ['باتشات', 'batches'],
+  ['تاريخه', 'Date'],
+  ['مستبعد', 'Excluded'],
+  ['تم فحص', 'Scanned'],
+  ['بتاريخ', 'dated'],
+  ['هتعلّم', 'Mark'],
+  ['هيتمسح', 'Will delete'],
+  ['الأصل:', 'Original:'],
+  ['اتسمّى', 'named'],
+  ['مراجعة', 'Review'],
+  ['ملفات', 'files'],
+  ['إيصال', 'receipt(s)'],
+  ['صفحات', 'pages'],
+  ['العدد', 'Count'],
+  ['مقروء', 'read'],
+  ['أيام', 'days'],
+  ['أبيس', 'Abis'],
+  ['قالب', 'Template'],
+  ['باتش', 'batch'],
+  ['ناقص', 'missing'],
+  ['صفحة', 'page(s)'],
+  ['صورة', 'image(s)'],
+  ['فاضل', 'remaining'],
+  ['راجع', 'review'],
+  ['الكل', 'All'],
+  ['كامل', 'full'],
+  ['ملف', 'file(s)'],
+  ['ج.م', 'EGP'],
+  ['فحص', 'Scan'],
+  ['فيه', 'There are'],
+  ['لسه', 'yet'],
+  ['أو', 'or'],
+  ['و', 'and']
+];
+
+// ───────────────────── ألوان تتأقلم مع الدارك مود ─────────────────────
+bool _isDark(BuildContext c) => Theme.of(c).brightness == Brightness.dark;
+
+Color _tintBg(BuildContext c, MaterialColor m, {bool soft = false, bool strong = false}) {
+  if (_isDark(c)) return m.shade900.withAlpha(strong ? 210 : 140);
+  return strong ? m.shade300 : (soft ? m.shade50 : m.shade100);
+}
+
+Color _tintBorder(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade300 : m.shade800;
+Color _tintFg(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade200 : m.shade900;
+
+// ───────────────────── الهيدر: اسم التطبيق + زراير اللغة والدارك ─────────────────────
+class AppTitle extends StatelessWidget {
+  const AppTitle({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const w.Text(
+          kAppName,
+          textDirection: TextDirection.ltr,
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, height: 1.1),
+        ),
+        w.Text(
+          kAppAuthor,
+          textDirection: TextDirection.ltr,
+          style: TextStyle(fontSize: 10, height: 1.2, color: cs.onSurfaceVariant),
+        ),
+      ],
+    );
+  }
+}
+
+// على الشاشات العريضة: أيقونة منفصلة. على الصغيرة: بتتنقل لقايمة "المزيد" (بند "المظهر واللغة").
+class HeaderButtons extends StatelessWidget {
+  const HeaderButtons({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.sizeOf(context).width < 400) return const SizedBox.shrink();
+    final ar = AppSettings.of(context).isAr;
+    return IconButton(
+      tooltip: ar ? 'المظهر واللغة' : 'Theme & language',
+      icon: Icon(_isDark(context) ? Icons.dark_mode : Icons.palette_outlined),
+      onPressed: () => showAppearanceSheet(context),
+    );
+  }
+}
+
+void showAppearanceSheet(BuildContext context) {
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (_) => const _AppearanceSheet(),
+  );
+}
+
+class _AppearanceSheet extends StatelessWidget {
+  const _AppearanceSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppSettings.of(context);
+    final ar = s.isAr;
+    final cs = Theme.of(context).colorScheme;
+    Widget label(String t) => Padding(
+          padding: const EdgeInsets.fromLTRB(4, 14, 4, 8),
+          child: w.Text(t, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+        );
+    final order = [kDefaultSeed, for (var i = 0; i < kSeeds.length; i++) if (i != kDefaultSeed) i];
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            label(ar ? 'اللغة' : 'Language'),
+            SegmentedButton<String>(
+              showSelectedIcon: false,
+              segments: [
+                ButtonSegment<String>(value: 'sys', label: w.Text(ar ? 'تلقائي' : 'Auto')),
+                const ButtonSegment<String>(value: 'ar', label: w.Text('العربية')),
+                const ButtonSegment<String>(value: 'en', label: w.Text('English')),
+              ],
+              selected: {s.langCode ?? 'sys'},
+              onSelectionChanged: (v) => s.setLang(v.first == 'sys' ? null : v.first),
+            ),
+            label(ar ? 'المظهر' : 'Theme'),
+            SegmentedButton<ThemeMode>(
+              showSelectedIcon: false,
+              segments: [
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.system,
+                  icon: const Icon(Icons.brightness_auto, size: 18),
+                  label: w.Text(ar ? 'تلقائي' : 'Auto'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.light,
+                  icon: const Icon(Icons.light_mode, size: 18),
+                  label: w.Text(ar ? 'فاتح' : 'Light'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.dark,
+                  icon: const Icon(Icons.dark_mode, size: 18),
+                  label: w.Text(ar ? 'داكن' : 'Dark'),
+                ),
+              ],
+              selected: {s.themeMode},
+              onSelectionChanged: (v) => s.setMode(v.first),
+            ),
+            label(ar ? 'لون التطبيق' : 'Accent color'),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final i in order)
+                  Tooltip(
+                    message: ar ? kSeedNamesAr[i] : kSeedNamesEn[i],
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: () => s.setSeed(i),
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: kSeeds[i],
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: s.seedIndex == i ? cs.onSurface : Colors.transparent,
+                            width: 3,
+                          ),
+                        ),
+                        child: s.seedIndex == i
+                            ? const Icon(Icons.check, color: Colors.white, size: 20)
+                            : null,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2093,14 +2837,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final List<String> excludedPay = [];
   bool autoRotate = false; // أبطأ: بيجرّب تدوير كل صورة مش إيصال
   String sourceNote = '';
+  bool reviewOnly = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    days = sharedDays.value;
+    sharedDays.addListener(_syncDays);
     customDir = loadFolder();
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
+  }
+
+  void _syncDays() {
+    if (!mounted || busy || days == sharedDays.value) return;
+    setState(() => days = sharedDays.value);
   }
 
   @override
@@ -2110,6 +2862,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    sharedDays.removeListener(_syncDays);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -2404,7 +3157,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 TextField(
                   controller: amtController,
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(labelText: 'المبلغ الإجمالي'),
+                  decoration: InputDecoration(labelText: tr('المبلغ الإجمالي')),
                 ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<int>(
@@ -2674,7 +3427,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             '${missingTerminals.isNotEmpty ? ' - ناقص ${missingTerminals.length} ماكينة' : ''}'
             '${rv > 0 ? ' - $rv للمراجعة' : ''}';
         try {
-          await _chan.invokeMethod('notify', {'title': 'A2R POS - انتهى الفحص', 'text': txt});
+          await _chan.invokeMethod('notify', {'title': tr('A2R POS - انتهى الفحص'), 'text': tr(txt)});
         } catch (_) {}
       }
     }
@@ -3144,19 +3897,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    AppSettings.of(context);
     final xlsx = latestOutput('.xlsx');
     final pdf = latestOutput('.pdf');
     final reviewCount = processedItems.where((e) => e.needsReview).length;
+    _syncBadge(homeBadge, reviewCount);
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight: 44,
+        toolbarHeight: 54,
         titleSpacing: 12,
-        title: const Text('التقفيل', style: TextStyle(fontSize: 17)),
+        title: const AppTitle(),
         actions: [
+          const HeaderButtons(),
           PopupMenuButton<String>(
-            tooltip: 'المزيد',
+            tooltip: tr('المزيد'),
             onSelected: (v) {
-              if (v == 'folder') {
+              if (v == 'appearance') {
+                showAppearanceSheet(context);
+              } else if (v == 'log') {
+                shareDebugLog(context);
+              } else if (v == 'folder') {
                 openFolder(outputDir);
               } else if (v == 'src') {
                 useWhatsApp();
@@ -3167,11 +3927,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               }
             },
             itemBuilder: (_) => [
+              if (MediaQuery.sizeOf(context).width < 400)
+                PopupMenuItem(
+                    value: 'appearance',
+                    child: w.Text(AppSettings.of(context).isAr ? 'المظهر واللغة' : 'Theme & language')),
               const PopupMenuItem(value: 'folder', child: Text('فتح فولدر الإخراج')),
               if (customDir != null)
                 PopupMenuItem(value: 'src', enabled: !busy, child: const Text('المصدر: رجوع لواتساب')),
               if (customOut != null)
                 PopupMenuItem(value: 'out', enabled: !busy, child: const Text('الإخراج: الافتراضي')),
+              PopupMenuItem(
+                  value: 'log',
+                  child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
               PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
             ],
@@ -3191,7 +3958,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
           _settingsCard([
-            _periodRow(days, busy, (d) => setState(() => days = d)),
+            _periodRow(days, busy, (d) {
+              setState(() => days = d);
+              sharedDays.value = d;
+            }),
             const Divider(height: 10),
             _pathRow(Icons.folder_open, 'المصدر', customDir ?? 'واتساب (تلقائي)',
                 busy ? null : pickFolder,
@@ -3204,6 +3974,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ]),
           _statusBox(status),
           const SizedBox(height: 6),
+          if (processedItems.isNotEmpty) ...[
+            _filterRow(reviewOnly, processedItems.length, reviewCount, (v) => setState(() => reviewOnly = v)),
+            const SizedBox(height: 6),
+          ],
           Wrap(
             spacing: 6,
             runSpacing: 6,
@@ -3228,8 +4002,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Colors.amber.shade100,
-                border: Border.all(color: Colors.amber.shade800),
+                color: _tintBg(context, Colors.amber),
+                border: Border.all(color: _tintBorder(context, Colors.amber)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -3239,7 +4013,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     '⚠️ ماكينات ناقصة (${missingTerminals.length} من 19):',
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
-                      color: Colors.amber.shade900,
+                      color: _tintFg(context, Colors.amber),
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -3259,8 +4033,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               constraints: const BoxConstraints(maxHeight: 130),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                border: Border.all(color: Colors.orange.shade700),
+                color: _tintBg(context, Colors.orange, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.orange)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: SingleChildScrollView(
@@ -3269,7 +4043,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ],
           const SizedBox(height: 10),
-          for (final item in processedItems)
+          for (final item in processedItems.where((e) => !reviewOnly || e.needsReview))
             Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               child: ListTile(
@@ -3300,7 +4074,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   children: [
                     if (item.userExcluded)
                       IconButton(
-                        tooltip: 'رجّعه (احتسبه)',
+                        tooltip: tr('رجّعه (احتسبه)'),
                         icon: const Icon(Icons.undo, color: Colors.red),
                         onPressed: busy
                             ? null
@@ -3315,7 +4089,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               },
                       ),
                     if (item.needsReview)
-                      Icon(Icons.warning_amber, color: Colors.orange.shade800),
+                      Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange)),
                     IconButton(
                       icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
                       onPressed: busy ? null : () => editReceipt(item),
@@ -3655,6 +4429,7 @@ class _ReviewPageState extends State<ReviewPage> {
 
   @override
   Widget build(BuildContext context) {
+    AppSettings.of(context);
     final it = item;
     final image = Container(
       color: Colors.black12,
@@ -3667,7 +4442,7 @@ class _ReviewPageState extends State<ReviewPage> {
             top: 4,
             left: 4,
             child: IconButton.filledTonal(
-              tooltip: 'ملء الشاشة',
+              tooltip: tr('ملء الشاشة'),
               icon: const Icon(Icons.fullscreen),
               onPressed: () => Navigator.push(
                 context,
@@ -3694,8 +4469,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                border: Border.all(color: Colors.orange.shade700),
+                color: _tintBg(context, Colors.orange, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.orange)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -3706,7 +4481,7 @@ class _ReviewPageState extends State<ReviewPage> {
                         ? '🚫 الإيصال ده مستبعد (مكرر).'
                         : '⚠️ مشكوك إنه مكرر: نفس الماكينة ${it.orderNum ?? ''} ونفس المبلغ. '
                             'مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن.',
-                    style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -3738,8 +4513,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                border: Border.all(color: Colors.orange.shade700),
+                color: _tintBg(context, Colors.orange, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.orange)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -3748,7 +4523,7 @@ class _ReviewPageState extends State<ReviewPage> {
                   Text(
                     '📄 التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش. '
                     'زوّم وشوف: لو باتش حقيقي ادخله وكمّل المبلغ والماكينة.',
-                    style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -3778,8 +4553,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                border: Border.all(color: Colors.orange.shade700),
+                color: _tintBg(context, Colors.orange, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.orange)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -3787,7 +4562,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 children: [
                   Text(
                     '📅 تاريخ الإيصال ${it.date} بينما أغلب الإيصالات ${it.dateMain}.',
-                    style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -3819,14 +4594,14 @@ class _ReviewPageState extends State<ReviewPage> {
                 it.how == 'auto-number' || it.how == 'conflict'
                     ? '❓ رقم الماكينة اتحدد تلقائياً (${it.orderNum}) - اتأكد منه واضغط حفظ.'
                     : '❓ الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ.',
-                style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+                style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
               ),
             ),
           if (it.unusual != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text('⚠️ ${it.unusual}  (لو المبلغ صح اضغط حفظ)',
-                  style: TextStyle(color: Colors.orange.shade900, fontSize: 13)),
+                  style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13)),
             ),
           Text(
             'المقروء: ${it.amount > 0 ? it.amount.toStringAsFixed(2) : 'غير مقروء'} ج.م'
@@ -3840,7 +4615,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 children: [
                   Expanded(
                     child: Text('⚠️ القراءة التانية: ${it.alt!.toStringAsFixed(2)}',
-                        style: TextStyle(color: Colors.orange.shade900)),
+                        style: TextStyle(color: _tintFg(context, Colors.orange))),
                   ),
                   TextButton(
                     onPressed: () => setState(() => amt.text = it.alt!.toStringAsFixed(2)),
@@ -3853,9 +4628,9 @@ class _ReviewPageState extends State<ReviewPage> {
           TextField(
             controller: amt,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(
-              labelText: 'المبلغ الإجمالي',
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              labelText: tr('المبلغ الإجمالي'),
+              border: const OutlineInputBorder(),
             ),
           ),
           const SizedBox(height: 8),
@@ -3909,12 +4684,12 @@ class _ReviewPageState extends State<ReviewPage> {
           actions: [
             IconButton(
               icon: const Icon(Icons.navigate_before),
-              tooltip: 'السابق',
+              tooltip: tr('السابق'),
               onPressed: idx > 0 ? () => go(idx - 1) : null,
             ),
             IconButton(
               icon: const Icon(Icons.navigate_next),
-              tooltip: 'التالي',
+              tooltip: tr('التالي'),
               onPressed: idx < widget.items.length - 1 ? () => go(idx + 1) : null,
             ),
           ],
@@ -4419,6 +5194,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     pdfDir = loadPdfDir();
+    days = sharedDays.value;
+    sharedDays.addListener(_syncDays);
     results.addAll(loadMState());
     results.sort(_cmpM);
     final pend = results.where((r) => r.pending).length;
@@ -4431,6 +5208,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
   @override
   void dispose() {
+    sharedDays.removeListener(_syncDays);
     WidgetsBinding.instance.removeObserver(this);
     for (final r in results) {
       r.ctl.dispose();
@@ -4442,6 +5220,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
     if (busy) _dbg('LIFECYCLE $state');
+  }
+
+  void _syncDays() {
+    if (!mounted || busy || days == sharedDays.value) return;
+    setState(() => days = sharedDays.value);
   }
 
   Future<void> openPdf(String? path) async {
@@ -4734,8 +5517,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
         try {
           await _chan.invokeMethod('notify', {
-            'title': 'A2R POS - انتهى فحص إيصالات الدفع',
-            'text': '${results.length} ملف، $total إيصال'
+            'title': tr('A2R POS - انتهى فحص إيصالات الدفع'),
+            'text': tr('${results.length} ملف، $total إيصال')
           });
         } catch (_) {}
       }
@@ -5340,20 +6123,27 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   Widget _buildScaffold(BuildContext context) {
+    AppSettings.of(context);
     final missing = results.isEmpty ? <String>[] : missingMachines();
     final reviewN = results.where((r) => !r.ok).length;
     final pendCount = results.where((r) => r.pending).length;
     final named = results.where((r) => r.newName != null && !r.excluded).length;
+    _syncBadge(machBadge, reviewN);
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight: 44,
+        toolbarHeight: 54,
         titleSpacing: 12,
-        title: const Text('إيصالات الدفع', style: TextStyle(fontSize: 17)),
+        title: const AppTitle(),
         actions: [
+          const HeaderButtons(),
           PopupMenuButton<String>(
-            tooltip: 'المزيد',
+            tooltip: tr('المزيد'),
             onSelected: (v) {
-              if (v == 'folder') {
+              if (v == 'appearance') {
+                showAppearanceSheet(context);
+              } else if (v == 'log') {
+                shareLog();
+              } else if (v == 'folder') {
                 openDest();
               } else if (v == 'src') {
                 savePdfDir(null);
@@ -5368,11 +6158,18 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               }
             },
             itemBuilder: (_) => [
+              if (MediaQuery.sizeOf(context).width < 400)
+                PopupMenuItem(
+                    value: 'appearance',
+                    child: w.Text(AppSettings.of(context).isAr ? 'المظهر واللغة' : 'Theme & language')),
               const PopupMenuItem(value: 'folder', child: Text('فتح فولدر الإخراج')),
               if (pdfDir != null)
                 PopupMenuItem(value: 'src', enabled: !busy, child: const Text('المصدر: رجوع لواتساب')),
               if (destDir != defaultMDest)
                 PopupMenuItem(value: 'out', enabled: !busy, child: const Text('الإخراج: الافتراضي')),
+              PopupMenuItem(
+                  value: 'log',
+                  child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
               PopupMenuItem(value: 'fast', child: Text(fastCount ? 'العد: سريع ← الدقيق (القديم)' : 'العد: دقيق ← السريع')),
               PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
@@ -5413,7 +6210,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
           _settingsCard([
-            _periodRow(days, busy, (d) => setState(() => days = d)),
+            _periodRow(days, busy, (d) {
+              setState(() => days = d);
+              sharedDays.value = d;
+            }),
             const Divider(height: 10),
             _pathRow(Icons.folder_open, 'المصدر', pdfDir ?? 'واتساب - مستندات (تلقائي)',
                 busy ? null : pickDir,
@@ -5429,33 +6229,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           ]),
           _statusBox(status),
           const SizedBox(height: 6),
-          Row(
-            children: [
-              const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Wrap(
-                  spacing: 6,
-                  children: [
-                    ChoiceChip(
-                      label: Text('الكل (${results.length})', style: const TextStyle(fontSize: 13)),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      selected: !reviewOnly,
-                      onSelected: (_) => setState(() => reviewOnly = false),
-                    ),
-                    ChoiceChip(
-                      label: Text('مراجعة ($reviewN)', style: const TextStyle(fontSize: 13)),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      selected: reviewOnly,
-                      onSelected: (_) => setState(() => reviewOnly = true),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+          _filterRow(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
           const SizedBox(height: 6),
           Wrap(
             spacing: 6,
@@ -5468,18 +6242,18 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 _mini(Icons.done_all, 'الباقي صح ($reviewN)', busy ? null : markRestOk),
             ],
           ),
-          const Padding(
-            padding: EdgeInsets.only(top: 4, bottom: 2),
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 2),
             child: Text('اسحب أي ملف لتعليمه: صح ✓ أو غلط ✗',
-                style: TextStyle(fontSize: 11, color: Colors.black54)),
+                style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant)),
           ),
           if (missing.isNotEmpty) ...[
             const SizedBox(height: 10),
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Colors.amber.shade100,
-                border: Border.all(color: Colors.amber.shade800),
+                color: _tintBg(context, Colors.amber),
+                border: Border.all(color: _tintBorder(context, Colors.amber)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text('⚠️ ماكينات ما وصلش ملفها (${missing.length}): ${missing.join(' ، ')}',
@@ -5498,13 +6272,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   return false;
                 },
                 background: Container(
-                  color: Colors.green.shade300,
+                  color: _tintBg(context, Colors.green, strong: true),
                   alignment: AlignmentDirectional.centerStart,
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: const Text('صح ✓', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
                 secondaryBackground: Container(
-                  color: Colors.red.shade300,
+                  color: _tintBg(context, Colors.red, strong: true),
                   alignment: AlignmentDirectional.centerEnd,
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: const Text('غلط ✗', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -5512,10 +6286,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 child: Card(
                   margin: const EdgeInsets.symmetric(vertical: 2),
                   color: r.excluded
-                      ? Colors.grey.shade300
+                      ? _tintBg(context, Colors.grey, strong: true)
                       : (match == null
                           ? null
-                          : (match ? Colors.green.shade100 : Colors.red.shade100)),
+                          : (match ? _tintBg(context, Colors.green) : _tintBg(context, Colors.red))),
                   child: ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12),
                     onTap: () => openPdf(r.openPath),
@@ -5541,13 +6315,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                                 isDense: true,
                                 contentPadding:
                                     const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-                                hintText: 'الصح',
+                                hintText: tr('الصح'),
                                 hintStyle: const TextStyle(fontSize: 13),
                                 border: const OutlineInputBorder(),
                                 filled: match != null,
                                 fillColor: match == null
                                     ? null
-                                    : (match ? Colors.green.shade300 : Colors.red.shade300),
+                                    : (match ? _tintBg(context, Colors.green, strong: true) : _tintBg(context, Colors.red, strong: true)),
                               ),
                               onChanged: (v) {
                                 saveMState(results);
@@ -5556,7 +6330,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                             ),
                           ),
                           PopupMenuButton<String>(
-                            tooltip: 'المزيد',
+                            tooltip: tr('المزيد'),
                             padding: EdgeInsets.zero,
                             onSelected: (v) {
                               if (v == 'share') {
