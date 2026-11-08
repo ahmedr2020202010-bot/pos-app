@@ -20,6 +20,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await appSettings.load();
+  await prepareDefaultFiles();
   FlutterError.onError = (d) {
     _dbg('FLUTTER_ERROR ${d.exceptionAsString()}');
     FlutterError.presentError(d);
@@ -1251,6 +1252,110 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "خدمات مصر",
 };
 
+// ───────── ماكينات جديدة (TID مختلف) لوحدة موجودة: بتتعرف من الـ Merchant ID أو اسم الوحدة وبتتحفظ ─────────
+const int kBaseMachines = 19; // ماكينات الأساس المكتوبة في الكود (فحص الماكينات الناقصة عليها بس)
+final Set<String> _extraTids = {};
+String get _extraTermPath => '$baseDir/extra_terminals.json';
+
+int get machineCount {
+  var m = 0;
+  for (final k in numToTid.keys) {
+    if (k > m) m = k;
+  }
+  return m;
+}
+
+void loadExtraTerminals() {
+  try {
+    final f = File(_extraTermPath);
+    if (!f.existsSync()) return;
+    final m = jsonDecode(f.readAsStringSync());
+    if (m is! List) return;
+    for (final e in m) {
+      final tid = e['tid'].toString();
+      final row = e['row'] as int;
+      if (terminals.containsKey(tid) || !rowNames.containsKey(row)) continue;
+      var order = (e['o'] as int?) ?? 0;
+      if (order <= kBaseMachines || numToTid.containsKey(order)) order = machineCount + 1;
+      terminals[tid] = TerminalInfo(order, row, rowNames[row]!);
+      numToTid[order] = tid;
+      _extraTids.add(tid);
+    }
+  } catch (e) {
+    _dbg('extra terminals load error: $e');
+  }
+}
+
+void _saveExtraTerminals() {
+  try {
+    final list = [
+      for (final tid in _extraTids)
+        if (terminals[tid] != null)
+          {'tid': tid, 'row': terminals[tid]!.excelRow, 'o': terminals[tid]!.orderNum}
+    ];
+    Directory(baseDir).createSync(recursive: true);
+    File(_extraTermPath).writeAsStringSync(jsonEncode(list));
+  } catch (e) {
+    _dbg('extra terminals save error: $e');
+  }
+}
+
+// ماكينة جديدة مكتوبة على الإيصال ومش في القايمة: بنربطها بالوحدة (من الـ Merchant ID أو اسم الوحدة)
+// ولو الوحدة مش معروفة منعملش حاجة (الإيصال بيروح للمراجعة زي الأول)
+String? discoverTerminal(List<String> texts) {
+  final row = findUnitExtraIn(texts);
+  if (row == null || !rowNames.containsKey(row)) return null;
+  final counts = <String, int>{};
+  for (final t in texts) {
+    final d = _tidLabeledRaw(t);
+    if (d != null && RegExp(r'^50\d{6}$').hasMatch(d)) counts[d] = (counts[d] ?? 0) + 1;
+  }
+  if (counts.isEmpty) return null;
+  final best = counts.entries.reduce((a, b) => a.value >= b.value ? a : b);
+  final tid = best.key;
+  if (terminals.containsKey(tid)) return tid;
+  if (texts.length >= 2 && best.value < 2) return null; // أكتر من قراءة: لازم الرقم يتكرر مرتين
+  final order = machineCount + 1;
+  terminals[tid] = TerminalInfo(order, row, rowNames[row]!);
+  numToTid[order] = tid;
+  _extraTids.add(tid);
+  _saveExtraTerminals();
+  _dbg('NEW TERMINAL $tid -> ${rowNames[row]} (ماكينة $order)');
+  return tid;
+}
+
+// ───────── الملفات الافتراضية: فولدر التطبيق + قالب الإكسيل (من الـ assets لو مش موجود) ─────────
+Future<void> prepareDefaultFiles() async {
+  try {
+    if (await Permission.manageExternalStorage.isGranted) {
+      await ensureDefaultFiles();
+    }
+  } catch (_) {}
+  loadExtraTerminals();
+}
+
+Future<void> ensureDefaultFiles() async {
+  try {
+    Directory(baseDir).createSync(recursive: true);
+    var has = false;
+    for (final e in Directory(baseDir).listSync().whereType<File>()) {
+      final n = baseName(e.path);
+      if (n.toLowerCase().endsWith('.xlsx') && n.contains('00') && !n.startsWith('~') && !n.startsWith('.')) {
+        has = true;
+        break;
+      }
+    }
+    if (!has) {
+      try {
+        final d = await rootBundle.load('assets/template.xlsx');
+        File('$baseDir/الاسكندريه 00.xlsx').writeAsBytesSync(d.buffer.asUint8List());
+      } catch (_) {}
+    }
+  } catch (e) {
+    _dbg('default files error: $e');
+  }
+}
+
 // ───────────────────── خوارزميات الاستخراج (منقولة من نسخة البايثون) ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
@@ -1556,16 +1661,20 @@ String? batchNo(List<String> texts) {
 }
 
 // ───────────── الماكينة / الوحدة / التاريخ ─────────────
-String? _tidLabeled(String t) {
+String? _tidLabeledRaw(String t) {
   final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)",
           caseSensitive: false)
       .firstMatch(t);
   if (m == null) return null;
   final raw = m.group(1)!.replaceAll('/', '7').replaceAll(RegExp(r'\D'), '');
   if (raw.length < 8) return null;
-  var d = raw.substring(raw.length - 8);
-  d = tidFix[d] ?? d;
-  return terminals.containsKey(d) ? d : null;
+  final d = raw.substring(raw.length - 8);
+  return tidFix[d] ?? d;
+}
+
+String? _tidLabeled(String t) {
+  final d = _tidLabeledRaw(t);
+  return d != null && terminals.containsKey(d) ? d : null;
 }
 
 String? _tidLoose(String t) {
@@ -1767,6 +1876,10 @@ Analysis analyzeLines(List<OcrLine> all) {
     final u0 = findUnitExtraIn(allTexts);
     tid = findTerminalFuzzyIn(allTexts, u0);
     how = 'fuzzy';
+    if (tid == null) {
+      tid = discoverTerminal(allTexts); // ماكينة جديدة لوحدة معروفة
+      if (tid != null) how = 'new-terminal';
+    }
   }
   if (tid != null) {
     tid = tidAlias[tid] ?? tid;
@@ -3044,6 +3157,182 @@ Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
   }
 }
 
+Map<String, String>? _loadDefaultHandler(String key) {
+  try {
+    final v = _readCfg()[key];
+    if (v is Map) return {for (final e in v.entries) e.key.toString(): e.value.toString()};
+  } catch (_) {}
+  return null;
+}
+
+void _saveDefaultHandler(String key, Map<String, String>? h) {
+  try {
+    final cfg = _readCfg();
+    if (h == null) {
+      cfg.remove(key);
+    } else {
+      cfg[key] = h;
+    }
+    _writeCfg(cfg);
+  } catch (_) {}
+}
+
+// بيمسح الاختيارات المحفوظة (المعرض / ملفات PDF) علشان تختار من جديد
+void resetDefaultHandlers(BuildContext context) {
+  for (final k in ['defImage', 'defPdf']) {
+    _saveDefaultHandler(k, null);
+  }
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: w.Text('اتمسحت التطبيقات الافتراضية. هتختار من جديد المرة الجاية.')),
+  );
+}
+
+List<Map<String, String>> _toHandlers(dynamic r) {
+  final out = <Map<String, String>>[];
+  if (r is List) {
+    for (final e in r) {
+      if (e is Map) out.add({for (final en in e.entries) en.key.toString(): en.value.toString()});
+    }
+  }
+  return out;
+}
+
+// لو نفس التطبيق ظهر بأكتر من طريقة فتح، بنسيب الأولى بس
+void _numberVariants(List<Map<String, String>> hs) {
+  final seen = <String>{};
+  hs.removeWhere((h) => !seen.add(h['pkg'] ?? ''));
+}
+
+Widget _handlerTile(Widget icon, String label, VoidCallback onTap) => InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: SizedBox(
+        width: 84,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              icon,
+              const SizedBox(height: 4),
+              Text(label,
+                  maxLines: 2,
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11)),
+            ],
+          ),
+        ),
+      ),
+    );
+
+// بيعرض التطبيقات المتاحة وانت تختار. لو اخترت "الافتراضي" بيتحفظ وبعدها بيفتح علطول
+Future<Map<String, String>?> chooseHandler(
+  BuildContext context, {
+  required String title,
+  required List<Map<String, String>> handlers,
+  required String prefKey,
+  Map<String, String>? systemOption,
+}) async {
+  final saved = _loadDefaultHandler(prefKey);
+  if (saved != null) {
+    if (systemOption != null && saved['kind'] == systemOption['kind'] && (saved['pkg'] ?? '').isEmpty) {
+      return saved;
+    }
+    if (handlers.any((h) => h['pkg'] == saved['pkg'] && h['cls'] == saved['cls'] && h['kind'] == saved['kind'])) {
+      return saved;
+    }
+  }
+  if (!context.mounted) return null;
+  var makeDefault = false;
+  return showModalBottomSheet<Map<String, String>>(
+    context: context,
+    isScrollControlled: true,
+    builder: (c) => StatefulBuilder(
+      builder: (c, setS) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            CheckboxListTile(
+              value: makeDefault,
+              controlAffinity: ListTileControlAffinity.leading,
+              onChanged: (v) => setS(() => makeDefault = v ?? false),
+              title: const Text('خليه الافتراضي (يفتح علطول المرة الجاية)'),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 12),
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 6,
+                runSpacing: 10,
+                children: [
+                  for (final h in handlers)
+                    _handlerTile(
+                      h['icon'] != null && h['icon']!.isNotEmpty
+                          ? Image.memory(base64Decode(h['icon']!), width: 52, height: 52)
+                          : const Icon(Icons.apps, size: 52),
+                      h['label'] ?? h['pkg'] ?? '',
+                      () {
+                        if (makeDefault) _saveDefaultHandler(prefKey, h);
+                        Navigator.pop(c, h);
+                      },
+                    ),
+                  if (systemOption != null)
+                    _handlerTile(
+                      const Icon(Icons.folder_special, size: 52),
+                      systemOption['label'] ?? 'النظام',
+                      () {
+                        if (makeDefault) _saveDefaultHandler(prefKey, systemOption);
+                        Navigator.pop(c, systemOption);
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+// اختيار صور/ملفات من أي تطبيق معرض أو ملفات (انت اللي تختار وتحفظ الافتراضي).
+// بترجع null لو الطريقة دي مش متاحة (الجزء الـ native ناقص)، ولستة فاضية لو لغيت.
+Future<List<String>?> pickFilesViaChooser(
+  BuildContext context, {
+  required String mime,
+  required String title,
+  required String prefKey,
+}) async {
+  try {
+    var handlers = _toHandlers(await _chan.invokeMethod<List<dynamic>>('pickHandlers', {'mime': mime}));
+    _numberVariants(handlers);
+    if (!context.mounted) return null;
+    final picked = await chooseHandler(
+      context,
+      title: title,
+      handlers: handlers,
+      prefKey: prefKey,
+      systemOption: <String, String>{'pkg': '', 'cls': '', 'kind': 'system', 'label': 'منتقي ملفات النظام'},
+    );
+    if (picked == null) return <String>[];
+    final r = await _chan.invokeMethod<List<dynamic>>('pickWith', {
+      'mime': mime,
+      'pkg': picked['pkg'] ?? '',
+      'cls': picked['cls'] ?? '',
+      'kind': picked['kind'] ?? '',
+    });
+    if (r == null) return null;
+    return [for (final e in r) e.toString()];
+  } catch (e) {
+    _dbg('pickFilesViaChooser error: $e');
+    return null;
+  }
+}
+
 // ───────────────────── الشاشة الرئيسية ─────────────────────
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -3236,6 +3525,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         customOut = res;
         outputDir = res;
       });
+    }
+  }
+
+  Future<void> pickManualImages() async {
+    try {
+      final paths = await pickFilesViaChooser(context,
+          mime: 'image/*', title: 'اختر تطبيق المعرض', prefKey: 'defImage');
+      if (paths == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: w.Text('منتقي الصور مش متاح في النسخة دي (الجزء الـ native ناقص).')),
+          );
+        }
+        return;
+      }
+      if (paths.isNotEmpty) await runFullPipeline(manualPaths: paths);
+    } catch (e) {
+      _dbg('pickManualImages error: $e');
     }
   }
 
@@ -3500,7 +3807,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   value: selectedOrder,
                   hint: const Text('اختر الماكينة (1..19)'),
                   items: [
-                    for (var i = 1; i <= 19; i++)
+                    for (var i = 1; i <= machineCount; i++)
                       DropdownMenuItem(
                         value: i,
                         child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
@@ -3737,7 +4044,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  Future<void> runFullPipeline() async {
+  Future<void> runFullPipeline({List<String>? manualPaths}) async {
     try {
       await Permission.notification.request();
     } catch (_) {}
@@ -3749,7 +4056,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _chan.invokeMethod('keepScreenOn', {'on': true});
     } catch (_) {}
     try {
-      await _runPipelineInner();
+      await _runPipelineInner(manualPaths: manualPaths);
     } finally {
       try {
         await _chan.invokeMethod('stopKeepAlive');
@@ -3769,12 +4076,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _runPipelineInner() async {
+  Future<void> _runPipelineInner({List<String>? manualPaths}) async {
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
       setState(() => status = 'يجب منح إذن الوصول إلى جميع الملفات للمتابعة.');
       return;
     }
+    await prepareDefaultFiles();
 
     setState(() {
       busy = true;
@@ -3787,6 +4095,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
 
     final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
+    if (manualPaths != null) dirs.clear();
 
     final now = DateTime.now();
     final cutoff = days < 0
@@ -3811,9 +4120,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
     sourceNote = '';
+    if (manualPaths != null) {
+      todo.addAll(manualPaths.map((p) => File(p)));
+      sourceNote = '• المصدر: صور محددة يدوياً (${todo.length} صورة)';
+    }
 
     // فولدر اخترته بإيدك (مش واتساب): أي ملف PDF جواه بيتفحص، بأي اسم وبأي تاريخ
-    if (customDir != null && customDir != outputDir) {
+    if (manualPaths == null && customDir != null && customDir != outputDir) {
       final cpdfs = <File>[];
       try {
         for (final e in Directory(customDir!).listSync().whereType<File>()) {
@@ -4121,7 +4434,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         continue;
       }
       final free = <int>[];
-      for (var n = 1; n <= 19; n++) {
+      for (var n = 1; n <= machineCount; n++) {
         if (terminals[numToTid[n]!]!.excelRow == r.row && !taken.containsKey(n)) {
           free.add(n);
         }
@@ -4308,6 +4621,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             _pathRow(Icons.folder_open, 'المصدر', customDir ?? 'واتساب (تلقائي)',
                 busy ? null : pickFolder,
                 onReset: customDir != null && !busy ? useWhatsApp : null),
+            _pathRow(Icons.add_photo_alternate, 'اختيار صور يدوياً', 'فتح معرض الصور',
+                busy ? null : pickManualImages),
             _pathRow(Icons.drive_file_move_outline, 'الإخراج',
                 customOut ?? '$defaultOutputDir (افتراضي)', busy ? null : pickOutFolder,
                 onReset: customOut != null && !busy ? useDefaultOut : null),
@@ -4989,7 +5304,7 @@ class _ReviewPageState extends State<ReviewPage> {
             isExpanded: true,
             hint: const Text('اختر الماكينة (1..19)'),
             items: [
-              for (var i = 1; i <= 19; i++)
+              for (var i = 1; i <= machineCount; i++)
                 DropdownMenuItem(
                   value: i,
                   child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
@@ -5229,7 +5544,7 @@ class MCollector {
     }
     r.tid = tc.isNotEmpty
         ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
-        : findTerminalIn([all]);
+        : (findTerminalIn([all]) ?? discoverTerminal([all]));
 
     // اليوم الأغلب + الإيصالات اللي مش تبع نفس اليوم
     if (days.isEmpty) {
@@ -5475,7 +5790,7 @@ MIdent _identify(String all) {
   }
   r.tid = tc.isNotEmpty
       ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
-      : findTerminalIn([all]);
+      : (findTerminalIn([all]) ?? discoverTerminal([all]));
   final days = <String, int>{};
   for (final m in _dateRe.allMatches(all)) {
     final k = _dayKey(m.group(0)!);
@@ -6313,6 +6628,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
+  Future<void> pickManualPdfs() async {
+    try {
+      final paths = await pickFilesViaChooser(context,
+          mime: 'application/pdf', title: 'اختر تطبيق الملفات', prefKey: 'defPdf');
+      if (paths == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: w.Text('منتقي الملفات مش متاح في النسخة دي (الجزء الـ native ناقص).')),
+          );
+        }
+        return;
+      }
+      if (paths.isNotEmpty) await start(manualPaths: paths);
+    } catch (e) {
+      _dbg('pickManualPdfs error: $e');
+    }
+  }
+
   Future<void> pickOut() async {
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
@@ -6410,7 +6743,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (busy) return;
     int? guess = r.orderNum;
     guess ??= int.tryParse(RegExp(r'^\s*(\d{1,2})').firstMatch(r.pdfName)?.group(1) ?? '');
-    if (guess != null && (guess < 1 || guess > 19)) guess = null;
+    if (guess != null && (guess < 1 || guess > machineCount)) guess = null;
     int? sel = guess;
     final picked = await showDialog<int>(
       context: context,
@@ -6422,7 +6755,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             value: sel,
             hint: const Text('اختار الماكينة'),
             items: [
-              for (var i = 1; i <= 19; i++)
+              for (var i = 1; i <= machineCount; i++)
                 DropdownMenuItem(
                   value: i,
                   child: Text('ماكينة $i - ${terminals[numToTid[i]]?.unitName ?? ''}'),
@@ -6545,7 +6878,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   // ───── التشغيل ─────
-  Future<void> start({bool resumeOnly = false, bool count = false}) async {
+  Future<void> start({bool resumeOnly = false, bool count = false, List<String>? manualPaths}) async {
     if (busy) return;
     final perm = await Permission.manageExternalStorage.request();
     if (!perm.isGranted) {
@@ -6563,7 +6896,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       await _chan.invokeMethod('keepScreenOn', {'on': true});
     } catch (_) {}
     try {
-      await _run(resumeOnly, count);
+      await _run(resumeOnly, count, manualPaths: manualPaths);
     } finally {
       try {
         await _chan.invokeMethod('stopKeepAlive');
@@ -6583,7 +6916,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
-  Future<void> _run(bool resumeOnly, bool count) async {
+  Future<void> _run(bool resumeOnly, bool count, {List<String>? manualPaths}) async {
+    await prepareDefaultFiles();
     setState(() {
       busy = true;
       stopReq = false;
@@ -6604,7 +6938,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       } catch (_) {}
       _dbg('PHASE1 start resumeOnly=$resumeOnly');
       namingDone = resumeOnly;
-      if (!resumeOnly) idle = await _identifyAll(rec);
+      if (!resumeOnly) idle = await _identifyAll(rec, manualPaths: manualPaths);
       _dbg('PHASE1 done');
       if (mounted) setState(() => namingDone = true);
       // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف: مش بتشتغل غير لما تضغط "بدء العد"
@@ -6644,8 +6978,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   // بيرجّع رسالة لو مفيش حاجة جديدة يفحصها
-  Future<String?> _identifyAll(TextRecognizer rec) async {
+  Future<String?> _identifyAll(TextRecognizer rec, {List<String>? manualPaths}) async {
     final dirs = pdfDir != null ? [Directory(pdfDir!)] : findWhatsAppDocDirs();
+    if (manualPaths != null) dirs.clear();
     final now = DateTime.now();
     final cutoff = days < 0
         ? DateTime(2000)
@@ -6689,6 +7024,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       } catch (_) {}
     }
     pdfs.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
+    if (manualPaths != null) pdfs.addAll(manualPaths.map((p) => File(p)));
     if (pdfs.isEmpty) {
       if (dirs.isEmpty) return 'مش لاقي فولدر مستندات واتساب. اختار فولدر بإيدك.';
       return skipped > 0
@@ -7318,6 +7654,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                         setState(() => pdfDir = null);
                       }
                     : null),
+            _pathRow(Icons.picture_as_pdf, 'اختيار PDF يدوياً', 'فتح معرض الملفات',
+                busy ? null : pickManualPdfs),
             _pathRow(Icons.drive_file_move_outline, 'الإخراج',
                 '$destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}', busy ? null : pickOut,
                 onReset: destDir != defaultMDest && !busy ? useDefaultOut : null),
