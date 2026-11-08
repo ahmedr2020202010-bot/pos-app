@@ -88,6 +88,8 @@ jobs:
           import java.io.File
 
           class MainActivity : FlutterActivity() {
+              private var pickResult: MethodChannel.Result? = null
+
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   android.os.StrictMode.setVmPolicy(android.os.StrictMode.VmPolicy.Builder().build())
@@ -140,6 +142,12 @@ jobs:
                                   val paths = call.argument<List<String>>("paths") ?: emptyList()
                                   val text = call.argument<String>("text") ?: ""
                                   result.success(shareToWhatsApp(paths, text))
+                              }
+                              "pickHandlers" -> {
+                                  result.success(pickHandlers(call.argument<String>("mime") ?: "*/*"))
+                              }
+                              "pickWith" -> {
+                                  pickWith(call.argument<String>("mime") ?: "*/*", call.argument<String>("pkg") ?: "", call.argument<String>("cls") ?: "", call.argument<String>("kind") ?: "", result)
                               }
                               else -> result.notImplemented()
                           }
@@ -239,6 +247,7 @@ jobs:
                           m["pkg"] = pkg
                           m["cls"] = ri.activityInfo.name
                           m["kind"] = p.first
+                          m["icon"] = iconB64(ri.loadIcon(packageManager))
                           res.add(m)
                       }
                   }
@@ -311,6 +320,135 @@ jobs:
                       }
                   }
                   return "no_whatsapp"
+              }
+
+              // ───────── اختيار صور / ملفات: كل المعارض وتطبيقات الملفات بأيقوناتها ─────────
+              private fun iconB64(d: android.graphics.drawable.Drawable?): String {
+                  if (d == null) return ""
+                  return try {
+                      val sz = 96
+                      val bmp = android.graphics.Bitmap.createBitmap(sz, sz, android.graphics.Bitmap.Config.ARGB_8888)
+                      val c = android.graphics.Canvas(bmp)
+                      d.setBounds(0, 0, sz, sz)
+                      d.draw(c)
+                      val bos = java.io.ByteArrayOutputStream()
+                      bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, bos)
+                      android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP)
+                  } catch (e: Exception) {
+                      ""
+                  }
+              }
+
+              private fun pickHandlers(mime: String): List<HashMap<String, String>> {
+                  val res = ArrayList<HashMap<String, String>>()
+                  val seen = HashSet<String>()
+                  // 1) ACTION_GET_CONTENT (بيدعم اختيار أكتر من ملف)  2) ACTION_PICK (معارض الصور القديمة)
+                  val kinds = ArrayList<Pair<String, Intent>>()
+                  val g = Intent(Intent.ACTION_GET_CONTENT)
+                  g.type = mime
+                  g.addCategory(Intent.CATEGORY_OPENABLE)
+                  kinds.add(Pair("get", g))
+                  if (mime.startsWith("image")) {
+                      val p = Intent(Intent.ACTION_PICK, android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+                      p.type = mime
+                      kinds.add(Pair("pick", p))
+                  }
+                  for (k in kinds) {
+                      for (ri in packageManager.queryIntentActivities(k.second, android.content.pm.PackageManager.MATCH_ALL)) {
+                          val pkg = ri.activityInfo.packageName
+                          if (!seen.add(pkg)) continue
+                          val m = HashMap<String, String>()
+                          m["label"] = ri.loadLabel(packageManager).toString()
+                          m["pkg"] = pkg
+                          m["cls"] = ri.activityInfo.name
+                          m["kind"] = k.first
+                          m["icon"] = iconB64(ri.loadIcon(packageManager))
+                          res.add(m)
+                      }
+                  }
+                  return res
+              }
+
+              private fun pickWith(mime: String, pkg: String, cls: String, kind: String, result: MethodChannel.Result) {
+                  if (pickResult != null) {
+                      result.success(ArrayList<String>())
+                      return
+                  }
+                  val i: Intent
+                  if (pkg.isEmpty()) {
+                      i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                      i.type = mime
+                      i.addCategory(Intent.CATEGORY_OPENABLE)
+                  } else if (kind == "pick") {
+                      i = Intent(Intent.ACTION_PICK, android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+                      i.type = mime
+                      i.setClassName(pkg, cls)
+                  } else {
+                      i = Intent(Intent.ACTION_GET_CONTENT)
+                      i.type = mime
+                      i.addCategory(Intent.CATEGORY_OPENABLE)
+                      i.setClassName(pkg, cls)
+                  }
+                  i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                  pickResult = result
+                  try {
+                      startActivityForResult(i, 4711)
+                  } catch (e: Exception) {
+                      pickResult = null
+                      result.success(null)
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode != 4711) return
+                  val res = pickResult ?: return
+                  pickResult = null
+                  val uris = ArrayList<Uri>()
+                  if (resultCode == android.app.Activity.RESULT_OK && data != null) {
+                      val cd = data.clipData
+                      if (cd != null) {
+                          for (k in 0 until cd.itemCount) uris.add(cd.getItemAt(k).uri)
+                      } else if (data.data != null) {
+                          uris.add(data.data!!)
+                      }
+                  }
+                  Thread {
+                      val out = ArrayList<String>()
+                      val dir = File(cacheDir, "picked_" + System.currentTimeMillis())
+                      dir.mkdirs()
+                      var n = 0
+                      for (u in uris) {
+                          try {
+                              var name = "file_" + n
+                              val c = contentResolver.query(u, null, null, null, null)
+                              if (c != null) {
+                                  try {
+                                      val ix = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                      if (ix >= 0 && c.moveToFirst()) {
+                                          val dn = c.getString(ix)
+                                          if (dn != null) name = dn
+                                      }
+                                  } finally {
+                                      c.close()
+                                  }
+                              }
+                              name = name.replace("/", "_")
+                              val sub = File(dir, n.toString())
+                              sub.mkdirs()
+                              val f = File(sub, name)
+                              val ins = contentResolver.openInputStream(u)
+                              if (ins != null) {
+                                  f.outputStream().use { o -> ins.copyTo(o) }
+                                  ins.close()
+                                  out.add(f.absolutePath)
+                              }
+                          } catch (e: Exception) {
+                          }
+                          n++
+                      }
+                      runOnUiThread { res.success(out) }
+                  }.start()
               }
           }
           EOK
