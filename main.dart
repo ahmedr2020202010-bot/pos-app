@@ -1860,6 +1860,153 @@ void checkUnusual(List<ReceiptItem> items, String reportDate) {
   } catch (_) {}
 }
 
+
+// ───────── العد السريع: صور الصفحات الأصلية (JPEG) من الـ PDF الممسوح + عدّ بالهيكل ─────────
+bool _loadFast() {
+  try {
+    return _readCfg()['fastCount'] != false;
+  } catch (_) {
+    return true;
+  }
+}
+
+bool fastCount = _loadFast();
+
+void toggleFastCount() {
+  fastCount = !fastCount;
+  try {
+    final m = _readCfg();
+    m['fastCount'] = fastCount;
+    _writeCfg(m);
+  } catch (_) {}
+}
+
+// بيطلّع صور الصفحات (JPEG) جاهزة من PDF ممسوح (CamScanner وغيره): من غير raster ولا PNG
+List<List<int>> _pdfJpegRanges(Uint8List b) {
+  final out = <List<int>>[];
+  int find(String pat, int from) {
+    final p = pat.codeUnits;
+    final n = b.length - p.length;
+    for (var i = from; i <= n; i++) {
+      if (b[i] != p[0]) continue;
+      var ok = true;
+      for (var j = 1; j < p.length; j++) {
+        if (b[i + j] != p[j]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return i;
+    }
+    return -1;
+  }
+
+  var pos = 0;
+  while (true) {
+    final i = find('/DCTDecode', pos);
+    if (i < 0) break;
+    final sIdx = find('stream', i);
+    if (sIdx < 0) break;
+    var st = sIdx + 6;
+    if (st < b.length && b[st] == 13) st++;
+    if (st < b.length && b[st] == 10) st++;
+    final e = find('endstream', st);
+    if (e < 0) break;
+    var en = e;
+    while (en > st && (b[en - 1] == 10 || b[en - 1] == 13 || b[en - 1] == 32)) {
+      en--;
+    }
+    if (en - st > 20000 && b[st] == 0xFF && b[st + 1] == 0xD8 && b[en - 2] == 0xFF && b[en - 1] == 0xD9) {
+      out.add([st, en]);
+    }
+    pos = e + 9;
+  }
+  return out;
+}
+
+class _SA {
+  final String t;
+  final double cx, cy, l, r;
+  _SA(this.t, this.cx, this.cy, this.l, this.r);
+}
+
+class _StructPage {
+  int sm = 0, mx = 0;
+  double h = 3000;
+  final Map<String, int> types = {};
+}
+
+const _anchorRank = {'logo': 0, 'term': 1, 'rrn': 2, 'amount': 3, 'appr': 4};
+
+// عدّ الإيصالات بالهيكل: كل إيصال له شعار + Terminal ID + RRN + AMOUNT + Approved (مرة واحدة)
+// بنجمع العلامات دي ونقسمها أعمدة، وكل ما التسلسل (من فوق لتحت) يرجع لورا = إيصال جديد
+_StructPage _structCount(RecognizedText res) {
+  final out = _StructPage();
+  final lines = toLines(res);
+  if (lines.isEmpty) return out;
+  var h = 0.0, w = 0.0;
+  for (final l in lines) {
+    if (l.bottom > h) h = l.bottom;
+    if (l.right > w) w = l.right;
+  }
+  out.h = h;
+  final all = <_SA>[];
+  final nameRe = RegExp(r'NATIONAL|BANK\s*OF\s*EGYPT');
+  final rrnRe = RegExp(r'(?<![A-Z])R{1,2}N\W{0,3}\d');
+  final amtRe = RegExp(r'^\s*AMOUNT\b');
+  final amtBad = RegExp(r'FROM|ACCOUNT|CONFIRM|DEBIT|\bMY\b');
+  for (final l in lines) {
+    final u = l.text.toUpperCase();
+    void add(String t) => all.add(_SA(t, (l.left + l.right) / 2, l.cy, l.left, l.right));
+    if (nameRe.hasMatch(u)) add('logo');
+    if (u.contains('TERMINAL')) add('term');
+    if (rrnRe.hasMatch(u)) add('rrn');
+    if (amtRe.hasMatch(u) && !amtBad.hasMatch(u)) add('amount');
+    if (u.contains('APPROVED')) add('appr');
+  }
+  // إزالة التكرار (نفس العلامة اتقرت مرتين)
+  final ded = <_SA>[];
+  for (final a in all) {
+    var dup = false;
+    for (final o in ded) {
+      if (o.t == a.t && o.l < a.r && a.l < o.r && (o.cy - a.cy).abs() < h * 0.02) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) ded.add(a);
+  }
+  for (final a in ded) {
+    out.types[a.t] = (out.types[a.t] ?? 0) + 1;
+  }
+  if (ded.isEmpty) return out;
+  out.mx = out.types.values.reduce((a, b) => a > b ? a : b);
+  // أعمدة
+  ded.sort((a, b) => a.cx.compareTo(b.cx));
+  final cols = <List<_SA>>[];
+  var cur = <_SA>[ded.first];
+  for (var i = 1; i < ded.length; i++) {
+    if (ded[i].cx - cur.last.cx > w * 0.06) {
+      cols.add(cur);
+      cur = <_SA>[];
+    }
+    cur.add(ded[i]);
+  }
+  cols.add(cur);
+  var n = 0;
+  for (final c in cols) {
+    c.sort((a, b) => a.cy.compareTo(b.cy));
+    int? prev;
+    for (final a in c) {
+      final rk = _anchorRank[a.t]!;
+      if (prev == null || rk <= prev) n++;
+      prev = rk;
+    }
+  }
+  out.sm = n;
+  return out;
+}
+
 bool sameDay(ReceiptItem a, ReceiptItem b) =>
     a.date == null || b.date == null || a.date == b.date;
 
@@ -4996,6 +5143,77 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
+
+  // العد السريع: بيقرا صورة كل صفحة مرة واحدة من غير تحويل PNG ولا شرائح. بيرجّع false لو الملف مش ممسوح
+  Future<bool> _countOneFast(MResult r, TextRecognizer rec, Uint8List bytes, File src) async {
+    final ranges = _pdfJpegRanges(bytes);
+    if (ranges.isEmpty) return false;
+    final col = MCollector();
+    final sw = Stopwatch()..start();
+    var total = 0, totalMx = 0, failed = 0;
+    final diff = <String>[];
+    final empty = <int>[];
+    for (var i = 0; i < ranges.length; i++) {
+      final fp = File('$tmpDir/f_$i.jpg');
+      try {
+        await fp.writeAsBytes(Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]));
+        final res = await rec.processImage(InputImage.fromFilePath(fp.path));
+        final sp = _structCount(res);
+        total += sp.sm;
+        totalMx += sp.mx;
+        if (sp.sm == 0) empty.add(i + 1);
+        if (sp.sm != sp.mx) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
+        col.pageH = sp.h;
+        col.pages.add(<Anchor>[]);
+        _collect(res, 0, 1, col);
+      } catch (_) {
+        failed++;
+      }
+      try {
+        fp.deleteSync();
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 30));
+    }
+    _dbg('FAST ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed');
+    if (total == 0 || failed == ranges.length) return false; // نرجع للطريقة القديمة
+    final sc = col.finish();
+    r.count = total;
+    r.detail = 'عدّ سريع • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}';
+    if (failed > 0) {
+      r.cntOk = false;
+      r.cntNotes.add('$failed صفحة فشلت قراءتها، العدد ممكن يكون ناقص');
+    }
+    if (empty.isNotEmpty) {
+      r.cntNotes.add('صفحات ما لقيتش فيها إيصالات: ${empty.join('، ')}');
+    }
+    if (diff.isNotEmpty) {
+      r.cntNotes.add('صفحات الطريقتين اختلفوا فيها: ${diff.join('، ')} (راجعها لو العدد مهم)');
+      if ((total - totalMx).abs() > 3) r.cntOk = false;
+    }
+    // نقارن بتسلسل الـ RRN بس لو الأرقام اتقرت كفاية
+    if (sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen) {
+      r.cntOk = false;
+      final miss = sc.seqMissing.take(10).map((n) => n.toString().padLeft(6, '0')).join('، ');
+      r.cntNotes.add('العدد $total بس التسلسل ${sc.rangeLen}'
+          '${sc.seqMissing.isNotEmpty ? ' - أرقام مش لاقيها: $miss${sc.seqMissing.length > 10 ? ' ...' : ''}' : ''}');
+    }
+    if (sc.otherDay.isNotEmpty) {
+      r.cntOk = false;
+      r.cntNotes.add('مش تبع نفس اليوم: ${sc.otherDay.join(' ، ')}');
+    }
+    if (sc.nonPayment) {
+      r.cntNotes.add('فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)');
+    }
+    if (r.newName == null && sc.tid != null) {
+      await _applyName(r, src, sc.tid, sc.day, sc.month);
+    } else if (sc.tid != null && terminals[sc.tid] != null && r.orderNum != null &&
+        terminals[sc.tid]!.orderNum != r.orderNum) {
+      r.cntOk = false;
+      r.cntNotes.add('العد لقى ماكينة ${terminals[sc.tid]!.orderNum} بس التسمية ماكينة ${r.orderNum}، راجع');
+    }
+    return true;
+  }
+
   Future<void> _countOne(MResult r, TextRecognizer rec) async {
     File? src;
     if (File(r.srcPath).existsSync()) {
@@ -5012,6 +5230,15 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       return;
     }
     final bytes = await src.readAsBytes();
+    if (fastCount) {
+      try {
+        if (await _countOneFast(r, rec, bytes, src)) return;
+      } catch (e) {
+        _dbg('FAST فشل وهنكمل بالطريقة الدقيقة: $e');
+      }
+      r.cntNotes.clear();
+      r.cntOk = true;
+    }
     final col = MCollector();
     _tmStrips = 0;
     _tmOcr = 0;
@@ -5133,6 +5360,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 setState(() => pdfDir = null);
               } else if (v == 'out') {
                 useDefaultOut();
+              } else if (v == 'fast') {
+                toggleFastCount();
+                setState(() {});
               } else if (v == 'clear') {
                 clearAll();
               }
@@ -5144,6 +5374,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               if (destDir != defaultMDest)
                 PopupMenuItem(value: 'out', enabled: !busy, child: const Text('الإخراج: الافتراضي')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
+              PopupMenuItem(value: 'fast', child: Text(fastCount ? 'العد: سريع ← الدقيق (القديم)' : 'العد: دقيق ← السريع')),
               PopupMenuItem(value: 'clear', enabled: !busy, child: const Text('مسح الكل')),
             ],
           ),
