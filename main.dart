@@ -3028,6 +3028,18 @@ class _StructPage {
   final Map<String, int> types = {};
 }
 
+// ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) بتكون جوه الملف: مش إيصال دفع فمتتعدّش
+bool _isIdSlip(RecognizedText res) {
+  final lines = toLines(res);
+  if (lines.isEmpty || lines.length > 10) return false;
+  final all = lines.map((l) => l.text.toUpperCase()).join('\n');
+  if (!RegExp(r'\bTID\b\W{0,3}\d{8}').hasMatch(all)) return false;
+  if (RegExp(r'TERMINAL|RRN|AMOUNT|APPROVED|NATIONAL|BANK\s*OF\s*EGYPT|BATCH|TOTAL').hasMatch(all)) {
+    return false;
+  }
+  return true;
+}
+
 // عدّ الإيصالات بالهيكل: كل إيصال له شعار + Terminal ID + RRN + AMOUNT + Approved (مرة واحدة)
 // بنجمع العلامات دي ونقسمها أعمدة، وفي كل عمود أكتر علامة متكررة = عدد الإيصالات
 _StructPage _structCount(RecognizedText res) {
@@ -3318,6 +3330,27 @@ Future<void> askBatteryExempt({bool force = false}) async {
     await _chan.invokeMethod('requestBatteryExempt');
   } catch (_) {}
 }
+
+String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : d == 2 ? '3 أيام' : 'الكل';
+
+// كارت إحصائية صغير (أيقونة + رقم + اسم) بيتوزع بالتساوي جوه Row
+Widget _statCard(IconData icon, String label, String value, Color c) => Expanded(
+      child: Card(
+        margin: const EdgeInsets.symmetric(horizontal: 2),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Column(
+            children: [
+              Icon(icon, size: 18, color: c),
+              const SizedBox(height: 2),
+              FittedBox(
+                  child: w.Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
+              Text(label, style: const TextStyle(fontSize: 11)),
+            ],
+          ),
+        ),
+      ),
+    );
 
 // لون ثابت لكل وحدة (حسب رقم الصف) علشان تتميز بالنظر
 Color _unitColor(int? row) {
@@ -5718,6 +5751,7 @@ class Anchor {
 
 class MCollector {
   final List<List<Anchor>> pages = [];
+  int slips = 0; // أوراق تعريف اتجاهلت
   final StringBuffer text = StringBuffer();
   double pageH = 3000;
 
@@ -5883,6 +5917,16 @@ Future<void> ocrPageStrips(
   _tmStrips += sw.elapsedMilliseconds - tWhole;
   col.pageH = info.length >= 2 ? info[1].toDouble() : 3000;
   col.pages.add(<Anchor>[]);
+  if (whole != null && _isIdSlip(whole)) {
+    col.slips++;
+    for (var i = 2; i < info.length; i++) {
+      try {
+        File('${prefix}_${i - 2}.jpg').deleteSync();
+      } catch (_) {}
+    }
+    _tmOcr += tWhole;
+    return;
+  }
   if (whole != null) _collect(whole, 0, 1, col);
   final t1 = sw.elapsedMilliseconds;
   for (var i = 2; i < info.length; i++) {
@@ -6753,6 +6797,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   bool namingDone = false; // التسمية خلصت (حتى لو العد لسه شغال): زرار الإرسال يتفعل
   bool busy = false;
   bool stopReq = false;
+  bool settingsOpen = false;
   double progressValue = 0;
   String status = 'اضغط "فحص وإعادة تسمية" لفحص إيصالات الدفع من مستندات واتساب.';
   final List<MResult> results = [];
@@ -7552,7 +7597,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (ranges.isEmpty) return false;
     final col = MCollector();
     final sw = Stopwatch()..start();
-    var total = 0, totalMx = 0, failed = 0;
+    var total = 0, totalMx = 0, failed = 0, slips = 0;
     final diff = <String>[];
     final empty = <int>[];
     for (var i = 0; i < ranges.length; i++) {
@@ -7560,6 +7605,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       try {
         await fp.writeAsBytes(Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]));
         final res = await rec.processImage(InputImage.fromFilePath(fp.path));
+        if (_isIdSlip(res)) {
+          slips++;
+          try {
+            fp.deleteSync();
+          } catch (_) {}
+          continue;
+        }
         final sp = _structCount(res);
         total += sp.sm;
         totalMx += sp.mx;
@@ -7580,7 +7632,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (total == 0 || failed == ranges.length) return false; // نرجع للطريقة القديمة
     final sc = col.finish();
     r.count = total;
-    r.detail = 'عدّ سريع • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}';
+    r.detail = 'عدّ سريع • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
+        '${slips > 0 ? ' • أوراق تعريف مُتجاهلة $slips' : ''}';
     if (failed > 0) {
       r.cntOk = false;
       r.cntNotes.add('$failed صفحة فشلت قراءتها، العدد ممكن يكون ناقص');
@@ -7674,7 +7727,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         '(raster+png ${tRaster ~/ 1000}ث، شرائح ${_tmStrips ~/ 1000}ث، OCR ${_tmOcr ~/ 1000}ث)');
     final sc = col.finish();
     r.count = sc.count;
-    r.detail = 'RRN كامل ${sc.full} • ناقص القراءة ${sc.partial}${sc.rangeText}';
+    r.detail = 'RRN كامل ${sc.full} • ناقص القراءة ${sc.partial}${sc.rangeText}'
+        '${col.slips > 0 ? ' • أوراق تعريف مُتجاهلة ${col.slips}' : ''}';
     if (!sc.agree) {
       r.cntOk = false;
       r.cntNotes.add(sc.seqNote);
@@ -7881,24 +7935,56 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
           _settingsCard([
-            _periodRow(days, busy, (d) {
-              setState(() => days = d);
-              sharedDays.value = d;
-            }),
-            const Divider(height: 10),
-            _pathRow(Icons.folder_open, 'المصدر', pdfDir ?? 'واتساب - مستندات (تلقائي)',
-                busy ? null : pickDir,
-                onReset: pdfDir != null && !busy
-                    ? () {
-                        savePdfDir(null);
-                        setState(() => pdfDir = null);
-                      }
-                    : null),
-            _pathRow(Icons.drive_file_move_outline, 'الإخراج',
-                '$destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}', busy ? null : pickOut,
-                onReset: destDir != defaultMDest && !busy ? useDefaultOut : null),
+            InkWell(
+              onTap: () => setState(() => settingsOpen = !settingsOpen),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.tune, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                          'إعدادات المصدر • ${_periodLabelOf(days)} • ${pdfDir == null ? 'واتساب' : baseName(pdfDir!)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13)),
+                    ),
+                    Icon(settingsOpen ? Icons.expand_less : Icons.expand_more),
+                  ],
+                ),
+              ),
+            ),
+            if (settingsOpen) ...[
+              const Divider(height: 4),
+              _periodRow(days, busy, (d) {
+                setState(() => days = d);
+                sharedDays.value = d;
+              }),
+              const Divider(height: 10),
+              _pathRow(Icons.folder_open, 'المصدر', pdfDir ?? 'واتساب - مستندات (تلقائي)',
+                  busy ? null : pickDir,
+                  onReset: pdfDir != null && !busy
+                      ? () {
+                          savePdfDir(null);
+                          setState(() => pdfDir = null);
+                        }
+                      : null),
+              _pathRow(Icons.drive_file_move_outline, 'الإخراج',
+                  '$destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}', busy ? null : pickOut,
+                  onReset: destDir != defaultMDest && !busy ? useDefaultOut : null),
+            ],
           ]),
           _statusBox(status),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              _statCard(Icons.description, 'ملفات', '${results.length}', Colors.blue),
+              _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.green),
+              _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber),
+              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', Colors.orange),
+            ],
+          ),
           const SizedBox(height: 6),
           _filterRow(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
           const SizedBox(height: 6),
