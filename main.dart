@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -3305,6 +3306,29 @@ Future<List<String>?> pickFilesViaChooser(
   }
 }
 
+// بيطلب إعفاء التطبيق من توفير البطارية علشان يفضل شغال في الخلفية (مرة واحدة، أو بالقوة من القايمة)
+Future<void> askBatteryExempt({bool force = false}) async {
+  try {
+    final ok = await _chan.invokeMethod<bool>('batteryExempt');
+    if (ok == true) return;
+    final cfg = _readCfg();
+    if (!force && cfg['batteryAsked'] == true) return;
+    cfg['batteryAsked'] = true;
+    _writeCfg(cfg);
+    await _chan.invokeMethod('requestBatteryExempt');
+  } catch (_) {}
+}
+
+// لون ثابت لكل وحدة (حسب رقم الصف) علشان تتميز بالنظر
+Color _unitColor(int? row) {
+  const p = [
+    Colors.blue, Colors.teal, Colors.purple, Colors.orange, Colors.pink, Colors.indigo,
+    Colors.green, Colors.brown, Colors.cyan, Colors.red, Colors.lime, Colors.deepPurple,
+  ];
+  if (row == null) return Colors.grey;
+  return p[row % p.length];
+}
+
 // ───────────────────── الشاشة الرئيسية ─────────────────────
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -3331,11 +3355,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool autoRotate = false; // أبطأ: بيجرّب تدوير كل صورة مش إيصال
   String sourceNote = '';
   bool reviewOnly = false;
+  bool stopReq = false;
+  bool autoScan = false;
+  bool settingsOpen = false;
+  Timer? _autoTimer;
+  String _doneSig = '';
+  String _pendSig = '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    autoScan = _readCfg()['autoScan'] == true;
+    if (autoScan) _startAuto();
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
@@ -3450,10 +3482,156 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _autoTimer?.cancel();
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  // ───── فحص تلقائي: بيراقب الصور الجديدة ويفحصها لوحده (بيستنى لحد ما الصور تخلص تنزيل) ─────
+  String _scanSig() {
+    try {
+      final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
+      final now = DateTime.now();
+      final cutoff = days < 0
+          ? DateTime(2000)
+          : DateTime(now.year, now.month, now.day).subtract(Duration(days: days));
+      var n = 0, size = 0, latest = 0;
+      for (final d in dirs) {
+        for (final e in d.listSync().whereType<File>()) {
+          final lower = e.path.toLowerCase();
+          if (!(lower.endsWith('.jpg') ||
+              lower.endsWith('.jpeg') ||
+              lower.endsWith('.png') ||
+              lower.endsWith('.webp'))) {
+            continue;
+          }
+          final b = baseName(e.path);
+          if (b.startsWith('.') || b.startsWith('dup_')) continue;
+          final fd = fileDate(e);
+          if (fd.isBefore(cutoff)) continue;
+          n++;
+          size += e.lengthSync();
+          final ms = fd.millisecondsSinceEpoch;
+          if (ms > latest) latest = ms;
+        }
+      }
+      return n == 0 ? '' : '$n:$size:$latest';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<void> _watchService(bool on) async {
+    try {
+      if (on) {
+        await _chan.invokeMethod('startKeepAlive',
+            {'title': 'A2R POS', 'text': 'مراقبة الإيصالات الجديدة...'});
+      } else {
+        await _chan.invokeMethod('stopKeepAlive');
+      }
+    } catch (_) {}
+  }
+
+  void _startAuto() {
+    _autoTimer?.cancel();
+    _autoTimer = Timer.periodic(const Duration(seconds: 15), (_) => _autoTick());
+    _watchService(true);
+  }
+
+  void _stopAuto() {
+    _autoTimer?.cancel();
+    _autoTimer = null;
+    _watchService(false);
+  }
+
+  Future<void> _autoTick() async {
+    if (!mounted || !autoScan || busy) return;
+    final sig = _scanSig();
+    if (sig.isEmpty || sig == _doneSig) {
+      _pendSig = '';
+      return;
+    }
+    if (sig != _pendSig) {
+      _pendSig = sig; // لسه الصور بتنزل: نستنى الدورة الجاية
+      return;
+    }
+    _pendSig = '';
+    await runFullPipeline(auto: true);
+  }
+
+  Future<void> _setAuto(bool v) async {
+    setState(() => autoScan = v);
+    final cfg = _readCfg();
+    cfg['autoScan'] = v;
+    _writeCfg(cfg);
+    if (v) {
+      _doneSig = '';
+      _startAuto();
+      await askBatteryExempt();
+    } else {
+      _stopAuto();
+    }
+  }
+
+  String _periodLabel() => days == 0 ? 'اليوم' : days == 1 ? 'يومين' : days == 2 ? '3 أيام' : 'الكل';
+
+  Widget _statTile(IconData icon, String label, String value, Color c) => Expanded(
+        child: Card(
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            child: Column(
+              children: [
+                Icon(icon, size: 18, color: c),
+                const SizedBox(height: 2),
+                FittedBox(
+                    child: w.Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
+                Text(label, style: const TextStyle(fontSize: 11)),
+              ],
+            ),
+          ),
+        ),
+      );
+
+  Widget _statsRow() {
+    final counted = processedItems
+        .where((e) => !e.userExcluded && !e.ignoredDoc && e.ign != 'drop' && e.amount > 0)
+        .toList();
+    final total = counted.fold<double>(0, (a, e) => a + e.amount);
+    final rv = processedItems.where((e) => e.needsReview).length;
+    return Row(
+      children: [
+        _statTile(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blue),
+        _statTile(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green),
+        _statTile(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber),
+        _statTile(Icons.fact_check, 'مراجعة', '$rv', Colors.orange),
+      ],
+    );
+  }
+
+  Widget _quickBtn(IconData icon, String label, VoidCallback? onTap) {
+    final cs = Theme.of(context).colorScheme;
+    return InkWell(
+      borderRadius: BorderRadius.circular(30),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(
+              radius: 24,
+              backgroundColor: onTap == null ? cs.surfaceContainerHighest : cs.primaryContainer,
+              child: Icon(icon, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
+            ),
+            const SizedBox(height: 4),
+            Text(label, style: const TextStyle(fontSize: 12)),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> pickFolder() async {
@@ -4016,10 +4194,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  Future<void> runFullPipeline({List<String>? manualPaths}) async {
-    try {
-      await Permission.notification.request();
-    } catch (_) {}
+  Future<void> runFullPipeline({List<String>? manualPaths, bool auto = false}) async {
+    if (manualPaths == null) _doneSig = _scanSig();
+    if (!auto) {
+      try {
+        await Permission.notification.request();
+      } catch (_) {}
+      await askBatteryExempt();
+    }
     try {
       await _chan.invokeMethod('startKeepAlive',
           {'title': 'A2R POS', 'text': 'جاري فحص الإيصالات...'});
@@ -4030,9 +4212,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await _runPipelineInner(manualPaths: manualPaths);
     } finally {
-      try {
-        await _chan.invokeMethod('stopKeepAlive');
-      } catch (_) {}
+      if (autoScan) {
+        await _watchService(true); // نفضل شغالين نراقب الإيصالات الجديدة
+      } else {
+        try {
+          await _chan.invokeMethod('stopKeepAlive');
+        } catch (_) {}
+      }
       try {
         await _chan.invokeMethod('keepScreenOn', {'on': false});
       } catch (_) {}
@@ -4058,6 +4244,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     setState(() {
       busy = true;
+      stopReq = false;
       progress = 0;
       processedItems.clear();
       missingTerminals.clear();
@@ -4169,6 +4356,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     // ═════════ المرحلة 1: قراءة الصور ═════════
     for (var i = 0; i < todo.length; i++) {
+      if (stopReq) break;
       final f = todo[i];
       try {
         Directory(tmpDir).createSync(recursive: true);
@@ -4337,6 +4525,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     await recognizer.close();
 
+    if (stopReq) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          status = 'اتوقف الفحص. اضغط "بدء" لو عايز تبدأ من جديد.';
+        });
+      }
+      return;
+    }
+
     if (rawReceipts.isEmpty) {
       processedItems.addAll(ignoredItems);
       setState(() {
@@ -4348,7 +4546,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     // ═════════ المرحلة 2: التكرار وترقيم الماكينات ═════════
     setState(() => status = 'مراجعة التكرار وترقيم الماكينات...');
-    final prio = <String, int>{'manual': 0, 'terminal': 0, 'fuzzy': 1, 'file-number': 2};
+    final prio = <String, int>{'manual': 0, 'terminal': 0, 'new-terminal': 0, 'fuzzy': 1, 'file-number': 2};
     final withTid = rawReceipts.where((r) => r.tid != null).toList();
     withTid.sort((a, b) {
       final c = (prio[a.how] ?? 3).compareTo(prio[b.how] ?? 3);
@@ -4401,7 +4599,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final r in rawReceipts) {
       if (r.skip || r.tid != null || r.row == null) continue;
       if (r.conflict &&
-          (r.how == 'terminal' || r.how == 'fuzzy' || r.dupDecision == 'keep')) {
+          (r.how == 'terminal' || r.how == 'new-terminal' || r.how == 'fuzzy' || r.dupDecision == 'keep')) {
         giveSuffix(r); // نفس الماكينة بمبلغ مختلف = باتش إضافي
         continue;
       }
@@ -4546,6 +4744,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 useWhatsApp();
               } else if (v == 'out') {
                 useDefaultOut();
+              } else if (v == 'battery') {
+                askBatteryExempt(force: true);
               } else if (v == 'resetApps') {
                 resetDefaultHandlers(context);
               } else if (v == 'wipe') {
@@ -4567,6 +4767,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
               PopupMenuItem(
+                  value: 'battery',
+                  child: w.Text(AppSettings.of(context).isAr ? 'السماح بالعمل في الخلفية' : 'Allow background running')),
+              PopupMenuItem(
                   value: 'resetApps',
                   child: w.Text(AppSettings.of(context).isAr ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
               PopupMenuItem(
@@ -4577,12 +4780,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ],
       ),
+      floatingActionButton: FloatingActionButton.small(
+        tooltip: 'اختيار صور يدوياً',
+        onPressed: busy ? null : pickManualImages,
+        child: const Icon(Icons.add_photo_alternate),
+      ),
       bottomNavigationBar: _bottomBar(
-        FilledButton.icon(
-          onPressed: busy ? null : runFullPipeline,
-          icon: const Icon(Icons.play_arrow),
-          label: const Text('بدء المعالجة الشاملة'),
-        ),
+        busy
+            ? FilledButton.icon(
+                onPressed: stopReq ? null : () => setState(() => stopReq = true),
+                style: FilledButton.styleFrom(
+                    backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
+                icon: const Icon(Icons.stop),
+                label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف'),
+              )
+            : FilledButton.icon(
+                onPressed: () => runFullPipeline(),
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('بدء المعالجة الشاملة'),
+              ),
         busy: busy,
         progress: progress,
       ),
@@ -4590,23 +4806,47 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
           _settingsCard([
-            _periodRow(days, busy, (d) {
-              setState(() => days = d);
-              sharedDays.value = d;
-            }),
-            const Divider(height: 10),
-            _pathRow(Icons.folder_open, 'المصدر', customDir ?? 'واتساب (تلقائي)',
-                busy ? null : pickFolder,
-                onReset: customDir != null && !busy ? useWhatsApp : null),
-            _pathRow(Icons.add_photo_alternate, 'اختيار صور يدوياً', 'فتح معرض الصور',
-                busy ? null : pickManualImages),
-            _pathRow(Icons.drive_file_move_outline, 'الإخراج',
-                customOut ?? '$defaultOutputDir (افتراضي)', busy ? null : pickOutFolder,
-                onReset: customOut != null && !busy ? useDefaultOut : null),
-            _switchRow('فحص الصور المقلوبة (أبطأ)', autoRotate,
-                busy ? null : (v) => setState(() => autoRotate = v)),
+            _switchRow('فحص تلقائي (بيراقب الإيصالات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
+            const Divider(height: 4),
+            InkWell(
+              onTap: () => setState(() => settingsOpen = !settingsOpen),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.tune, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                          'إعدادات المصدر • ${_periodLabel()} • ${customDir == null ? 'واتساب' : baseName(customDir!)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13)),
+                    ),
+                    Icon(settingsOpen ? Icons.expand_less : Icons.expand_more),
+                  ],
+                ),
+              ),
+            ),
+            if (settingsOpen) ...[
+              _periodRow(days, busy, (d) {
+                setState(() => days = d);
+                sharedDays.value = d;
+              }),
+              const Divider(height: 10),
+              _pathRow(Icons.folder_open, 'المصدر', customDir ?? 'واتساب (تلقائي)',
+                  busy ? null : pickFolder,
+                  onReset: customDir != null && !busy ? useWhatsApp : null),
+              _pathRow(Icons.drive_file_move_outline, 'الإخراج',
+                  customOut ?? '$defaultOutputDir (افتراضي)', busy ? null : pickOutFolder,
+                  onReset: customOut != null && !busy ? useDefaultOut : null),
+              _switchRow('فحص الصور المقلوبة (أبطأ)', autoRotate,
+                  busy ? null : (v) => setState(() => autoRotate = v)),
+            ],
           ]),
           _statusBox(status),
+          const SizedBox(height: 6),
+          _statsRow(),
           const SizedBox(height: 6),
           if (processedItems.isNotEmpty) ...[
             _filterRow(reviewOnly, processedItems.length, reviewCount, (v) => setState(() => reviewOnly = v)),
@@ -4620,23 +4860,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             const SizedBox(height: 6),
           ],
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              _mini(
+              _quickBtn(
                   Icons.table_chart,
                   'إكسيل',
                   xlsx == null
                       ? null
                       : () => openFile(xlsx,
-                          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
-                  filled: true),
-              _mini(Icons.picture_as_pdf, 'PDF',
-                  pdf == null ? null : () => openFile(pdf, 'application/pdf'),
-                  filled: true),
-              _mini(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
-              _mini(Icons.fact_check, 'مراجعة ($reviewCount)', busy ? null : openReview),
+                          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
+              _quickBtn(Icons.picture_as_pdf, 'PDF',
+                  pdf == null ? null : () => openFile(pdf, 'application/pdf')),
+              _quickBtn(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
+              _quickBtn(Icons.fact_check, 'مراجعة ($reviewCount)', busy ? null : openReview),
             ],
           ),
           if (missingTerminals.isNotEmpty) ...[
@@ -4688,6 +4925,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           for (final item in processedItems.where((e) => !reviewOnly || e.needsReview))
             _swipeWrap(item, Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: _unitColor(item.row), width: 1.5),
+              ),
               child: ListTile(
                 onTap: () => Navigator.push(
                   context,
@@ -4731,7 +4972,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               },
                       ),
                     if (item.needsReview)
-                      Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange)),
+                      Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange))
+                    else if (item.ignoredDoc || item.ign == 'drop' || item.userExcluded)
+                      const Icon(Icons.remove_circle_outline, color: Colors.grey)
+                    else if (item.tid != null && item.amount > 0)
+                      const Icon(Icons.check_circle, color: Colors.green)
+                    else
+                      const Icon(Icons.cancel, color: Colors.red),
                     IconButton(
                       icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
                       onPressed: busy ? null : () => editReceipt(item),
@@ -4740,6 +4987,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
               ),
             )),
+          const SizedBox(height: 64),
         ],
       ),
     );
@@ -7558,6 +7806,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               } else if (v == 'fast') {
                 toggleFastCount();
                 setState(() {});
+              } else if (v == 'battery') {
+                askBatteryExempt(force: true);
               } else if (v == 'resetApps') {
                 resetDefaultHandlers(context);
               } else if (v == 'wipe') {
@@ -7580,6 +7830,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
               PopupMenuItem(value: 'fast', child: Text(fastCount ? 'العد: سريع ← الدقيق (القديم)' : 'العد: دقيق ← السريع')),
               PopupMenuItem(
+                  value: 'battery',
+                  child: w.Text(AppSettings.of(context).isAr ? 'السماح بالعمل في الخلفية' : 'Allow background running')),
+              PopupMenuItem(
                   value: 'resetApps',
                   child: w.Text(AppSettings.of(context).isAr ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
               PopupMenuItem(
@@ -7589,6 +7842,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             ],
           ),
         ],
+      ),
+      floatingActionButton: FloatingActionButton.small(
+        tooltip: 'اختيار PDF يدوياً',
+        onPressed: busy ? null : pickManualPdfs,
+        child: const Icon(Icons.picture_as_pdf),
       ),
       bottomNavigationBar: _bottomBar(
         busy
@@ -7636,8 +7894,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                         setState(() => pdfDir = null);
                       }
                     : null),
-            _pathRow(Icons.picture_as_pdf, 'اختيار PDF يدوياً', 'فتح معرض الملفات',
-                busy ? null : pickManualPdfs),
             _pathRow(Icons.drive_file_move_outline, 'الإخراج',
                 '$destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}', busy ? null : pickOut,
                 onReset: destDir != defaultMDest && !busy ? useDefaultOut : null),
