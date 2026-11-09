@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/widgets.dart' as w show Text;
 import 'package:flutter/services.dart';
@@ -219,6 +220,74 @@ Widget _statusBox(String text) => Builder(
         child: Text(text, style: const TextStyle(fontSize: 13)),
       ),
     );
+
+// ───────── نقل/نسخ ملفات لفولدر بيختاره المستخدم من متصفح ملفات التليفون ─────────
+// بيرجّع خريطة (المسار القديم ← الجديد) للملفات اللي اتنقلت/اتنسخت، أو null لو اتلغى
+Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<String> paths) async {
+  final existing = paths.where((p) => File(p).existsSync()).toList();
+  if (existing.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('مفيش ملفات جاهزة للنقل.')),
+    );
+    return null;
+  }
+  final mode = await showDialog<String>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: const Text('نقل الملفات'),
+      content: Text('${existing.length} ملف. اختار فولدر من التليفون، وبعدين الملفات تتنقل أو تتنسخ ليه.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
+        TextButton(onPressed: () => Navigator.pop(c, 'copy'), child: const Text('نسخ')),
+        FilledButton(onPressed: () => Navigator.pop(c, 'move'), child: const Text('نقل')),
+      ],
+    ),
+  );
+  if (mode == null) return null;
+  try {
+    if (!await Permission.manageExternalStorage.isGranted) {
+      await Permission.manageExternalStorage.request();
+    }
+  } catch (_) {}
+  String? dir;
+  try {
+    dir = await FilePicker.platform.getDirectoryPath(dialogTitle: 'اختار الفولدر');
+  } catch (_) {}
+  if (dir == null) return null;
+  final done = <String, String>{};
+  var failed = 0;
+  for (final p in existing) {
+    try {
+      final name = baseName(p);
+      var dot = name.lastIndexOf('.');
+      final stem = dot > 0 ? name.substring(0, dot) : name;
+      final ext = dot > 0 ? name.substring(dot) : '';
+      var dst = File('$dir/$name');
+      var k = 2;
+      while (dst.existsSync()) {
+        dst = File('$dir/${stem}_$k$ext');
+        k++;
+      }
+      if (dst.path == p) continue;
+      await File(p).copy(dst.path);
+      if (mode == 'move') {
+        try {
+          File(p).deleteSync();
+        } catch (_) {}
+      }
+      done[p] = dst.path;
+    } catch (_) {
+      failed++;
+    }
+  }
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(
+          '${mode == 'move' ? 'اتنقل' : 'اتنسخ'} ${done.length} ملف${failed > 0 ? ' • فشل $failed' : ''}'),
+    ));
+  }
+  return done;
+}
 
 Widget _bottomBar(Widget button, {bool busy = false, double? progress}) => Material(
       elevation: 6,
@@ -3031,13 +3100,22 @@ class _StructPage {
 // ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) بتكون جوه الملف: مش إيصال دفع فمتتعدّش
 bool _isIdSlip(RecognizedText res) {
   final lines = toLines(res);
-  if (lines.isEmpty || lines.length > 10) return false;
+  if (lines.isEmpty || lines.length > 16) return false;
   final all = lines.map((l) => l.text.toUpperCase()).join('\n');
-  if (!RegExp(r'\bTID\b\W{0,3}\d{8}').hasMatch(all)) return false;
-  if (RegExp(r'TERMINAL|RRN|AMOUNT|APPROVED|NATIONAL|BANK\s*OF\s*EGYPT|BATCH|TOTAL').hasMatch(all)) {
+  // أي علامة من علامات إيصال الدفع = مش ورقة تعريف
+  if (RegExp(r'TERMINAL|RRN|AMOUNT|APPROVED|NATIONAL|BANK\s*OF\s*EGYPT|BATCH|TOTAL|SALE|GRAND|CARD|REPRINT')
+      .hasMatch(all)) {
     return false;
   }
-  return true;
+  // رقم RRN (12 رقم) معناه إيصال حقيقي
+  if (RegExp(r'(?<!\d)\d{12}(?!\d)').hasMatch(all.replaceAll(RegExp(r'[ \t]'), ''))) return false;
+  // TID بقراءة متساهلة (TID:50335987 أو T1D أو TlD ...)
+  final hasTid = RegExp(r'\bT\s?[I1L|]\s?D\b\W{0,4}[\dOo]{7,9}').hasMatch(all) ||
+      RegExp(r'\bT\s?[I1L|]\s?D\b').hasMatch(all);
+  if (hasTid) return true;
+  // لو كلمة TID اتقرت غلط: رقم ماكينة معروف + تاريخ، من غير أي علامات إيصال
+  final hasDate = RegExp(r'\d{2}\s?[/.\-]\s?\d{2}\s?[/.\-]\s?20\d{2}').hasMatch(all);
+  return hasDate && lines.length <= 8 && findTerminalIn([all]) != null;
 }
 
 // عدّ الإيصالات بالهيكل: كل إيصال له شعار + Terminal ID + RRN + AMOUNT + Approved (مرة واحدة)
@@ -3927,6 +4005,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => customDir = null);
   }
 
+  // نقل ملفات التقفيل (الإكسيل والـ PDF) لفولدر أختاره من التليفون
+  Future<void> transferOutputs() async {
+    final paths = <String>[
+      if (latestOutput('.xlsx') != null) latestOutput('.xlsx')!,
+      if (latestOutput('.pdf') != null) latestOutput('.pdf')!,
+      ...extraPdfPaths,
+    ];
+    final moved = await transferFilesViaPicker(context, paths.toSet().toList());
+    if (moved == null || !mounted) return;
+    setState(() {
+      if (moved[standardXlsxPath] != null) standardXlsxPath = moved[standardXlsxPath];
+      if (moved[generatedPdfPath] != null) generatedPdfPath = moved[generatedPdfPath];
+      extraPdfPaths = extraPdfPaths.map((p) => moved[p] ?? p).toList();
+    });
+  }
+
   Future<void> shareStandardFiles() async {
     final files = <XFile>[];
     if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
@@ -4398,6 +4492,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final fkey = '${baseName(f.path)}:${f.lengthSync()}';
         final fxm = fixes[fkey];
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
+        if (ign != 'keep' && _isIdSlip(res)) {
+          if (!mounted) return;
+          setState(() {
+            progress = ((i + 1) / todo.length) * 0.5;
+            status = 'فحص OCR: ${i + 1} من ${todo.length}';
+          });
+          continue; // ورقة تعريف: مش باتش
+        }
         var isReceipt = receiptScore(res.text) >= 2 || findTerminalIn([res.text]) != null;
         if (ign == 'keep') isReceipt = true; // قررت قبل كده إنها باتش
         // إيصال دفع أو مستند مش باتش/ملخص/ري برنت: بيدخل المراجعة (مش بيتتجاهل نهائي)
@@ -4764,6 +4866,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         title: const AppTitle(),
         actions: [
           const HeaderButtons(),
+          IconButton(
+            tooltip: 'نقل الملفات لفولدر',
+            icon: const Icon(Icons.drive_file_move),
+            onPressed: busy ? null : transferOutputs,
+          ),
           PopupMenuButton<String>(
             tooltip: tr('المزيد'),
             onSelected: (v) {
@@ -6959,6 +7066,21 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
+  // نقل PDF الإيصالات اللي اتفحصت واتسمّت وبقت تمام لفولدر أختاره من التليفون
+  Future<void> transferGood() async {
+    final good = results
+        .where((r) => !r.excluded && r.newName != null && r.ok && r.openPath != null && File(r.openPath!).existsSync())
+        .toList();
+    final moved = await transferFilesViaPicker(context, good.map((r) => r.openPath!).toList());
+    if (moved == null || moved.isEmpty || !mounted) return;
+    for (final r in good) {
+      final np = moved[r.openPath];
+      if (np != null) r.openPath = np;
+    }
+    saveMState(results);
+    setState(() {});
+  }
+
   // ───── المشاركة: كل الملفات مرة واحدة، أو ملف ملف ─────
   Future<void> shareAll() async {
     final files = results
@@ -7843,6 +7965,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         title: const AppTitle(),
         actions: [
           const HeaderButtons(),
+          IconButton(
+            tooltip: 'نقل الملفات لفولدر',
+            icon: const Icon(Icons.drive_file_move),
+            onPressed: busy ? null : transferGood,
+          ),
           PopupMenuButton<String>(
             tooltip: tr('المزيد'),
             onSelected: (v) {
