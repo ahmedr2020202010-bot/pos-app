@@ -249,10 +249,40 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
     }
   } catch (_) {}
   if (!context.mounted) return null;
-  final String? dir = await Navigator.push<String>(
-    context,
-    MaterialPageRoute(builder: (_) => FolderPicker(start: root)),
-  );
+  String? dir;
+  var fallback = false;
+  try {
+    final handlers = _toHandlers(await _chan.invokeMethod<List<dynamic>>('folderPickHandlers'));
+    if (!context.mounted) return null;
+    final picked = await chooseHandler(
+      context,
+      title: 'افتح بإيه عشان تختار الفولدر؟ (فيه زر إنشاء فولدر جديد)',
+      handlers: handlers,
+      prefKey: 'dest_folder_picker',
+      systemOption: <String, String>{'pkg': '', 'cls': '', 'kind': 'tree', 'label': 'متصفح ملفات النظام'},
+    );
+    if (picked == null) return null;
+    final r = await _chan.invokeMethod<String>('pickFolderWith', {
+      'pkg': picked['pkg'] ?? '',
+      'cls': picked['cls'] ?? '',
+    });
+    if (r == null || r == '?') {
+      fallback = true;
+    } else if (r.isEmpty) {
+      return null; // اتلغى
+    } else {
+      dir = r;
+    }
+  } catch (_) {
+    fallback = true;
+  }
+  if (fallback) {
+    if (!context.mounted) return null;
+    dir = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => FolderPicker(start: root)),
+    );
+  }
   if (dir == null) return null;
   final done = <String, String>{};
   var failed = 0;
