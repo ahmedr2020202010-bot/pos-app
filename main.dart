@@ -1558,7 +1558,7 @@ List<List<OcrLine>> splitColumns(List<OcrLine> lines) {
 final RegExp _amountRe =
     RegExp(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)");
 final RegExp _brandRe = RegExp(
-    r"\b(VISA|MASTER(?:CARD)?|MEZZA|MEEZA|MEZA|MEZZ4|MEZZ)\b",
+    r"\b(VISA|MASTER(?:CARD)?|[MN]EEZA|[MN]EZZ?[A4]|MEZA|MEZZ)\b",
     caseSensitive: false);
 
 List<double> amountsIn(String rawText) {
@@ -2189,7 +2189,14 @@ void _enhanceImage(String src, String dst) {
   var im = img.decodeImage(File(src).readAsBytesSync());
   if (im == null) throw Exception('decode failed');
   im = img.bakeOrientation(im);
-  im = img.grayscale(im);
+  // قناة الأحمر بدل الرمادي: الخطوط الحمرا على الباتش بتختفي والحبر الأسود يفضل غامق
+  for (final p in im) {
+    final r = p.r;
+    p
+      ..r = r
+      ..g = r
+      ..b = r;
+  }
   im = img.adjustColor(im, contrast: 1.6);
   if (im.width < 1800) {
     im = img.copyResize(im,
@@ -2530,7 +2537,7 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   for (var y = 0; y < gh; y++) {
     for (var x = 0; x < gw; x++) {
       final p = crop.getPixel(x, y);
-      g[y * gw + x] = _ci(((p.r * 299 + p.g * 587 + p.b * 114) ~/ 1000).toInt(), 0, 255);
+      g[y * gw + x] = _ci(p.r.toInt(), 0, 255); // قناة الأحمر عشان نشيل الخطوط الحمرا
     }
   }
   final tlx = (q[0] - cx0) * sx, tly = (q[1] - cy0) * sy;
@@ -3122,7 +3129,7 @@ class _SA {
 }
 
 class _StructPage {
-  int sm = 0, mx = 0;
+  int sm = 0, mx = 0, cl = 0; // cl = عدد إيصالات الإقفال (GRAND TOTALS) اللي اتلقت في الصفحة
   double h = 3000;
   final Map<String, int> types = {};
 }
@@ -3165,6 +3172,10 @@ _StructPage _structCount(RecognizedText res) {
   final rrnRe = RegExp(r'(?<![A-Z])R{1,2}N\W{0,3}\d');
   final amtRe = RegExp(r'^\s*AMOUNT\b');
   final amtBad = RegExp(r'FROM|ACCOUNT|CONFIRM|DEBIT|\bMY\b');
+  // إيصال إقفال الباتش عنده شعار البنك + TERMINAL (زي إيصال الدفع) بس مش إيصال دفع: لازم يتخصم
+  final cl1Re = RegExp(r'GRAND|TOTALS');
+  final cl2Re = RegExp(r'BATCH\s*CLOS|SUCCESSF');
+  final cl3Re = RegExp(r'TOTAL\s*NET');
   for (final l in lines) {
     final u = l.text.toUpperCase();
     void add(String t) => all.add(_SA(t, (l.left + l.right) / 2, l.cy, l.left, l.right));
@@ -3173,6 +3184,9 @@ _StructPage _structCount(RecognizedText res) {
     if (rrnRe.hasMatch(u)) add('rrn');
     if (amtRe.hasMatch(u) && !amtBad.hasMatch(u)) add('amount');
     if (u.contains('APPROVED')) add('appr');
+    if (cl1Re.hasMatch(u)) add('cl1');
+    if (cl2Re.hasMatch(u)) add('cl2');
+    if (cl3Re.hasMatch(u)) add('cl3');
   }
   // إزالة التكرار (نفس العلامة اتقرت مرتين)
   final ded = <_SA>[];
@@ -3190,7 +3204,11 @@ _StructPage _structCount(RecognizedText res) {
     out.types[a.t] = (out.types[a.t] ?? 0) + 1;
   }
   if (ded.isEmpty) return out;
-  out.mx = out.types.values.reduce((a, b) => a > b ? a : b);
+  int tv(String k) => out.types[k] ?? 0;
+  out.cl = math.max(tv('cl1'), math.max(tv('cl2'), tv('cl3')));
+  final payMx = math.max(tv('rrn'), math.max(tv('appr'), tv('amount')));
+  final shellMx = math.max(tv('logo'), tv('term'));
+  out.mx = math.max(payMx, shellMx - out.cl);
   // أعمدة
   ded.sort((a, b) => a.cx.compareTo(b.cx));
   final cols = <List<_SA>>[];
@@ -3211,7 +3229,13 @@ _StructPage _structCount(RecognizedText res) {
     for (final a in c) {
       cnt[a.t] = (cnt[a.t] ?? 0) + 1;
     }
-    n += cnt.values.reduce((a, b) => a > b ? a : b);
+    int g(String k) => cnt[k] ?? 0;
+    // علامات الدفع الحقيقية (RRN / Approved / AMOUNT) مش موجودة في إيصال الإقفال.
+    // الشعار و TERMINAL موجودين في الاتنين، فبنخصم منهم عدد إيصالات الإقفال.
+    final pay = math.max(g('rrn'), math.max(g('appr'), g('amount')));
+    final shell = math.max(g('logo'), g('term'));
+    final closeN = math.max(g('cl1'), math.max(g('cl2'), g('cl3')));
+    n += math.max(pay, shell - closeN);
   }
   out.sm = n;
   return out;
@@ -7767,7 +7791,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         final sp = _structCount(res);
         total += sp.sm;
         totalMx += sp.mx;
-        if (sp.sm == 0) empty.add(i + 1);
+        if (sp.sm == 0 && sp.cl == 0) empty.add(i + 1);
         if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
         col.pageH = sp.h;
         col.pages.add(<Anchor>[]);
