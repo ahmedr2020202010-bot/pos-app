@@ -6,7 +6,6 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/widgets.dart' as w show Text;
 import 'package:flutter/services.dart';
@@ -249,10 +248,11 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
       await Permission.manageExternalStorage.request();
     }
   } catch (_) {}
-  String? dir;
-  try {
-    dir = await FilePicker.platform.getDirectoryPath(dialogTitle: 'اختار الفولدر');
-  } catch (_) {}
+  if (!context.mounted) return null;
+  final String? dir = await Navigator.push<String>(
+    context,
+    MaterialPageRoute(builder: (_) => FolderPicker(start: root)),
+  );
   if (dir == null) return null;
   final done = <String, String>{};
   var failed = 0;
