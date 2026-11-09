@@ -41,7 +41,7 @@ jobs:
           cp main.dart app/lib/main.dart
           cd app
           flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing shared_preferences
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|<application|<application android:largeHeap=\"true\"|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
@@ -142,6 +142,31 @@ jobs:
                                   val paths = call.argument<List<String>>("paths") ?: emptyList()
                                   val text = call.argument<String>("text") ?: ""
                                   result.success(shareToWhatsApp(paths, text))
+                              }
+                              "keepScreenOn" -> {
+                                  val on = call.argument<Boolean>("on") ?: false
+                                  runOnUiThread {
+                                      if (on) {
+                                          window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                                      } else {
+                                          window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                                      }
+                                  }
+                                  result.success(true)
+                              }
+                              "batteryExempt" -> {
+                                  val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                                  result.success(pm.isIgnoringBatteryOptimizations(packageName))
+                              }
+                              "requestBatteryExempt" -> {
+                                  try {
+                                      val i = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                      i.data = Uri.parse("package:" + packageName)
+                                      startActivity(i)
+                                      result.success(true)
+                                  } catch (e: Exception) {
+                                      result.success(false)
+                                  }
                               }
                               "pickHandlers" -> {
                                   result.success(pickHandlers(call.argument<String>("mime") ?: "*/*"))
@@ -487,9 +512,29 @@ jobs:
           }
 
           class KeepAliveService : Service() {
+              private var wl: android.os.PowerManager.WakeLock? = null
+
               override fun onBind(intent: Intent?): IBinder? = null
 
+              override fun onDestroy() {
+                  try {
+                      wl?.release()
+                  } catch (e: Exception) {
+                  }
+                  wl = null
+                  super.onDestroy()
+              }
+
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (wl == null) {
+                      try {
+                          val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                          wl = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "pos:keepalive")
+                          wl?.setReferenceCounted(false)
+                          wl?.acquire()
+                      } catch (e: Exception) {
+                      }
+                  }
                   val title = intent?.getStringExtra("title") ?: "A2R POS"
                   val text = intent?.getStringExtra("text") ?: ""
                   val n = NotifHelper.build(this, "pos_progress", "جاري المعالجة", title, text, true)
