@@ -581,15 +581,48 @@ jobs:
           }
           EOG
 
+      - name: Pre-download Gradle (retries + mirrors)
+        run: |
+          cd app
+          PROP=android/gradle/wrapper/gradle-wrapper.properties
+          URL=$(grep '^distributionUrl=' "$PROP" | sed 's/^distributionUrl=//; s/\\//g')
+          FILE=$(basename "$URL")
+          mkdir -p "$HOME/gradle-dist"
+          DEST="$HOME/gradle-dist/$FILE"
+          echo "Gradle distribution: $URL"
+          fetch() { curl -fL --retry 3 --retry-delay 10 --connect-timeout 30 --max-time 900 -o "$DEST" "$1"; }
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            if fetch "$URL" && unzip -tq "$DEST" >/dev/null 2>&1; then ok=1; break; fi
+            echo "Download attempt $i failed, waiting 30s..."
+            sleep 30
+          done
+          if [ "$ok" != 1 ]; then
+            for base in https://mirrors.cloud.tencent.com/gradle https://repo.huaweicloud.com/gradle; do
+              echo "Trying mirror: $base/$FILE"
+              if fetch "$base/$FILE" && unzip -tq "$DEST" >/dev/null 2>&1; then ok=1; break; fi
+            done
+          fi
+          if [ "$ok" = 1 ]; then
+            grep -v '^distributionUrl=' "$PROP" > "$PROP.new"
+            printf 'distributionUrl=file\\://%s\n' "$DEST" >> "$PROP.new"
+            mv "$PROP.new" "$PROP"
+            grep distributionUrl "$PROP"
+          else
+            echo "WARNING: could not pre-download Gradle; the build will try its own download"
+          fi
+
       - name: Build APK
         run: |
+          set -o pipefail
           cd app
           VER="${APP_VERSION}+${GITHUB_RUN_NUMBER}"
           ok=0
+          : > ../release_build.log
           # نسخة release (أصغر بكتير) لمعالجات arm64 (كل الموبايلات الحديثة)
           for i in 1 2; do
-            if flutter build apk --release --no-shrink --target-platform android-arm64 --dart-define=APP_VERSION=$VER; then ok=1; break; fi
-            echo "Release attempt $i failed, retrying in 30s..."
+            if flutter build apk --release --no-shrink --target-platform android-arm64 --dart-define=APP_VERSION=$VER 2>&1 | tee -a ../release_build.log; then ok=1; break; fi
+            echo "Release attempt $i failed, retrying in 30s..." | tee -a ../release_build.log
             sleep 30
           done
           # لو فشلت release: نسخة debug احتياطي
@@ -615,6 +648,16 @@ jobs:
           mkdir -p /tmp/apkpub
           cp A2R-POS.apk /tmp/apkpub/
           echo "version ${APP_VERSION} build ${GITHUB_RUN_NUMBER}" > /tmp/apkpub/VERSION.txt
+          # لو الـ release فشل: نحفظ سبب الخطأ في ملف نصي صغير جنب الـ APK
+          if [ -f release_build.log ] && grep -q "Release attempt" release_build.log; then
+            {
+              echo "=== سطور الخطأ المهمة ==="
+              grep -n -i -B3 -A12 "What went wrong\|error:\|FAILURE\|Execution failed\|Exception" release_build.log | head -200
+              echo
+              echo "=== آخر 120 سطر من اللوج ==="
+              tail -n 120 release_build.log
+            } > /tmp/apkpub/RELEASE_ERROR.txt
+          fi
           cd /tmp/apkpub
           git init -q -b apk
           git config user.name "github-actions"
