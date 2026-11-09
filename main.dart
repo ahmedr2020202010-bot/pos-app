@@ -3099,49 +3099,21 @@ _StructPage _structCount(RecognizedText res) {
 bool sameDay(ReceiptItem a, ReceiptItem b) =>
     a.date == null || b.date == null || a.date == b.date;
 
-// بيجيب كل التطبيقات اللي تقدر تفتح فولدر (مدير ملفات) ويخلّيك تختار أي واحد، مش الافتراضي بس
+// بيجيب كل التطبيقات اللي تقدر تفتح فولدر (مدير ملفات) بأيقوناتها ويخلّيك تختار (وتحفظ الافتراضي لو عايز)
 Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
   var handlers = <Map<String, String>>[];
   try {
-    final r = await _chan.invokeMethod<List<dynamic>>('folderHandlers', {'path': path});
-    if (r != null) {
-      handlers = [
-        for (final e in r)
-          {for (final en in (e as Map).entries) en.key.toString(): en.value.toString()}
-      ];
-    }
+    handlers = _toHandlers(await _chan.invokeMethod<List<dynamic>>('folderHandlers', {'path': path}));
   } catch (_) {}
-  // كل تطبيق مرة واحدة (أول طريقة اتجربت هي اللي شغالة)، وبنشيل Termux لأنه مش بيعرض فولدرات
-  final seenPkgs = <String>{};
-  handlers = handlers
-      .where((h) => h['pkg'] != 'com.termux' && seenPkgs.add(h['pkg'] ?? ''))
-      .toList();
+  handlers = handlers.where((h) => h['pkg'] != 'com.termux').toList();
+  _numberVariants(handlers);
   if (!context.mounted) return false;
-  final picked = await showModalBottomSheet<Map<String, String>>(
-    context: context,
-    isScrollControlled: true,
-    builder: (c) => SafeArea(
-      child: ListView(
-        shrinkWrap: true,
-        children: [
-          const ListTile(
-            title: Text('افتح الفولدر بواسطة', style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          for (final h in handlers)
-            ListTile(
-              leading: const Icon(Icons.folder_open),
-              title: Text(h['label'] ?? h['pkg'] ?? ''),
-              subtitle: Text(h['pkg'] ?? ''),
-              onTap: () => Navigator.pop(c, h),
-            ),
-          ListTile(
-            leading: const Icon(Icons.folder_special),
-            title: const Text('متصفح ملفات النظام'),
-            onTap: () => Navigator.pop(c, <String, String>{'pkg': '', 'cls': '', 'kind': 'tree'}),
-          ),
-        ],
-      ),
-    ),
+  final picked = await chooseHandler(
+    context,
+    title: 'افتح الفولدر بواسطة',
+    handlers: handlers,
+    prefKey: 'defFolder',
+    systemOption: <String, String>{'pkg': '', 'cls': '', 'kind': 'tree', 'label': 'متصفح ملفات النظام'},
   );
   if (picked == null) return true; // المستخدم قفل القايمة
   try {
@@ -3179,7 +3151,7 @@ void _saveDefaultHandler(String key, Map<String, String>? h) {
 
 // بيمسح الاختيارات المحفوظة (المعرض / ملفات PDF) علشان تختار من جديد
 void resetDefaultHandlers(BuildContext context) {
-  for (final k in ['defImage', 'defPdf']) {
+  for (final k in ['defFolder', 'defImage', 'defPdf']) {
     _saveDefaultHandler(k, null);
   }
   ScaffoldMessenger.of(context).showSnackBar(
@@ -4574,6 +4546,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 useWhatsApp();
               } else if (v == 'out') {
                 useDefaultOut();
+              } else if (v == 'resetApps') {
+                resetDefaultHandlers(context);
               } else if (v == 'wipe') {
                 wipeEverything(context);
               }
@@ -4592,6 +4566,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   value: 'log',
                   child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
+              PopupMenuItem(
+                  value: 'resetApps',
+                  child: w.Text(AppSettings.of(context).isAr ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
               PopupMenuItem(
                   value: 'wipe',
                   enabled: !busy,
@@ -7581,6 +7558,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               } else if (v == 'fast') {
                 toggleFastCount();
                 setState(() {});
+              } else if (v == 'resetApps') {
+                resetDefaultHandlers(context);
               } else if (v == 'wipe') {
                 wipeEverything(context);
               }
@@ -7600,6 +7579,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   child: w.Text(AppSettings.of(context).isAr ? 'مشاركة اللوج' : 'Share log')),
               const PopupMenuItem(enabled: false, child: Text('الإصدار $kAppVersion')),
               PopupMenuItem(value: 'fast', child: Text(fastCount ? 'العد: سريع ← الدقيق (القديم)' : 'العد: دقيق ← السريع')),
+              PopupMenuItem(
+                  value: 'resetApps',
+                  child: w.Text(AppSettings.of(context).isAr ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
               PopupMenuItem(
                   value: 'wipe',
                   enabled: !busy,
