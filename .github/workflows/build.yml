@@ -40,7 +40,7 @@ jobs:
           flutter create --org com.pos --project-name pos_app --platforms android app
           cp main.dart app/lib/main.dart
           cd app
-          flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing shared_preferences file_picker
+          flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing shared_preferences
           sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|<application|<application android:largeHeap=\"true\"|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
@@ -167,6 +167,12 @@ jobs:
                                   } catch (e: Exception) {
                                       result.success(false)
                                   }
+                              }
+                              "folderPickHandlers" -> {
+                                  result.success(folderPickHandlers())
+                              }
+                              "pickFolderWith" -> {
+                                  pickFolderWith(call.argument<String>("pkg") ?: "", call.argument<String>("cls") ?: "", result)
                               }
                               "pickHandlers" -> {
                                   result.success(pickHandlers(call.argument<String>("mime") ?: "*/*"))
@@ -364,6 +370,42 @@ jobs:
                   }
               }
 
+              private var folderResult: MethodChannel.Result? = null
+
+              private fun folderPickHandlers(): List<HashMap<String, String>> {
+                  val res = ArrayList<HashMap<String, String>>()
+                  val seen = HashSet<String>()
+                  val t = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                  for (ri in packageManager.queryIntentActivities(t, android.content.pm.PackageManager.MATCH_ALL)) {
+                      val pkg = ri.activityInfo.packageName
+                      if (!seen.add(pkg)) continue
+                      val m = HashMap<String, String>()
+                      m["label"] = ri.loadLabel(packageManager).toString()
+                      m["pkg"] = pkg
+                      m["cls"] = ri.activityInfo.name
+                      m["kind"] = "tree"
+                      m["icon"] = iconB64(ri.loadIcon(packageManager))
+                      res.add(m)
+                  }
+                  return res
+              }
+
+              private fun pickFolderWith(pkg: String, cls: String, result: MethodChannel.Result) {
+                  if (folderResult != null) {
+                      result.success("")
+                      return
+                  }
+                  val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                  if (pkg.isNotEmpty()) i.setClassName(pkg, cls)
+                  folderResult = result
+                  try {
+                      startActivityForResult(i, 4712)
+                  } catch (e: Exception) {
+                      folderResult = null
+                      result.success("?")
+                  }
+              }
+
               private fun pickHandlers(mime: String): List<HashMap<String, String>> {
                   val res = ArrayList<HashMap<String, String>>()
                   val seen = HashSet<String>()
@@ -426,6 +468,26 @@ jobs:
 
               override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
                   super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 4712) {
+                      val fr = folderResult ?: return
+                      folderResult = null
+                      var out = ""
+                      val u = data?.data
+                      if (resultCode == android.app.Activity.RESULT_OK && u != null) {
+                          out = "?"
+                          try {
+                              val id = DocumentsContract.getTreeDocumentId(u)
+                              val k = id.indexOf(":")
+                              val vol = if (k >= 0) id.substring(0, k) else id
+                              val rel = if (k >= 0) id.substring(k + 1) else ""
+                              val base = if (vol == "primary") "/storage/emulated/0" else "/storage/" + vol
+                              out = if (rel.isEmpty()) base else base + "/" + rel
+                          } catch (e: Exception) {
+                          }
+                      }
+                      fr.success(out)
+                      return
+                  }
                   if (requestCode != 4711) return
                   val res = pickResult ?: return
                   pickResult = null
