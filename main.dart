@@ -19,121 +19,188 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ------------------------------------------------------------------------------
-// Console Summary Data Model (إيصال ملخص الفحص - A2R Operations Console v60)
-// مرحلة إضافية اختيارية مستقلة تماماً للمطابقة الثلاثية
+// إيصال ملخص الفحص (A2R Operations Console v60) - مرحلة اختيارية مستقلة
+// بنقرا منه حاجتين بس:
+//   • المبلغ الإجمالي (systemAmount) → بيفيد قسم التقفيل فقط
+//   • عدد المعاملات (count)          → بيفيد قسم إيصالات الدفع فقط
 // ------------------------------------------------------------------------------
 class ConsoleSummaryItem {
   final String path;
   final String tid;
   final String unitName;
-  final String date;
-  final int totalTxn;
-  final int electronicTxn;
-  final int manualTxn;
-  final int cancelledTxn;
-  final double systemAmount;
+  final String date; // d.m زي باقي التطبيق (فاضي = مش مقروء)
+  final int? count; // null = مش مقروء (مش صفر)
+  final double? systemAmount; // null = مش مقروء
+  final int ts; // وقت تعديل الملف (لاختيار الأحدث لو الترمنل اتكرر)
 
   ConsoleSummaryItem({
     required this.path,
     required this.tid,
     required this.unitName,
     required this.date,
-    required this.totalTxn,
-    required this.electronicTxn,
-    required this.manualTxn,
-    required this.cancelledTxn,
+    required this.count,
     required this.systemAmount,
+    required this.ts,
   });
 
   Map<String, dynamic> toJson() => {
-    'path': path,
-    'tid': tid,
-    'unitName': unitName,
-    'date': date,
-    'totalTxn': totalTxn,
-    'electronicTxn': electronicTxn,
-    'manualTxn': manualTxn,
-    'cancelledTxn': cancelledTxn,
-    'systemAmount': systemAmount,
-  };
+        'path': path,
+        'tid': tid,
+        'unitName': unitName,
+        'date': date,
+        'count': count,
+        'systemAmount': systemAmount,
+        'ts': ts,
+      };
 
-  static ConsoleSummaryItem? fromOcr(String text, String filePath) {
+  static ConsoleSummaryItem? fromJson(Map<String, dynamic> j) {
+    final tid = (j['tid'] ?? '').toString();
+    if (tid.isEmpty) return null;
+    return ConsoleSummaryItem(
+      path: (j['path'] ?? '').toString(),
+      tid: tid,
+      unitName: (j['unitName'] ?? '').toString(),
+      date: (j['date'] ?? '').toString(),
+      count: (j['count'] as num?)?.toInt(),
+      systemAmount: (j['systemAmount'] as num?)?.toDouble(),
+      ts: (j['ts'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  // التاريخ يتطابق؟ (لو أي طرف مجهول مش بنرفض)
+  bool matchesDate(String? d) => date.isEmpty || d == null || d.isEmpty || d == date;
+  bool matchesDay(String? day, String? month) {
+    final dd = int.tryParse(day ?? ''), mm = int.tryParse(month ?? '');
+    if (dd == null || mm == null) return true;
+    return matchesDate('$dd.$mm');
+  }
+
+  // الـ OCR بتاع الباتشات latin: العناوين العربية ممكن ما تتقراش، فبنعتمد كمان على
+  // علامات إنجليزي ثابتة (اسم البرنامج / سطر الطباعة / EGP)
+  static bool looksLike(String text) {
     final up = text.toUpperCase();
-    if (!up.contains('A2R OPERATIONS CONSOLE') &&
-        !text.contains('إيصال ملخص الفحص') &&
-        !text.contains('إجمالي مبالغ السيستم') &&
-        !text.contains('وحدة مرور')) {
-      return null;
-    }
+    if (RegExp(r'A2R\s*OPERAT\w*\s*C\w*SOLE').hasMatch(up)) return true;
+    if (text.contains('إيصال ملخص الفحص') || text.contains('إجمالي مبالغ السيستم')) return true;
+    return up.contains('PRINTED') && up.contains('V60') && up.contains('EGP');
+  }
 
+  static String _westernDigits(String t) {
+    const ar = '٠١٢٣٤٥٦٧٨٩';
+    return t.replaceAllMapped(RegExp('[٠-٩]'), (m) => '${ar.indexOf(m.group(0)!)}');
+  }
+
+  static ConsoleSummaryItem? fromOcr(String raw, String filePath) {
+    if (!looksLike(raw)) return null;
+    final text = _westernDigits(raw);
+
+    // الترمنل: أي رقم من 8 أرقام معروف عندنا (بعد تصحيح tidFix)
     String tid = '';
-    final tidMatch = RegExp(r'(?<!\d)(503\d{5})(?!\d)').firstMatch(text);
-    if (tidMatch != null) tid = tidMatch.group(1)!;
+    for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(text)) {
+      final c = tidFix[m.group(1)!] ?? m.group(1)!;
+      if (terminals.containsKey(c)) {
+        tid = c;
+        break;
+      }
+    }
+    if (tid.isEmpty) return null;
 
+    // التاريخ: 11.11.2026 → 11.11
     String date = '';
-    final dateMatch = RegExp(r'(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})').firstMatch(text);
-    if (dateMatch != null) {
-      date = '${dateMatch.group(1)}.${dateMatch.group(2)}';
+    final dm = RegExp(r'(?<!\d)(\d{1,2})[./\-](\d{1,2})[./\-](20\d{2})(?!\d)').firstMatch(text);
+    if (dm != null) {
+      final d = int.parse(dm.group(1)!), mo = int.parse(dm.group(2)!);
+      if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) date = '$d.$mo';
+    } else {
+      date = _dayKey(text) ?? '';
     }
 
-    double amount = 0.0;
-    final amtMatch = RegExp(r'([\d,]+(?:\.\d{2})?)\s*EGP', caseSensitive: false).firstMatch(text);
-    if (amtMatch != null) {
-      amount = double.tryParse(amtMatch.group(1)!.replaceAll(',', '')) ?? 0.0;
+    // المبلغ الإجمالي: الرقم اللي قبل EGP
+    double? amount;
+    final am = RegExp(r'(\d[\d,]*(?:\.\d{1,2})?)\s*EGP', caseSensitive: false).firstMatch(text);
+    if (am != null) amount = double.tryParse(am.group(1)!.replaceAll(',', ''));
+
+    // عدد المعاملات: بالعناوين لو اتقرت، وإلا بالترتيب (إجمالي، إلكتروني، يدوي، ملغي)
+    int? total, elec;
+    int? pick(String label) {
+      final m = RegExp('$label\\s*[\\n\\r:]*\\s*(\\d+)').firstMatch(text) ??
+          RegExp('(\\d+)\\s*[\\n\\r:]*\\s*$label').firstMatch(text);
+      return m == null ? null : int.tryParse(m.group(1)!);
     }
 
-    int totalTx = 0;
-    final totalMatch = RegExp(r'إجمالي العمليات\s*[\n\r:]*\s*(\d+)').firstMatch(text) ??
-        RegExp(r'(\d+)\s*[\n\r:]*\s*إجمالي العمليات').firstMatch(text);
-    if (totalMatch != null) {
-      totalTx = int.tryParse(totalMatch.group(1)!) ?? 0;
+    total = pick('إجمالي العمليات');
+    elec = pick('إيصالات إلكترونية');
+    if (total == null && elec == null) {
+      final nums = <int>[];
+      for (final line in text.split(RegExp(r'[\r\n]+'))) {
+        final l = line.trim();
+        if (RegExp(r'EGP', caseSensitive: false).hasMatch(l)) break;
+        if (RegExp(r'^\d{1,5}(\s+\d{1,5})*$').hasMatch(l)) {
+          nums.addAll(l.split(RegExp(r'\s+')).map(int.parse));
+        }
+        if (nums.length >= 4) break;
+      }
+      if (nums.isNotEmpty) total = nums[0];
+      if (nums.length >= 2 && nums[1] <= nums[0]) elec = nums[1];
     }
+    int? count = elec ?? total;
+    // قراءة متناقضة (عدد صفر ومبلغ موجود) = مش موثوقة
+    if (count != null && count <= 0 && (amount ?? 0) > 0) count = null;
 
-    int elecTx = totalTx;
-    final elecMatch = RegExp(r'إيصالات إلكترونية\s*[\n\r:]*\s*(\d+)').firstMatch(text) ??
-        RegExp(r'(\d+)\s*[\n\r:]*\s*إيصالات إلكترونية').firstMatch(text);
-    if (elecMatch != null) {
-      elecTx = int.tryParse(elecMatch.group(1)!) ?? elecTx;
-    }
-
-    int manualTx = 0;
-    final manMatch = RegExp(r'معاملات يدوية\s*[\n\r:]*\s*(\d+)').firstMatch(text) ??
-        RegExp(r'(\d+)\s*[\n\r:]*\s*معاملات يدوية').firstMatch(text);
-    if (manMatch != null) {
-      manualTx = int.tryParse(manMatch.group(1)!) ?? 0;
-    }
-
-    int cancelTx = 0;
-    final canMatch = RegExp(r'معاملات ملغية\s*[\n\r:]*\s*(\d+)').firstMatch(text) ??
-        RegExp(r'(\d+)\s*[\n\r:]*\s*معاملات ملغية').firstMatch(text);
-    if (canMatch != null) {
-      cancelTx = int.tryParse(canMatch.group(1)!) ?? 0;
-    }
-
-    String uName = 'وحدة غير معروفة';
-    final uMatch = RegExp(r'وحدة مرور\s+([^\n\r]+)').firstMatch(text);
-    if (uMatch != null) {
-      uName = uMatch.group(1)!.trim();
-    } else if (tid.isNotEmpty && terminals.containsKey(tid)) {
-      uName = terminals[tid]!.unitName;
-    }
+    var ts = 0;
+    try {
+      ts = File(filePath).lastModifiedSync().millisecondsSinceEpoch;
+    } catch (_) {}
 
     return ConsoleSummaryItem(
       path: filePath,
       tid: tid,
-      unitName: uName,
+      unitName: terminals[tid]?.unitName ?? '',
       date: date,
-      totalTxn: totalTx,
-      electronicTxn: elecTx,
-      manualTxn: manualTx,
-      cancelledTxn: cancelTx,
+      count: count,
       systemAmount: amount,
+      ts: ts,
     );
   }
 }
 
 final ValueNotifier<Map<String, ConsoleSummaryItem>> consoleSummaries =
     ValueNotifier<Map<String, ConsoleSummaryItem>>({});
+
+String get _consolePath => '$baseDir/console_summaries.json';
+
+// لو الترمنل اتكرر بنسيب الأحدث (حسب وقت الملف)
+void putConsoleSummary(Map<String, ConsoleSummaryItem> m, ConsoleSummaryItem it) {
+  final old = m[it.tid];
+  if (old == null || it.ts >= old.ts) m[it.tid] = it;
+}
+
+void saveConsoleSummaries(Map<String, ConsoleSummaryItem> m) {
+  try {
+    File(_consolePath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m.values.map((e) => e.toJson()).toList()));
+  } catch (e) {
+    _dbg('console summaries save error: $e');
+  }
+}
+
+void loadConsoleSummaries() {
+  if (consoleSummaries.value.isNotEmpty) return;
+  try {
+    final f = File(_consolePath);
+    if (!f.existsSync()) return;
+    final l = jsonDecode(f.readAsStringSync());
+    if (l is! List) return;
+    final m = <String, ConsoleSummaryItem>{};
+    for (final e in l.whereType<Map>()) {
+      final it = ConsoleSummaryItem.fromJson(Map<String, dynamic>.from(e));
+      if (it != null) m[it.tid] = it;
+    }
+    consoleSummaries.value = m;
+  } catch (e) {
+    _dbg('console summaries load error: $e');
+  }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -1066,6 +1133,10 @@ Future<void> wipeEverything(BuildContext context) async {
   imageCache.clearLiveImages();
   closingTxn.value = <int, int>{};
   consoleSummaries.value = <String, ConsoleSummaryItem>{};
+  try {
+    final cf = File(_consolePath);
+    if (cf.existsSync()) cf.deleteSync();
+  } catch (_) {}
   wipeSignal.value++;
   final mb = (bytes / 1048576).toStringAsFixed(1);
   m.showSnackBar(SnackBar(
@@ -1837,6 +1908,7 @@ Future<void> prepareDefaultFiles() async {
     }
   } catch (_) {}
   loadExtraTerminals();
+  loadConsoleSummaries();
 }
 
 Future<void> ensureDefaultFiles() async {
@@ -2111,7 +2183,7 @@ class PieceResult {
 
 String classifyReceipt(String text) {
   final up = text.toUpperCase();
-  if (up.contains('A2R OPERATIONS CONSOLE') || up.contains('إيصال ملخص الفحص') || up.contains('إجمالي مبالغ السيستم')) {
+  if (ConsoleSummaryItem.looksLike(text)) {
     return 'console_summary';
   }
   final payRes = <RegExp>[
@@ -4813,13 +4885,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ? '\n🚫 مستبعد (مكرر)'
             : '';
     
-    // ربط إضافي استرشادي بملخص السيستم دون تأثير على شيت الإكسيل الرسمي
+    // مقارنة استرشادية بمبلغ السيستم (المبلغ فقط) - بتأثر على قسم التقفيل بس
     String csInfo = '';
-    if (item.tid != null && consoleSummaries.value.containsKey(item.tid)) {
-      final cs = consoleSummaries.value[item.tid]!;
-      final diff = item.amount - cs.systemAmount;
-      csInfo = '\n📊 سيستم المرور: ${cs.systemAmount.toStringAsFixed(2)} ج.م (${cs.totalTxn} عملية)' +
-               (diff.abs() < 0.01 ? ' • مطابق للسيستم ✓' : ' • فرق: ${diff.toStringAsFixed(2)}');
+    final cs = item.tid != null ? consoleSummaries.value[item.tid] : null;
+    if (cs != null && cs.systemAmount != null && cs.matchesDate(item.date)) {
+      final diff = item.amount - cs.systemAmount!;
+      csInfo = '\n📊 سيستم المرور: ${cs.systemAmount!.toStringAsFixed(2)} ج.م' +
+          (diff.abs() < 0.01 ? ' • مطابق للسيستم ✓' : ' • فرق: ${diff.toStringAsFixed(2)}');
     }
 
     return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$alt$dup$unu$extra$csInfo';
@@ -5053,14 +5125,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
         final fkey = '${baseName(f.path)}:${f.lengthSync()}';
         
-        // فحص ملخص سيستم المرور (Console v60) اختياري ومستقل دون تشتيت للباتش
-        final csItem = ConsoleSummaryItem.fromOcr(res.text, f.path);
-        if (csItem != null && csItem.tid.isNotEmpty) {
-          consoleMap[csItem.tid] = csItem;
+        // إيصال ملخص السيستم (Console v60): بنسجّل المبلغ والعدد وما بنكمّلش كباتش/إيصال دفع
+        if (ConsoleSummaryItem.looksLike(res.text)) {
+          final csItem = ConsoleSummaryItem.fromOcr(res.text, f.path);
+          if (csItem != null) {
+            putConsoleSummary(consoleMap, csItem);
+          } else {
+            warnings.add('${baseName(f.path)}: إيصال ملخص السيستم مش واضح فيه رقم الترمنل، راجعه');
+          }
           if (mounted) {
             setState(() {
               progress = ((i + 1) / todo.length) * 0.5;
-              status = 'ملخص سيستم المرور: ${csItem.unitName} (ماكينة ${terminals[csItem.tid]?.orderNum ?? ""})';
+              status = csItem != null
+                  ? 'ملخص سيستم المرور: ${csItem.unitName} (ماكينة ${terminals[csItem.tid]?.orderNum ?? ""})'
+                  : 'فحص OCR: ${i + 1} من ${todo.length}';
             });
           }
           continue;
@@ -5231,6 +5309,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     consoleSummaries.value = consoleMap;
+    saveConsoleSummaries(consoleMap);
     await recognizer.close();
 
     void dropProvisional() =>
@@ -6962,8 +7041,9 @@ int? _batchAutoOf(MResult r) {
   if (r.orderNum != null && closingTxn.value.containsKey(r.orderNum!)) {
     return closingTxn.value[r.orderNum!];
   }
-  if (r.tidUsed != null && consoleSummaries.value.containsKey(r.tidUsed)) {
-    return consoleSummaries.value[r.tidUsed]!.electronicTxn;
+  final cs = r.tidUsed != null ? consoleSummaries.value[r.tidUsed] : null;
+  if (cs != null && cs.count != null && cs.matchesDay(r.dayUsed, r.monthUsed)) {
+    return cs.count; // عدد المعاملات من ملخص السيستم (لقسم إيصالات الدفع فقط)
   }
   return null;
 }
@@ -8214,6 +8294,27 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           (rk.length < 2 || rk.first.value >= rk[1].value * 2)) {
         break;
       }
+    }
+    final allOcr = sb.toString();
+    if (ConsoleSummaryItem.looksLike(allOcr)) {
+      final csItem = ConsoleSummaryItem.fromOcr(allOcr, f.path);
+      if (csItem != null) {
+        final m = Map<String, ConsoleSummaryItem>.from(consoleSummaries.value);
+        putConsoleSummary(m, csItem);
+        consoleSummaries.value = m;
+        saveConsoleSummaries(m);
+      }
+      r.tidUsed = null;
+      r.newName = null;
+      r.count = 0;
+      r.cntOk = true;
+      r.idOk = true;
+      r.verdict = -1; // مستبعد من العد
+      r.detail = 'إيصال ملخص السيستم (مش إيصال دفع، مش معدود)';
+      r.idNotes.add(csItem != null
+          ? 'ده إيصال ملخص السيستم: اتسجّل منه العدد والمبلغ للمطابقة، ومش داخل في عد إيصالات الدفع'
+          : 'ده إيصال ملخص السيستم بس رقم الترمنل مش واضح، راجعه');
+      return;
     }
     final rk = _rankVotes(votes);
     r.altTids = rk.map((e) => e.key).toList();
