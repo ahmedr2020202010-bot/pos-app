@@ -5,6 +5,13 @@ import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+// ==============================================================================
+// A2R POS - Flutter Application
+// Developed by: Ahmed Ramadan - Alexandria
+// Update: Added Optional Console Summary (A2R Operations Console v60) Support
+//         Ensuring 100% preservation of standard Excel & PDF generation without disruption.
+// ==============================================================================
+
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/widgets.dart' as w show Text;
@@ -1136,6 +1143,9 @@ bool _isFinalScanStatus(String s) =>
     s.startsWith('اكتمل العد') || s.startsWith('تمت التسمية') || s.startsWith('اتوقف') || s.startsWith('تم فحص');
 
 String tr(String s) => s; // Default pass-through, translation dictionary remains intact in codebase
+
+/// يرجّع النص العربي أو الإنجليزي حسب لغة التطبيق الحالية
+String _l(BuildContext c, String ar, String en) => AppSettings.of(c).isAr ? ar : en;
 
 bool _isDark(BuildContext c) => Theme.of(c).brightness == Brightness.dark;
 
@@ -4167,14 +4177,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
     final txnStr = item.txn != null ? ' | المعاملات: ${item.txn}' : '';
-    
+
     // ربط إضافي مع ملخص السيستم لو متوفر (معلومة إرشادية للمستخدم)
     String csInfo = '';
     if (item.tid != null && consoleSummaries.value.containsKey(item.tid)) {
       final cs = consoleSummaries.value[item.tid]!;
       final diffAmt = item.amount - cs.systemAmount;
       csInfo = '\n📊 سيستم المرور: ${cs.systemAmount.toStringAsFixed(2)} ج.م (${cs.totalTxn} عملية)' +
-               (diffAmt.abs() < 0.01 ? ' • مطابق للسيستم ✓' : ' • فرق مالي: ${diffAmt.toStringAsFixed(2)}');
+          (diffAmt.abs() < 0.01 ? ' • مطابق للسيستم ✓' : ' • فرق مالي: ${diffAmt.toStringAsFixed(2)}');
     }
 
     return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$alt$csInfo';
@@ -4290,7 +4300,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         var workPath = f.path;
         var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
         final fkey = '${baseName(f.path)}:${f.lengthSync()}';
-        
+
         // فحص اختياري لإيصال ملخص الفحص (A2R Console)
         final cItem = ConsoleSummaryItem.fromOcr(res.text, f.path);
         if (cItem != null && cItem.tid.isNotEmpty) {
@@ -4302,7 +4312,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final fxm = fixes[fkey];
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
         if (ign != 'keep' && _isIdSlip(res)) continue;
-        
+
         var isReceipt = receiptScore(res.text) >= 2 || findTerminalIn([res.text]) != null;
         if (ign == 'keep') isReceipt = true;
         var skipPay = false;
