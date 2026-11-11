@@ -1,10 +1,3 @@
-// ==============================================================================
-// A2R POS - Flutter Application
-// Developed by: Ahmed Ramadan - Alexandria
-// Update: Added Optional Console Summary (A2R Operations Console v60) Support
-//         Ensuring 100% preservation of standard Excel & PDF generation without disruption.
-// ==============================================================================
-
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
