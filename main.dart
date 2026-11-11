@@ -3778,7 +3778,7 @@ void _saveDefaultHandler(String key, Map<String, String>? h) {
   } catch (_) {}
 }
 
-resetDefaultHandlers(BuildContext context) {
+void resetDefaultHandlers(BuildContext context) {
   for (final k in ['defFolder', 'defImage', 'defPdf']) {
     _saveDefaultHandler(k, null);
   }
@@ -5072,6 +5072,25 @@ class _ZoomableImageState extends State<ZoomableImage> {
   }
 }
 
+class ReceiptZoomPage extends StatelessWidget {
+  final String path;
+  final String title;
+  const ReceiptZoomPage({super.key, required this.path, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text(title, style: const TextStyle(fontSize: 15)),
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+      ),
+      body: SafeArea(child: ZoomableImage(path: path)),
+    );
+  }
+}
+
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
   final List<ReceiptItem>? allItems;
@@ -5085,6 +5104,8 @@ class ReviewPage extends StatefulWidget {
 class _ReviewPageState extends State<ReviewPage> {
   int idx = 0;
   bool changed = false;
+  int rev = 0;
+  final done = <ReceiptItem>{};
   late TextEditingController amt;
   int? order;
 
@@ -5108,47 +5129,437 @@ class _ReviewPageState extends State<ReviewPage> {
     order = item.orderNum;
   }
 
-  void save() {
+  void go(int i) {
+    if (i < 0 || i >= widget.items.length) return;
+    setState(() {
+      idx = i;
+      load();
+    });
+  }
+
+  void save({bool next = true}) {
     final v = double.tryParse(amt.text.replaceAll(',', '.'));
-    if (v == null || v <= 0) return;
-    item.amount = round2(v);
-    item.batches = [item.amount];
-    item.ok = true;
-    item.how = 'manual';
-    if (order != null) {
-      item.orderNum = order;
-      item.tid = numToTid[order];
-      item.row = terminals[item.tid]!.excelRow;
-      item.unitName = terminals[item.tid]!.unitName;
+    if (v == null || v <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اكتب مبلغ صحيح.')),
+      );
+      return;
     }
-    saveFix(item);
+    final it = item;
+    it.amount = round2(v);
+    it.batches = [it.amount];
+    it.ok = true;
+    it.alt = null;
+    if (it.ignoredDoc) keepIgnored(it);
+    it.how = 'manual';
+    it.unusual = null;
+    it.reprintSummary = false;
+    it.missingBatchClosed = false;
+    if (order != null) {
+      it.orderNum = order;
+      it.tid = numToTid[order];
+      it.row = terminals[it.tid]!.excelRow;
+      it.unitName = terminals[it.tid]!.unitName;
+    }
+    saveFix(it);
     changed = true;
-    Navigator.pop(context, true);
+    done.add(it);
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (next && idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  void resolveIgnored(bool keep) {
+    final it = item;
+    if (keep) {
+      keepIgnored(it);
+      changed = true;
+      setState(() {});
+      return;
+    }
+    it.ignoredDoc = false;
+    it.userExcluded = true;
+    it.ign = 'drop';
+    saveFix(it);
+    changed = true;
+    done.add(it);
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  void resolveDate(bool toMain) {
+    final it = item;
+    if (toMain && it.dateMain != null) it.date = it.dateMain;
+    it.dateFix = it.date;
+    it.dateOdd = false;
+    saveFix(it);
+    changed = true;
+    done.add(it);
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  void resolveDup(bool keep) {
+    final it = item;
+    final all = widget.allItems ?? widget.items;
+    if (keep) {
+      keepAsExtraBatch(it, all);
+    } else {
+      it.dupSuspect = false;
+      it.userExcluded = true;
+      it.dupDecision = 'drop';
+      saveFix(it);
+    }
+    changed = true;
+    done.add(it);
+    if (widget.single) {
+      Navigator.pop(context, true);
+    } else if (idx < widget.items.length - 1) {
+      go(idx + 1);
+    } else {
+      setState(() {});
+    }
+  }
+
+  Future<void> rotate() async {
+    try {
+      await fixImageAsync(item.path, item.path, 90);
+      await FileImage(File(item.path)).evict();
+      imageCache.clear();
+      changed = true;
+      setState(() => rev++);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مقدرتش أدوّر الصورة.')),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('مراجعة الإيصال')),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(child: ZoomableImage(path: item.path)),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                children: [
-                  TextField(
-                    controller: amt,
-                    decoration: const InputDecoration(labelText: 'المبلغ الإجمالي'),
-                    keyboardType: TextInputType.number,
+    AppSettings.of(context);
+    final it = item;
+    final image = Container(
+      color: Colors.black12,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: ZoomableImage(key: ValueKey('${it.path}#$rev'), path: it.path),
+          ),
+          Positioned(
+            top: 4,
+            left: 4,
+            child: IconButton.filledTonal(
+              tooltip: tr('ملء الشاشة'),
+              icon: const Icon(Icons.fullscreen),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ReceiptZoomPage(
+                    path: it.path,
+                    title: 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? ''}',
                   ),
-                  const SizedBox(height: 10),
-                  FilledButton(onPressed: save, child: const Text('حفظ')),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final form = SingleChildScrollView(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (it.dupSuspect || it.userExcluded)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _tintBg(context, Colors.orange, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    it.userExcluded
+                        ? '🚫 الإيصال ده مستبعد (مكرر).'
+                        : '⚠️ مشكوك إنه مكرر: نفس الماكينة ${it.orderNum ?? ''} ونفس المبلغ. '
+                            'مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن.',
+                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => resolveDup(true),
+                          child: const Text('مش مكرر - احتسبه باتش إضافي',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                      if (!it.userExcluded) ...[
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => resolveDup(false),
+                            child: const Text('مكرر - استبعده',
+                                textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ],
               ),
             ),
+          if (it.ignoredDoc)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _tintBg(context, Colors.orange, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '📄 التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش. '
+                    'زوّم وشوف: لو باتش حقيقي ادخله وكمّل المبلغ والماكينة.',
+                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => resolveIgnored(true),
+                          child: const Text('ده باتش - ادخله',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => resolveIgnored(false),
+                          child: const Text('مش باتش - تجاهله',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          if (it.dateOdd)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _tintBg(context, Colors.orange, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '📅 تاريخ الإيصال ${it.date} بينما أغلب الإيصالات ${it.dateMain}.',
+                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => resolveDate(true),
+                          child: Text('خليه بتاريخ ${it.dateMain}',
+                              textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => resolveDate(false),
+                          child: const Text('التاريخ صح - سيبه',
+                              textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          if (it.weakId && !it.ignoredDoc && !it.dupSuspect && !it.userExcluded && it.row != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                it.how == 'auto-number' || it.how == 'conflict'
+                    ? '❓ رقم الماكينة اتحدد تلقائياً (${it.orderNum}) - اتأكد منه واضغط حفظ.'
+                    : '❓ الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ.',
+                style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+              ),
+            ),
+          if (it.unusual != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text('⚠️ ${it.unusual}  (لو المبلغ صح اضغط حفظ)',
+                  style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13)),
+            ),
+          Text(
+            'المقروء: ${it.amount > 0 ? it.amount.toStringAsFixed(2) : 'غير مقروء'} ج.م'
+            '${it.batches.length > 1 ? '  (= ${it.batches.map((b) => b.toStringAsFixed(2)).join(' + ')})' : ''}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          if (it.alt != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text('⚠️ القراءة التانية: ${it.alt!.toStringAsFixed(2)}',
+                        style: TextStyle(color: _tintFg(context, Colors.orange))),
+                  ),
+                  TextButton(
+                    onPressed: () => setState(() => amt.text = it.alt!.toStringAsFixed(2)),
+                    child: const Text('استخدمها'),
+                  ),
+                ],
+              ),
+            ),
+          if ((it.alt != null || !it.ok || it.amount <= 0 || it.unusual != null) &&
+              it.cands.where((v) => (v - it.amount).abs() >= 0.005).isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('مبالغ لقيتها في الإيصال (اضغط على الصح):',
+                      style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      for (final v in it.cands.where((v) => (v - it.amount).abs() >= 0.005))
+                        ActionChip(
+                          label: Text(v.toStringAsFixed(2)),
+                          onPressed: () => setState(() => amt.text = v.toStringAsFixed(2)),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: amt,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(
+              labelText: tr('المبلغ الإجمالي'),
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<int>(
+            value: order,
+            isExpanded: true,
+            hint: const Text('اختر الماكينة (1..19)'),
+            items: [
+              for (var i = 1; i <= machineCount; i++)
+                DropdownMenuItem(
+                  value: i,
+                  child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
+                ),
+            ],
+            onChanged: (v) => setState(() => order = v),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton(
+                  onPressed: () => save(),
+                  child: Text(idx < widget.items.length - 1 ? 'حفظ والتالي' : 'حفظ'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: rotate,
+                icon: const Icon(Icons.rotate_right),
+                label: const Text('تدوير'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) Navigator.pop(context, changed);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text('مراجعة ${idx + 1} / ${widget.items.length}'
+              '${done.contains(it) ? '  ✓' : ''}'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => Navigator.pop(context, changed),
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.navigate_before),
+              tooltip: tr('السابق'),
+              onPressed: idx > 0 ? () => go(idx - 1) : null,
+            ),
+            IconButton(
+              icon: const Icon(Icons.navigate_next),
+              tooltip: tr('التالي'),
+              onPressed: idx < widget.items.length - 1 ? () => go(idx + 1) : null,
+            ),
           ],
+        ),
+        body: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, c) {
+              if (c.maxWidth > 600) {
+                return Row(
+                  children: [
+                    Expanded(flex: 3, child: image),
+                    Expanded(flex: 2, child: form),
+                  ],
+                );
+              }
+              return Column(
+                children: [
+                  Expanded(flex: 5, child: image),
+                  Expanded(flex: 3, child: form),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
