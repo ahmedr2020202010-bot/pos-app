@@ -1229,6 +1229,22 @@ void _publishClosing(List<ReceiptItem> items, [List<SysTotal> sys = const <SysTo
     sums.remove(n);
   }
   batchTxnByNum = Map<int, int>.from(sums);
+  final amts = <int, double>{};
+  final badAmt = <int>{};
+  for (final it in items) {
+    if (!it.counts) continue;
+    final n = it.orderNum ?? (it.tid != null ? terminals[it.tid]?.orderNum : null);
+    if (n == null) continue;
+    if (!it.ok || it.amount <= 0) {
+      badAmt.add(n);
+      continue;
+    }
+    amts[n] = (amts[n] ?? 0) + it.amount;
+  }
+  for (final n in badAmt) {
+    amts.remove(n);
+  }
+  batchAmtByNum = amts;
   // عدد إيصالات صورة السيستم (إيصالات إلكترونية) أدق من مجموع الباتشات: بيغلب لو موجود (أحدث صورة لكل ترمنل)
   final latest = <String, SysTotal>{};
   for (final sy in sys) {
@@ -1408,6 +1424,7 @@ Future<void> wipeEverything(BuildContext context) async {
   closingTxn.value = <int, int>{};
   sysTxnByNum = <int, int>{};
   batchTxnByNum = <int, int>{};
+  batchAmtByNum = <int, double>{};
   wipeSignal.value++;
   final mb = (bytes / 1048576).toStringAsFixed(1);
   m.showSnackBar(SnackBar(
@@ -3004,8 +3021,113 @@ void _enhanceImage(String src, String dst) {
   File(dst).writeAsBytesSync(img.encodeJpg(im, quality: 95));
 }
 
+// ───────── إزالة الخط الأحمر: الحبر الأحمر ساطع في القناة الحمرا (بيبان أبيض) والكتابة السودا غامقة فيها،
+// فبنستخدم القناة الحمرا لوحدها كصورة رمادي. كده الخط بيختفي والكتابة تفضل ─────────
+void _redRemove(String src, String dst) {
+  final im = img.decodeImage(File(src).readAsBytesSync());
+  if (im == null) throw Exception('decode');
+  final out = img.Image(width: im.width, height: im.height);
+  for (var y = 0; y < im.height; y++) {
+    for (var x = 0; x < im.width; x++) {
+      final px = im.getPixel(x, y);
+      final r = px.r.toInt();
+      final g = px.g.toInt();
+      final b = px.b.toInt();
+      // لو البكسل مش أحمر (أخضر/أزرق قريبين من الأحمر) نخليه رمادي عادي، غير كده نستخدم الأحمر
+      final v = (r - g > 40 && r - b > 40) ? 255 : ((r + g + b) ~/ 3);
+      out.setPixelRgb(x, y, v, v, v);
+    }
+  }
+  File(dst).writeAsBytesSync(img.encodeJpg(out, quality: 92));
+}
+
+// ───────── عدّ المستطيلات البيضا (الإيصالات) من شكل الصورة من غير OCR ─────────
+// بيرجّع null لو الخلفية بيضا (الإيصالات مش بتتميز) أو الصورة مش مناسبة، فمش بيصوّت وقتها
+int? _rectCountPage(String src) {
+  try {
+    var im = img.decodeImage(File(src).readAsBytesSync());
+    if (im == null) return null;
+    im = img.copyResize(im, width: 700, interpolation: img.Interpolation.average);
+    final W = im.width, H = im.height;
+    final mask = List<Uint8List>.generate(H, (_) => Uint8List(W));
+    var on = 0;
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        final px = im.getPixel(x, y);
+        final r = px.r.toInt(), g = px.g.toInt(), b = px.b.toInt();
+        final mx = math.max(r, math.max(g, b)), mn = math.min(r, math.min(g, b));
+        if ((r + g + b) / 3 > 165 && mx - mn < 45) {
+          mask[y][x] = 1;
+          on++;
+        }
+      }
+    }
+    final cov = on / (W * H);
+    if (cov > 0.82 || cov < 0.15) return null;
+    // الأعمدة
+    final colF = List<double>.filled(W, 0);
+    for (var x = 0; x < W; x++) {
+      var c = 0;
+      for (var y = 0; y < H; y++) {
+        c += mask[y][x];
+      }
+      colF[x] = c / H;
+    }
+    final bands = <List<int>>[];
+    var st = -1;
+    for (var x = 0; x <= W; x++) {
+      final hi = x < W && colF[x] > 0.35;
+      if (hi && st < 0) st = x;
+      if (!hi && st >= 0) {
+        if (bands.isNotEmpty && st - bands.last[1] < W * 0.015) {
+          bands.last[1] = x;
+        } else {
+          bands.add([st, x]);
+        }
+        st = -1;
+      }
+    }
+    final cols = bands.where((b) => b[1] - b[0] > W * 0.08).toList();
+    if (cols.isEmpty || cols.length > 8) return null;
+    var total = 0;
+    for (final c in cols) {
+      final w0 = c[1] - c[0];
+      var runStart = -1, gap = 0;
+      for (var y = 0; y <= H; y++) {
+        var f = 0.0;
+        if (y < H) {
+          var s2 = 0;
+          for (var x = c[0]; x < c[1]; x++) {
+            s2 += mask[y][x];
+          }
+          f = s2 / w0;
+        }
+        final hi = y < H && f > 0.5;
+        if (hi) {
+          if (runStart < 0) runStart = y;
+          gap = 0;
+        } else if (runStart >= 0) {
+          gap++;
+          if (gap >= 4 || y >= H) {
+            final end = y - gap;
+            if (end - runStart > H * 0.12) total++;
+            runStart = -1;
+            gap = 0;
+          }
+        }
+      }
+    }
+    return total;
+  } catch (_) {
+    return null;
+  }
+}
+
 Future<bool> fixImageAsync(String src, String dst, int deg) =>
     Isolate.run(() => _fixImage(src, dst, deg));
+
+Future<void> redRemoveAsync(String src, String dst) => Isolate.run(() => _redRemove(src, dst));
+Future<int?> rectCountAsync(String src) => Isolate.run(() => _rectCountPage(src));
 
 Future<void> enhanceImageAsync(String src, String dst) =>
     Isolate.run(() => _enhanceImage(src, dst));
@@ -4017,7 +4139,16 @@ List<List<int>> _pdfJpegRanges(Uint8List b) {
 class _SA {
   final String t;
   final double cx, cy, l, r;
+  double? v; // مبلغ الإيصال (لعلامة amount بس)
   _SA(this.t, this.cx, this.cy, this.l, this.r);
+}
+
+// مبلغ بصيغة 1,234.56 أو 12.50. بنرفض الرقم لو لازق في حرف قبله (S21.57 = غالباً 521.57 اتقرا غلط) علشان ما نحسبش مبلغ غلط
+final RegExp _amtRe = RegExp(r'(?<![\dA-Za-z.,])(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})(?!\d)');
+double? _amtIn(String t) {
+  final m = _amtRe.firstMatch(t);
+  if (m == null) return null;
+  return double.tryParse('${m.group(1)!.replaceAll(',', '')}.${m.group(2)}');
 }
 
 class _StructPage {
@@ -4026,6 +4157,7 @@ class _StructPage {
   int sm3 = 0; // الطريقة 3 (الأساسية): عدّ بالتسلسل الرأسي للعلامات جوه كل عمود
   double h = 3000;
   final Map<String, int> types = {};
+  final List<double> amts = []; // مبالغ الإيصالات اللي اتقرت بوضوح في الصفحة
   final List<String> dbgAmt = []; // تشخيص: سطور AMOUNT اللي اتعدّت (نص@مكانها%)
 }
 
@@ -4108,12 +4240,29 @@ _StructPage _structCount(RecognizedText res) {
   final amtBad = RegExp(r'FROM|ACCOUNT|CONFIRM|DEBIT|\bMY\b');
   for (final l in lines) {
     final u = l.text.toUpperCase();
-    void add(String t) => all.add(_SA(t, (l.left + l.right) / 2, l.cy, l.left, l.right));
+    void add(String t, [double? v]) => all.add(_SA(t, (l.left + l.right) / 2, l.cy, l.left, l.right)..v = v);
     if (nameRe.hasMatch(u)) add('logo');
     if (u.contains('TERMINAL')) add('term');
     if (rrnRe.hasMatch(u)) add('rrn');
     if (amtRe.hasMatch(u) && !amtBad.hasMatch(u)) {
-      add('amount');
+      // المبلغ: في نفس السطر، أو في سطر جنبه على نفس الارتفاع جوه نفس الإيصال
+      var av = _amtIn(l.text);
+      if (av == null) {
+        OcrLine? nb;
+        var nd = double.infinity;
+        for (final o in lines) {
+          if (identical(o, l)) continue;
+          if ((o.cy - l.cy).abs() > l.h * 0.7) continue;
+          final gap = o.left - l.right;
+          if (gap < -l.h || gap > w * 0.2) continue;
+          if (gap < nd && _amtIn(o.text) != null) {
+            nd = gap;
+            nb = o;
+          }
+        }
+        if (nb != null) av = _amtIn(nb.text);
+      }
+      add('amount', av);
       out.dbgAmt.add('${l.text.length > 22 ? l.text.substring(0, 22) : l.text}@${h > 0 ? (l.cy * 100 / h).round() : 0}%');
     }
     if (u.contains('APPROVED')) add('appr');
@@ -4132,6 +4281,7 @@ _StructPage _structCount(RecognizedText res) {
   }
   for (final a in ded) {
     out.types[a.t] = (out.types[a.t] ?? 0) + 1;
+    if (a.t == 'amount' && a.v != null) out.amts.add(a.v!);
   }
   if (ded.isEmpty) return out;
   out.mx = out.types.values.reduce((a, b) => a > b ? a : b);
@@ -7504,6 +7654,7 @@ class MCollector {
     final r = MScan();
     final seen = <String>{};
     final firstPg = <String, int>{};
+    final numPg = <int, int>{};
     final days = <String, int>{};
     final partialDays = <String>[];
     for (final a in pages.expand((p) => p)) {
@@ -7513,6 +7664,10 @@ class MCollector {
         } else if (trackDups) {
           // نفس رقم الإيصال (RRN) ظهر تاني: للمعرفة بس، مش بيتخصم من العدد
           r.dups.putIfAbsent(a.rrn!, () => <int>[firstPg[a.rrn!] ?? 0]).add(a.pg);
+        }
+        if (!seen.contains(a.rrn!)) {
+          final nn = a.rrn!.length > 6 ? int.tryParse(a.rrn!.substring(6)) : null;
+          if (nn != null) numPg[nn] = a.pg;
         }
         if (seen.add(a.rrn!)) {
           r.full++;
@@ -7582,7 +7737,16 @@ class MCollector {
       r.seqMax = cl.last;
       final have = cl.toSet();
       for (var n = cl.first; n <= cl.last; n++) {
-        if (!have.contains(n)) r.seqMissing.add(n);
+        if (!have.contains(n)) {
+          r.seqMissing.add(n);
+          // الصفحة = صفحة أقرب رقم أصغر موجود (الإيصالات متتالية بترتيب الصفحات)
+          var prev = n - 1;
+          while (prev >= cl.first && !have.contains(prev)) {
+            prev--;
+          }
+          final pg = numPg[prev];
+          if (pg != null && pg > 0) r.seqMissingByPage.putIfAbsent(pg, () => <int>[]).add(n);
+        }
       }
     }
     return r;
@@ -7592,6 +7756,7 @@ class MCollector {
 class MScan {
   int full = 0, partial = 0;
   final Map<String, List<int>> dups = {}; // RRN -> الصفحات اللي ظهر فيها (أول مرة + التكرارات)
+  final Map<int, List<int>> seqMissingByPage = {}; // رقم الصفحة -> أرقام إيصالات ناقصة غالباً في الصفحة دي
   final Map<String, String?> rrnDay = {};
   bool nonPayment = false;
   String? tid, day, month;
@@ -7697,6 +7862,7 @@ void saveMOut(String? f) {
 // عدد الإيصالات الإلكترونية من صورة السيستم لكل ماكينة (رقم الماكينة -> العدد). مقياس بس
 Map<int, int> sysTxnByNum = <int, int>{};
 Map<int, int> batchTxnByNum = <int, int>{}; // رقم الماكينة -> عدد الباتش فقط (من غير السيستم)
+Map<int, double> batchAmtByNum = <int, double>{}; // رقم الماكينة -> إجمالي مبلغ الباتش (من إيصال الإقفال، لو مؤكد)
 
 // لو عدد الـ PDF = عدد السيستم (إلكترونية): ملاحظة التسلسل (RRN) متتحسبش مراجعة. ده القرار الوحيد اللي السيستم بيحسمه
 bool _sysCntMatch(MResult r) {
@@ -7722,6 +7888,11 @@ class MResult {
   final List<String> cntNotes = [];
   List<String> altTids = []; // مرشحين تانيين للماكينة (مش بيتحفظوا)
   Map<String, double> votes = {};
+  Map<int, int> pageCounts = {}; // رقم الصفحة -> عدد الإيصالات فيها (من العد السريع)
+  Set<int> pageWarn = {}; // صفحات طرق العد اختلفت فيها
+  Map<int, String> pageNote = {}; // رقم الصفحة -> شرح (اتصحّحت / رقم ناقص / تعارض)
+  double amtSum = 0; // مجموع المبالغ المقروءة من الإيصالات
+  int amtRead = 0; // عدد الإيصالات اللي مبلغها اتقرا بوضوح
   String? tidUsed, dayUsed, monthUsed;
   bool idOk = true;
   bool cntOk = true;
@@ -7762,6 +7933,11 @@ class MResult {
         'seqBad': seqBad,
         'verdict': verdict,
         'exp': ctl.text,
+        'pageCounts': pageCounts.map((k, v) => MapEntry('$k', v)),
+        'pageWarn': pageWarn.toList(),
+        'pageNote': pageNote.map((k, v) => MapEntry('$k', v)),
+        'amtSum': amtSum,
+        'amtRead': amtRead,
       };
 
   static MResult fromJson(Map<String, dynamic> j) {
@@ -7782,6 +7958,25 @@ class MResult {
     r.seqBad = j['seqBad'] == true;
     r.verdict = (j['verdict'] as num?)?.toInt() ?? 0;
     r.ctl.text = (j['exp'] ?? '').toString();
+    final pc = j['pageCounts'];
+    if (pc is Map) {
+      pc.forEach((k, v) {
+        final kk = int.tryParse('$k');
+        final vv = (v as num?)?.toInt();
+        if (kk != null && vv != null) r.pageCounts[kk] = vv;
+      });
+    }
+    final pw = j['pageWarn'];
+    if (pw is List) r.pageWarn.addAll(pw.map((e) => (e as num).toInt()));
+    final pn = j['pageNote'];
+    if (pn is Map) {
+      pn.forEach((k, v) {
+        final kk = int.tryParse('$k');
+        if (kk != null) r.pageNote[kk] = '$v';
+      });
+    }
+    r.amtSum = ((j['amtSum'] as num?) ?? 0).toDouble();
+    r.amtRead = (j['amtRead'] as num?)?.toInt() ?? 0;
     return r;
   }
 }
@@ -8880,6 +9075,62 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                     style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
               ),
           ]),
+          // مقارنة المبالغ بمبلغ الباتش
+          if (!r.pending && r.amtRead > 0)
+            Builder(builder: (context) {
+              final ba = r.orderNum == null ? null : batchAmtByNum[r.orderNum!];
+              final all = r.amtRead >= r.count && r.count > 0;
+              final diff = ba == null ? null : ba - r.amtSum;
+              final okAmt = diff != null && diff.abs() < 0.005;
+              return section(_l(context, 'مقارنة المبالغ', 'Amount check'), [
+                kv(_l(context, 'مبالغ اتقرت بوضوح', 'Amounts read clearly'), '${r.amtRead} / ${r.count}'),
+                kv(_l(context, 'مجموعها', 'Their sum'), r.amtSum.toStringAsFixed(2)),
+                if (ba != null) kv(_l(context, 'مبلغ الباتش', 'Batch amount'), ba.toStringAsFixed(2)),
+                if (diff != null)
+                  kv(_l(context, 'الفرق', 'Difference'),
+                      okAmt ? _l(context, 'مطابق ✓', 'Match ✓') : diff.toStringAsFixed(2),
+                      color: okAmt ? Colors.green : (all ? Colors.red : Colors.orange)),
+                w.Text(
+                    ba == null
+                        ? _l(context, 'مفيش مبلغ باتش مؤكد للماكينة دي للمقارنة.', 'No confirmed batch amount for this machine to compare.')
+                        : (all
+                            ? (okAmt
+                                ? _l(context, 'كل المبالغ اتقرت والمجموع مطابق للباتش.', 'All amounts were read and the sum matches the batch.')
+                                : _l(context, 'كل المبالغ اتقرت والمجموع مختلف: غالباً إيصال ناقص أو زيادة بقيمة الفرق.', 'All amounts were read but the sum differs: likely a missing or extra receipt worth the difference.'))
+                            : _l(context, 'مبالغ كتير ما اتقراتش، فالفرق هنا مش دليل. المبلغ اللي ما اتقراش = ${diff!.toStringAsFixed(2)} لو كل الإيصالات موجودة.',
+                                'Some amounts were not read, so the difference is not proof. Unread amounts would total ${diff!.toStringAsFixed(2)} if all receipts are present.')),
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+              ]);
+            }),
+          // العدد لكل صفحة
+          if (r.pageCounts.isNotEmpty)
+            section(_l(context, 'العدد لكل صفحة', 'Count per page'), [
+              for (final e in r.pageCounts.entries)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      w.Text(
+                          _l(context, 'صفحة رقم ${e.key} العدد ${e.value}', 'Page ${e.key} count ${e.value}') +
+                              (r.pageWarn.contains(e.key) ? '  ⚠️' : ''),
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: r.pageWarn.contains(e.key) ? FontWeight.bold : FontWeight.normal,
+                              color: r.pageWarn.contains(e.key) ? Colors.orange : null)),
+                      if (r.pageNote[e.key] != null)
+                        w.Text(r.pageNote[e.key]!, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: w.Text(
+                    _l(context, 'المجموع: ${r.count}${r.pageWarn.isEmpty ? '' : '  •  ⚠️ = طرق العد اختلفت في الصفحة دي'}',
+                        'Total: ${r.count}${r.pageWarn.isEmpty ? '' : '  •  ⚠️ = counting methods disagreed on this page'}'),
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+              ),
+            ]),
           // 7) تفاصيل فنية: مقفولة افتراضياً
           Card(
             margin: const EdgeInsets.only(bottom: 8),
@@ -9618,10 +9869,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
-  // نقل PDF الإيصالات اللي اتفحصت واتسمّت وبقت تمام لفولدر أختاره من التليفون
+  // نقل PDF الإيصالات اللي اتسمّت ومش مستبعدة (سواء محتاجة مراجعة أو لأ) لفولدر أختاره من التليفون
   Future<void> transferGood() async {
     final good = results
-        .where((r) => !r.excluded && r.newName != null && r.ok && r.openPath != null && File(r.openPath!).existsSync())
+        .where((r) => !r.excluded && r.newName != null && r.openPath != null && File(r.openPath!).existsSync())
         .toList();
     final moved = await transferFilesViaPicker(context, good.map((r) => r.openPath!).toList());
     if (moved == null || moved.isEmpty || !mounted) return;
@@ -10328,6 +10579,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pageSm2 = <int, int>{}; // نفس الشيء بالطريقة 2
     final pageSm3 = <int, int>{}; // نفس الشيء بالطريقة 3 (الأساسية)
     var total2 = 0;
+    final pageAmt = <int, List<double>>{}; // رقم الصفحة -> المبالغ المقروءة
+    final pageAmtN = <int, int>{}; // رقم الصفحة -> عدد علامات AMOUNT
     final par = parallelCount;
     // ⚡ المتوازي (تجريبي): بنقرا صفحتين مع بعض، وبعدين بنعالج النتايج بترتيب الصفحات (نفس منطق العد العادي)
     if (par) {
@@ -10377,6 +10630,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 pageSm[i + 1] = sp.sm;
                 pageSm2[i + 1] = sp.sm2;
                 pageSm3[i + 1] = sp.sm3;
+                pageAmt[i + 1] = sp.amts;
+                pageAmtN[i + 1] = sp.types['amount'] ?? 0;
               }
             } catch (e) {
               failed++;
@@ -10425,6 +10680,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         pageSm[i + 1] = sp.sm;
         pageSm2[i + 1] = sp.sm2;
         pageSm3[i + 1] = sp.sm3;
+        pageAmt[i + 1] = sp.amts;
+        pageAmtN[i + 1] = sp.types['amount'] ?? 0;
       } catch (e) {
         failed++;
         if (failed <= 3) _dbg('FAST_PAGE_FAIL ${r.pdfName} p${i + 1}: ${e.toString().split('\n').first}');
@@ -10436,6 +10693,81 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     _dbg('FAST${par ? '-PAR' : ''} ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed');
     if (total == 0 || failed == ranges.length) return false; // نرجع للطريقة القديمة
+    // ───── صفحات مشكوك فيها: قراءة تانية بعد إزالة الخط الأحمر + عدّ المستطيلات بالشكل ─────
+    // بنعيد بس الصفحات اللي طرق العد اختلفت فيها أو عددها مش زي باقي الصفحات (غير آخر صفحة).
+    // البديل بيتقبل بس لو القراءة المنضّفة متفقة مع نفسها (الطرق التلاتة نفس الرقم) وعددها مش أقل من الأصلي
+    // (إزالة الأحمر بتكشف إيصالات متغطية، ما بتخفيش إيصالات)، ولو المستطيلات خالفتها بنسيب الأصلي ونعلّم الصفحة.
+    final pageNote = <int, String>{};
+    final sus = <int>{};
+    final keysSorted = pageSm3.keys.toList()..sort();
+    for (final k in keysSorted) {
+      if (pageSm[k] != pageSm3[k] || pageSm2[k] != pageSm3[k]) sus.add(k);
+    }
+    if (keysSorted.length >= 4) {
+      final lastK0 = keysSorted.last;
+      final freq0 = <int, int>{};
+      for (final k in keysSorted.where((k) => k != lastK0)) {
+        freq0[pageSm3[k]!] = (freq0[pageSm3[k]!] ?? 0) + 1;
+      }
+      if (freq0.isNotEmpty) {
+        final top0 = freq0.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+        for (final k in keysSorted.where((k) => k != lastK0)) {
+          if (pageSm3[k] != top0) sus.add(k);
+        }
+      }
+    }
+    for (final k in sus.toList()..sort()) {
+      try {
+        _ensureMTmp();
+        final p1 = '$mTmpDir/rr_${k - 1}.jpg';
+        final p2 = '$mTmpDir/rr_${k - 1}_c.jpg';
+        await File(p1).writeAsBytes(Uint8List.sublistView(bytes, ranges[k - 1][0], ranges[k - 1][1]));
+        final rect = await rectCountAsync(p1);
+        await redRemoveAsync(p1, p2);
+        final res3 = await _ocr(rec, p2);
+        final cs = _structCount(res3);
+        try {
+          File(p1).deleteSync();
+        } catch (_) {}
+        try {
+          File(p2).deleteSync();
+        } catch (_) {}
+        final o = pageSm3[k]!;
+        final cOk = cs.sm == cs.sm2 && cs.sm2 == cs.sm3;
+        _dbg('REDFIX ${r.pdfName} p$k: أصلي=${pageSm[k]}/${pageSm2[k]}/$o منضّف=${cs.sm}/${cs.sm2}/${cs.sm3} مستطيلات=${rect ?? '-'}');
+        int? pick;
+        String? why;
+        if (cOk && cs.sm3 >= o && cs.sm3 != o) {
+          if (rect != null && rect != cs.sm3 && rect == o) {
+            why = 'القراءة بعد إزالة الأحمر ${cs.sm3} والمستطيلات $rect، فاتحفظ $o (راجع)';
+          } else {
+            pick = cs.sm3;
+            why = 'اتصحّحت من $o لـ ${cs.sm3} بعد إزالة الخط الأحمر';
+          }
+        } else if (!cOk && rect != null && rect != o && rect == cs.sm3 && rect >= o) {
+          pick = rect;
+          why = 'اتصحّحت من $o لـ $rect (القراءة المنضّفة والمستطيلات اتفقوا)';
+        } else if (rect != null && rect != o && !(cOk && cs.sm3 == o)) {
+          why = 'عدد المستطيلات $rect مختلف عن العدد $o (راجع)';
+        }
+        if (pick != null) {
+          pageSm[k] = pick;
+          pageSm2[k] = pick;
+          pageSm3[k] = pick;
+          pageAmt[k] = cs.amts;
+          pageAmtN[k] = cs.types['amount'] ?? 0;
+        }
+        if (why != null) pageNote[k] = why;
+      } catch (e) {
+        _dbg('REDFIX_FAIL ${r.pdfName} p$k: ${e.toString().split('\n').first}');
+      }
+      await Future.delayed(const Duration(milliseconds: 2));
+    }
+    if (pageNote.isNotEmpty) {
+      total = pageSm.values.fold<int>(0, (a, b) => a + b);
+      total2 = pageSm2.values.fold<int>(0, (a, b) => a + b);
+      total3 = pageSm3.values.fold<int>(0, (a, b) => a + b);
+    }
     final sc = col.finish();
     final total1 = total; // الطريقة 1 (القديمة)
     var dualInfo = '';
@@ -10494,6 +10826,33 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       dualNote = 'طرق العد اختلفت: $total1 / $total2 / $total3 (المعروض $total)$pgTxt (راجع)';
     }
     r.count = total;
+    r.pageCounts = {
+      for (final k in (pageSm3.keys.toList()..sort())) k: chosenM == 1 ? (pageSm[k] ?? 0) : (chosenM == 2 ? (pageSm2[k] ?? 0) : (pageSm3[k] ?? 0))
+    };
+    r.pageWarn = {
+      for (final k in pageSm3.keys)
+        if (pageSm[k] != pageSm3[k] || pageSm2[k] != pageSm3[k]) k
+    };
+    r.pageNote = Map<int, String>.from(pageNote);
+    for (final k in pageNote.keys) {
+      r.pageWarn.add(k);
+    }
+    // أرقام إيصالات ناقصة في صفحة معينة (بس لو أغلب أرقام الـ RRN اتقرت، غير كده الأرقام الناقصة بتبقى مش اتقرت مش مفقودة)
+    if (sc.rangeLen != null && sc.full >= total * 0.8) {
+      sc.seqMissingByPage.forEach((pg, nums) {
+        final txt = 'أرقام إيصالات ناقصة بعد الصفحة دي: ${nums.take(5).map((n) => n.toString().padLeft(6, '0')).join(' - ')}';
+        r.pageNote[pg] = r.pageNote[pg] == null ? txt : '${r.pageNote[pg]} • $txt';
+        r.pageWarn.add(pg);
+      });
+    }
+    r.amtSum = 0;
+    r.amtRead = 0;
+    pageAmt.forEach((k, v) {
+      r.amtRead += v.length;
+      for (final x in v) {
+        r.amtSum += x;
+      }
+    });
     r.detail = 'عدّ سريع${par ? ' متوازي' : ''} • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
         '${slips > 0 ? ' • أوراق تعريف مُتجاهلة $slips' : ''}'
         ' • ⏱ ${fmtElapsed(Duration(seconds: (sw.elapsedMilliseconds / 1000).round()))}';
