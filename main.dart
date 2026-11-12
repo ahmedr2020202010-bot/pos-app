@@ -18,186 +18,12 @@ import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// نموذج ملخص سيستم المرور (A2R Operations Console v60) - مرحلة إضافية اختيارية
-// ─────────────────────────────────────────────────────────────────────────────
-class ConsoleSummaryItem {
-  final String path;
-  final String tid;
-  final String unitName;
-  final String date;
-  final int totalTxn;
-  final int electronicTxn;
-  final int manualTxn;
-  final int cancelledTxn;
-  final double systemAmount;
-
-  ConsoleSummaryItem({
-    required this.path,
-    required this.tid,
-    required this.unitName,
-    required this.date,
-    required this.totalTxn,
-    required this.electronicTxn,
-    required this.manualTxn,
-    required this.cancelledTxn,
-    required this.systemAmount,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'path': path,
-        'tid': tid,
-        'unitName': unitName,
-        'date': date,
-        'totalTxn': totalTxn,
-        'electronicTxn': electronicTxn,
-        'manualTxn': manualTxn,
-        'cancelledTxn': cancelledTxn,
-        'systemAmount': systemAmount,
-      };
-
-  static ConsoleSummaryItem fromJson(Map<String, dynamic> j) => ConsoleSummaryItem(
-        path: (j['path'] ?? '').toString(),
-        tid: (j['tid'] ?? '').toString(),
-        unitName: (j['unitName'] ?? '').toString(),
-        date: (j['date'] ?? '').toString(),
-        totalTxn: (j['totalTxn'] as num?)?.toInt() ?? 0,
-        electronicTxn: (j['electronicTxn'] as num?)?.toInt() ?? 0,
-        manualTxn: (j['manualTxn'] as num?)?.toInt() ?? 0,
-        cancelledTxn: (j['cancelledTxn'] as num?)?.toInt() ?? 0,
-        systemAmount: (j['systemAmount'] as num?)?.toDouble() ?? 0.0,
-      );
-
-  static String _cleanDigits(String s) {
-    const ar = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
-    const en = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-    var res = s;
-    for (var i = 0; i < 10; i++) {
-      res = res.replaceAll(ar[i], en[i]);
-    }
-    return res;
-  }
-
-  static ConsoleSummaryItem? fromOcr(List<OcrLine> lines, String rawText, String filePath) {
-    final clean = _cleanDigits(rawText);
-    final up = clean.toUpperCase();
-    if (!up.contains('A2R') &&
-        !clean.contains('ملخص الفحص') &&
-        !clean.contains('مبالغ السيستم') &&
-        !clean.contains('الترمنل')) {
-      return null;
-    }
-
-    // 1. رقم الترمنل (TID)
-    String tid = '';
-    final tidMatch = RegExp(r'\b(503\d{5})\b').firstMatch(clean);
-    if (tidMatch != null) {
-      tid = tidMatch.group(1)!;
-    }
-
-    // 2. المبلغ الإجمالي للسيستم
-    double amount = 0.0;
-    for (final m in RegExp(r'(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})').allMatches(clean)) {
-      final v = double.tryParse('${m.group(1)!.replaceAll(',', '')}.${m.group(2)!}') ?? 0.0;
-      if (v > 100) {
-        amount = v;
-        break;
-      }
-    }
-
-    // 3. عدد العمليات عبر مطابقة السطور المتوازية أفقياً
-    int totalTx = 0;
-    int elecTx = 0;
-
-    final rows = <List<OcrLine>>[];
-    final sorted = [...lines]..sort((a, b) => a.cy.compareTo(b.cy));
-    for (final l in sorted) {
-      if (rows.isNotEmpty && (l.cy - rows.last.first.cy).abs() < l.h * 0.85) {
-        rows.last.add(l);
-      } else {
-        rows.add([l]);
-      }
-    }
-
-    for (final r in rows) {
-      final rowStr = _cleanDigits(r.map((e) => e.text).join(' '));
-      if (rowStr.contains('إلكترونية') || rowStr.contains('العمليات')) {
-        final nums = RegExp(r'\b(\d{1,5})\b')
-            .allMatches(rowStr)
-            .map((m) => int.parse(m.group(1)!))
-            .where((n) => n > 0 && n < 50000)
-            .toList();
-        if (nums.isNotEmpty) {
-          if (rowStr.contains('إلكترونية')) {
-            elecTx = nums.first;
-          } else if (totalTx == 0) {
-            totalTx = nums.first;
-          }
-        }
-      }
-    }
-
-    if (elecTx == 0 && totalTx > 0) elecTx = totalTx;
-    if (totalTx == 0 && elecTx > 0) totalTx = elecTx;
-
-    // التاريخ
-    String dateStr = findDateIn([clean]) ?? todayToken();
-
-    // اسم الوحدة
-    String uName = 'وحدة غير معروفة';
-    final uMatch = RegExp(r'وحدة مرور\s+([^\n\r]+)').firstMatch(clean);
-    if (uMatch != null) {
-      uName = uMatch.group(1)!.trim();
-    } else if (tid.isNotEmpty && terminals.containsKey(tid)) {
-      uName = terminals[tid]!.unitName;
-    }
-
-    return ConsoleSummaryItem(
-      path: filePath,
-      tid: tid,
-      unitName: uName,
-      date: dateStr,
-      totalTxn: totalTx,
-      electronicTxn: elecTx,
-      manualTxn: 0,
-      cancelledTxn: 0,
-      systemAmount: amount,
-    );
-  }
-}
-
-final ValueNotifier<Map<String, ConsoleSummaryItem>> consoleSummaries =
-    ValueNotifier<Map<String, ConsoleSummaryItem>>({});
-
-final String consoleStatePath = '$baseDir/.app_console.json';
-
-void saveConsoleSummaries(Map<String, ConsoleSummaryItem> items) {
-  try {
-    final data = {for (final e in items.entries) e.key: e.value.toJson()};
-    File(consoleStatePath)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode(data));
-  } catch (_) {}
-}
-
-Map<String, ConsoleSummaryItem> loadConsoleSummaries() {
-  try {
-    final f = File(consoleStatePath);
-    if (!f.existsSync()) return {};
-    final map = jsonDecode(f.readAsStringSync()) as Map;
-    return map.map((k, v) => MapEntry(k.toString(), ConsoleSummaryItem.fromJson(Map<String, dynamic>.from(v as Map))));
-  } catch (_) {
-    return {};
-  }
-}
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await appSettings.load();
   await prepareDefaultFiles();
-  consoleSummaries.value = loadConsoleSummaries();
   FlutterError.onError = (d) {
-    _dbg('FLUTTER_ERROR ${d.exceptionAsString()}');
+    _dbg('FLUTTER_ERROR ${d.exceptionAsString()}\n${(d.stack?.toString() ?? '').split('\n').take(8).join('\n')}');
     FlutterError.presentError(d);
   };
   WidgetsBinding.instance.platformDispatcher.onError = (e, st) {
@@ -384,6 +210,224 @@ Widget _pathRow(IconData icon, String label, String path, VoidCallback? onPick,
   );
 }
 
+// ───────── شرائح المصدر / الفترة / الإخراج (بدل القسم القابل للفتح) ─────────
+// كل شريحة بتفتح قايمة سفلية. مستخدمة في تاب التقفيل وتاب إيصالات الدفع.
+Future<void> _sheet(BuildContext context, String title, List<Widget> children) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (c) => SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            ...children,
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+Widget _choiceTile(BuildContext c, {required bool selected, required String title, String? subtitle, required VoidCallback onTap, IconData? icon}) {
+  final cs = Theme.of(c).colorScheme;
+  return ListTile(
+    leading: Icon(selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+        color: selected ? cs.primary : cs.onSurfaceVariant),
+    title: Row(children: [
+      if (icon != null) ...[Icon(icon, size: 18), const SizedBox(width: 6)],
+      Flexible(child: Text(title)),
+    ]),
+    subtitle: subtitle == null
+        ? null
+        : Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis, textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+    onTap: onTap,
+  );
+}
+
+Widget _sourceChips(
+  BuildContext context, {
+  required bool busy,
+  required int days,
+  required void Function(int) onDays,
+  required String periodLabel,
+  required String? sourcePath, // null = واتساب (تلقائي)
+  required VoidCallback onPickSource,
+  required VoidCallback onUseWhatsApp,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  final customSrc = sourcePath != null;
+
+  Widget chip(IconData icon, String label, bool highlight, VoidCallback onTap) => ActionChip(
+        avatar: Icon(icon, size: 18),
+        label: Row(mainAxisSize: MainAxisSize.min, children: [
+          Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13))),
+          const SizedBox(width: 2),
+          const Icon(Icons.arrow_drop_down, size: 18),
+        ]),
+        backgroundColor: highlight ? cs.secondaryContainer : null,
+        visualDensity: VisualDensity.compact,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        onPressed: busy ? null : onTap,
+      );
+
+  void srcSheet() => _sheet(context, _l(context, 'المصدر', 'Source'), [
+        Builder(builder: (c) => _choiceTile(c,
+            selected: !customSrc,
+            icon: Icons.chat,
+            title: _l(c, 'واتساب (تلقائي)', 'WhatsApp (auto)'),
+            onTap: () {
+              Navigator.pop(c);
+              if (customSrc) onUseWhatsApp();
+            })),
+        Builder(builder: (c) => _choiceTile(c,
+            selected: customSrc,
+            icon: Icons.folder_open,
+            title: customSrc ? _l(c, 'فولدر تاني', 'Another folder') : _l(c, 'فولدر تاني…', 'Another folder…'),
+            subtitle: sourcePath,
+            onTap: () {
+              Navigator.pop(c);
+              onPickSource();
+            })),
+      ]);
+
+  void periodSheet() => _sheet(context, _l(context, 'الفترة', 'Period'), [
+        for (final o in const [
+          [0, 'اليوم', 'Today'],
+          [1, 'يومين', '2 days'],
+          [2, '3 أيام', '3 days'],
+          [-1, 'الكل', 'All'],
+        ])
+          Builder(builder: (c) => _choiceTile(c,
+              selected: days == o[0],
+              title: _l(c, o[1] as String, o[2] as String),
+              onTap: () {
+                Navigator.pop(c);
+                onDays(o[0] as int);
+              })),
+      ]);
+
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Wrap(
+      spacing: 6,
+      runSpacing: 0,
+      children: [
+        chip(customSrc ? Icons.folder_open : Icons.chat, customSrc ? baseName(sourcePath!) : _l(context, 'واتساب', 'WhatsApp'), customSrc, srcSheet),
+        chip(Icons.date_range, periodLabel, false, periodSheet),
+      ],
+    ),
+  );
+}
+
+// كارت فولدر الإخراج: أيقونة ملوّنة + اسم الفولدر + شارة "افتراضي" + زر فتح
+Widget _outputCard(
+  BuildContext context, {
+  required bool busy,
+  required String outPath,
+  required bool outIsDefault,
+  required VoidCallback onPickOut,
+  required VoidCallback onUseDefaultOut,
+  required VoidCallback onOpenOut,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  void outSheet() => _sheet(context, _l(context, 'فولدر الإخراج', 'Output folder'), [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: SelectableText(outPath, textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 12)),
+        ),
+        Builder(builder: (c) => ListTile(
+              leading: const Icon(Icons.edit_location_alt_outlined),
+              title: Text(_l(c, 'تغيير الفولدر', 'Change folder')),
+              onTap: () {
+                Navigator.pop(c);
+                onPickOut();
+              },
+            )),
+        if (!outIsDefault)
+          Builder(builder: (c) => ListTile(
+                leading: const Icon(Icons.settings_backup_restore),
+                title: Text(_l(c, 'رجوع للفولدر الافتراضي', 'Back to default folder')),
+                onTap: () {
+                  Navigator.pop(c);
+                  onUseDefaultOut();
+                },
+              )),
+      ]);
+  return Card(
+    margin: const EdgeInsets.only(top: 2, bottom: 4),
+    elevation: 0,
+    color: cs.surfaceContainerHighest.withAlpha(110),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: busy ? null : outSheet,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: cs.primaryContainer,
+              child: Icon(Icons.drive_file_move_outline, size: 20, color: cs.onPrimaryContainer),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_l(context, 'فولدر الإخراج', 'Output folder'),
+                      style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                  Row(children: [
+                    Flexible(
+                      child: Text(baseName(outPath),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textDirection: TextDirection.ltr,
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                    ),
+                    if (outIsDefault) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: _tintBg(context, Colors.green),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(_l(context, 'افتراضي', 'Default'),
+                            style: TextStyle(fontSize: 10, color: _tintFg(context, Colors.green))),
+                      ),
+                    ],
+                  ]),
+                ],
+              ),
+            ),
+            IconButton.filledTonal(
+              tooltip: _l(context, 'فتح الفولدر', 'Open folder'),
+              icon: const Icon(Icons.open_in_new, size: 18),
+              visualDensity: VisualDensity.compact,
+              onPressed: busy ? null : onOpenOut,
+            ),
+            const SizedBox(width: 2),
+            TextButton(
+              onPressed: busy ? null : outSheet,
+              style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+              child: Text(_l(context, 'تغيير', 'Change')),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 Widget _settingsCard(List<Widget> children) => Card(
       margin: const EdgeInsets.only(bottom: 6),
       child: Padding(
@@ -408,11 +452,22 @@ Widget _statusBox(String text) => Builder(
           color: Theme.of(c).colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(8),
         ),
-        child: Text(text, style: const TextStyle(fontSize: 13)),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(Icons.info_outline, size: 16, color: Theme.of(c).colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
+          ],
+        ),
       ),
     );
 
 // ───────── نقل/نسخ ملفات لفولدر بيختاره المستخدم من متصفح ملفات التليفون ─────────
+// بيرجّع خريطة (المسار القديم ← الجديد) للملفات اللي اتنقلت/اتنسخت، أو null لو اتلغى
 Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<String> paths) async {
   final existing = paths.where((p) => File(p).existsSync()).toList();
   if (existing.isEmpty) {
@@ -460,7 +515,7 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
     if (r == null || r == '?') {
       fallback = true;
     } else if (r.isEmpty) {
-      return null;
+      return null; // اتلغى
     } else {
       dir = r;
     }
@@ -529,6 +584,8 @@ Widget _bottomBar(Widget button, {bool busy = false, double? progress}) => Mater
     );
 
 // ───────── عناصر موحّدة بين تاب التقفيل وتاب إيصالات الدفع ─────────
+
+// الشريط السفلي: [فحص التاب ده] + [فحص الكل]، وبيتحوّل لزرار إيقاف وقت الشغل
 Widget _scanBar({
   required bool busy,
   required bool stopReq,
@@ -547,12 +604,13 @@ Widget _scanBar({
               : step == 2
                   ? ' • الملفات (2 من 2)'
                   : '';
+          final pct = (progress != null && progress > 0) ? ' • ${(progress * 100).round()}%' : '';
           child = FilledButton.icon(
             onPressed: stopReq ? null : onStop,
             style: FilledButton.styleFrom(
                 backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
             icon: const Icon(Icons.stop),
-            label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف$stepTxt'),
+            label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف$stepTxt$pct'),
           );
         } else {
           child = Row(
@@ -561,6 +619,7 @@ Widget _scanBar({
                 flex: 3,
                 child: FilledButton.icon(
                   onPressed: chainRunning ? null : onScanThis,
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
                   icon: const Icon(Icons.play_arrow),
                   label: Text(thisLabel),
                 ),
@@ -568,8 +627,9 @@ Widget _scanBar({
               const SizedBox(width: 8),
               Expanded(
                 flex: 2,
-                child: FilledButton.tonalIcon(
+                child: OutlinedButton.icon(
                   onPressed: (chainRunning || homeBusyG || machBusyG) ? null : () => runAllScans(),
+                  style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
                   icon: const Icon(Icons.playlist_play),
                   label: const Text('فحص الكل'),
                 ),
@@ -581,6 +641,7 @@ Widget _scanBar({
       },
     );
 
+// قايمة ⋮ الموحّدة (المظهر، الخلفية، الصيانة، الإصدار)
 Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallback onLog}) {
   final ar = AppSettings.of(context).isAr;
   return PopupMenuButton<String>(
@@ -616,6 +677,7 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
   );
 }
 
+// زرار دايرة (أيقونة + اسم) لصف الأزرار الموحّد
 Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallback? onTap) {
   final cs = Theme.of(context).colorScheme;
   return InkWell(
@@ -632,7 +694,9 @@ Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallbac
             child: Icon(icon, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
           ),
           const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontSize: 12)),
+          Text(label,
+              style: TextStyle(
+                  fontSize: 12, color: onTap == null ? Theme.of(context).disabledColor : null)),
         ],
       ),
     ),
@@ -642,6 +706,7 @@ Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallbac
 Widget _actionRow(List<Widget> kids) =>
     Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: kids);
 
+// تلميح السحب + زرار "الباقي صح" (نفس المكان والشكل في التابين)
 Widget _reviewTools(BuildContext context,
         {required String hint,
         required int count,
@@ -665,6 +730,7 @@ Widget _reviewTools(BuildContext context,
       ],
     );
 
+// رقم الإصدار: بييجي من GitHub Actions وقت البناء (APP_VERSION + رقم البناء)
 const String kAppVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'تجريبي');
 
 class PosApp extends StatelessWidget {
@@ -724,6 +790,7 @@ class _RootPageState extends State<RootPage> {
     super.dispose();
   }
 
+  // أثناء الفحص الشامل: نفتح التاب اللي شغال دلوقتي
   void _onChain() {
     final s = chainStep.value;
     final t = s == 1 ? 0 : (s == 2 ? 1 : tab);
@@ -759,8 +826,8 @@ const String kAppAuthor = 'Ahmed Ramadan - Alexandria';
 
 // ───────────────────── الإعدادات: اللغة + الدارك مود ─────────────────────
 class AppSettings extends ChangeNotifier with WidgetsBindingObserver {
-  ThemeMode themeMode = ThemeMode.system;
-  String? langCode;
+  ThemeMode themeMode = ThemeMode.system; // system = حسب النظام
+  String? langCode; // null = حسب لغة النظام
   int seedIndex = kDefaultSeed;
   SharedPreferences? _prefs;
 
@@ -785,7 +852,7 @@ class AppSettings extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeLocales(List<Locale>? locales) {
-    if (langCode == null) notifyListeners();
+    if (langCode == null) notifyListeners(); // بنتبع لغة النظام
   }
 
   void setLang(String? code) {
@@ -832,6 +899,7 @@ class AppSettings extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  // أي ويدجت بتنده عليها بتتسجّل وبتتحدّث لوحدها لما اللغة تتغير
   static AppSettings of(BuildContext context) {
     final s = context.dependOnInheritedWidgetOfExactType<_LangScope>();
     return s?.notifier ?? appSettings;
@@ -840,23 +908,25 @@ class AppSettings extends ChangeNotifier with WidgetsBindingObserver {
 
 final AppSettings appSettings = AppSettings();
 
+// لون هوية التطبيق (A2R): أزرق ملكي. بيتضاف في آخر القايمة علشان اللي اختار لون قبل كده يفضل لونه.
 const Color kBrandSeed = Color(0xFF2B59C3);
-const int kDefaultSeed = 6;
+const int kDefaultSeed = 6; // مكان kBrandSeed في kSeeds
 const List<Color> kSeeds = [Colors.teal, Colors.blue, Colors.indigo, Colors.green, Colors.orange, Colors.purple, kBrandSeed];
 const List<String> kSeedNamesAr = ['تيل', 'أزرق', 'نيلي', 'أخضر', 'برتقالي', 'بنفسجي', 'A2R (الهوية)'];
 const List<String> kSeedNamesEn = ['Teal', 'Blue', 'Indigo', 'Green', 'Orange', 'Purple', 'A2R (brand)'];
 
 // ───────── حالة مشتركة بين التابين ─────────
-final ValueNotifier<Map<int, int>> closingTxn = ValueNotifier<Map<int, int>>(<int, int>{});
-final ValueNotifier<int> wipeSignal = ValueNotifier<int>(0);
+final ValueNotifier<Map<int, int>> closingTxn = ValueNotifier<Map<int, int>>(<int, int>{}); // رقم الماكينة -> عدد معاملات الباتش
+final ValueNotifier<int> wipeSignal = ValueNotifier<int>(0); // بيتغير لما "مسح كل حاجة" يخلص
 bool homeBusyG = false;
 bool machBusyG = false;
 
+// ───────── الفحص الشامل: الباتشات (التقفيل) ثم الملفات (إيصالات الدفع) ورا بعض ─────────
 bool chainRunning = false;
 bool chainAbort = false;
 bool homeAutoG = false;
 bool machAutoG = false;
-final ValueNotifier<int> chainStep = ValueNotifier<int>(0);
+final ValueNotifier<int> chainStep = ValueNotifier<int>(0); // 0 = واقف، 1 = الباتشات، 2 = الملفات
 final ValueNotifier<String> chainSummary = ValueNotifier<String>('');
 Future<void> Function()? homeRunG;
 Future<void> Function()? machRunG;
@@ -926,6 +996,7 @@ Future<void> runAllScans() async {
   }
 }
 
+// ملخص الفحص الشامل (الأزرار نفسها بقت في الشريط السفلي)
 Widget _runAllCard() => ValueListenableBuilder<String>(
       valueListenable: chainSummary,
       builder: (c, sm, _) => sm.isEmpty
@@ -933,7 +1004,214 @@ Widget _runAllCard() => ValueListenableBuilder<String>(
           : Padding(padding: const EdgeInsets.only(bottom: 6), child: _statusBox(sm)),
     );
 
-void _publishClosing(List<ReceiptItem> items) {
+// ───────── مبلغ السيستم (صورة A2R Operations Console) + حفظ نتايج فحص التقفيل ─────────
+// صورة السيستم: فيها رقم الترمنل + "إجمالي مبالغ السيستم". مش باتش، فمتتعدّش، والمبلغ بيتربط بالباتشات بالترمنل.
+class SysTotal {
+  final String? tid; // رقم الترمنل المقروء
+  final double? amount; // إجمالي مبالغ السيستم
+  final String? date; // بنفس صيغة تاريخ الإيصالات (يوم.شهر)
+  final String printed; // وقت الطباعة (لو فيه أكتر من صورة لنفس الترمنل ناخد الأحدث)
+  final String file;
+  final int? txn; // إيصالات إلكترونية (ده الرقم اللي بنقارن بيه عدد إيصالات الدفع)
+  final int? txnAll; // إجمالي العمليات
+  const SysTotal(this.tid, this.amount, this.date, this.printed, this.file, {this.txn, this.txnAll});
+
+  Map<String, dynamic> toJson() =>
+      {'tid': tid, 'amt': amount, 'date': date, 'pr': printed, 'f': file, 'tx': txn, 'ta': txnAll};
+
+  static SysTotal fromJson(Map m) => SysTotal(
+        m['tid'] as String?,
+        (m['amt'] as num?)?.toDouble(),
+        m['date'] as String?,
+        (m['pr'] as String?) ?? '',
+        (m['f'] as String?) ?? '',
+        txn: (m['tx'] as num?)?.toInt(),
+        txnAll: (m['ta'] as num?)?.toInt(),
+      );
+}
+
+// أعداد صورة السيستم من مواقع الأسطر (الـ OCR لاتيني فبيقرا الأرقام بس، والعناوين العربي مش مقروءة).
+// الترتيب من فوق لتحت بعد سطر التاريخ وقبل سطر المبلغ: إجمالي العمليات، إيصالات إلكترونية، يدوية، ملغية.
+// بترجع [إجمالي العمليات، الإلكترونية] أو [null, null] لو مش متأكدين.
+List<int?> _sysCounts(RecognizedText rt) {
+  final lines = <TextLine>[for (final b in rt.blocks) ...b.lines];
+  final egpRe = RegExp(r'\d[.,]\d{2}\s*EG[PR]', caseSensitive: false);
+  double? egpTop;
+  for (final l in lines) {
+    if (egpRe.hasMatch(l.text)) {
+      final t = l.boundingBox.top;
+      if (egpTop == null || t < egpTop) egpTop = t;
+    }
+  }
+  if (egpTop == null) return [null, null];
+  final dateRe = RegExp(r'\d{1,2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?20\d{2}');
+  double? dateBottom;
+  for (final l in lines) {
+    if (dateRe.hasMatch(l.text) && l.boundingBox.top < egpTop) {
+      final b = l.boundingBox.bottom;
+      if (dateBottom == null || b < dateBottom) dateBottom = b;
+    }
+  }
+  final numRe = RegExp(r'^[^A-Za-z\d]{0,3}(\d{1,5})[^A-Za-z\d]{0,3}$');
+  final nums = <MapEntry<double, int>>[];
+  for (final l in lines) {
+    final m = numRe.firstMatch(l.text.trim());
+    if (m == null) continue;
+    if (l.boundingBox.bottom > egpTop + 4) continue;
+    if (dateBottom != null && l.boundingBox.top < dateBottom - 4) continue;
+    nums.add(MapEntry(l.boundingBox.top, int.parse(m.group(1)!)));
+  }
+  nums.sort((a, b) => a.key.compareTo(b.key));
+  if (nums.length < 2) return [null, null];
+  final total = nums[0].value, elec = nums[1].value;
+  if (elec > total) return [null, null];
+  return [total, elec];
+}
+
+SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
+  final up = text.toUpperCase();
+  final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER').hasMatch(up);
+  final printedM = RegExp(
+          r'PRINTED\W{0,3}\s*(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?',
+          caseSensitive: false)
+      .firstMatch(text);
+  final egpRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d+)[.,](\d{2})\s*EG[PR]', caseSensitive: false);
+  double? amount;
+  for (final m in egpRe.allMatches(text)) {
+    final v = double.tryParse('${m.group(1)!.replaceAll(',', '')}.${m.group(2)!}');
+    if (v != null && (amount == null || v > amount)) amount = round2(v);
+  }
+  if (!hasTitle) {
+    // العنوان اتقرا غلط: نتأكد من علامات تانية (Printed + EGP + ترمنل معروف) ومن إنه مش إيصال بنك
+    if (printedM == null || amount == null) return null;
+    if (classifyReceipt(text) != 'other') return null;
+    if (findTerminalIn([text]) == null) return null;
+  }
+  String? tid = findTerminalIn([text]);
+  tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
+  // إيصال السيستم لازم فيه رقم ترمنل (أي ترمنل). من غيره مش إيصال سيستم. رقم إصدار البرنامج (v60 / v51...) ملوش علاقة
+  if (tid == null) return null;
+
+  String? date;
+  final dm = RegExp(r'(?<!\d)(\d{1,2})\s?[.\-/]\s?(\d{1,2})\s?[.\-/]\s?(20\d{2})(?!\d)').firstMatch(text);
+  if (dm != null) {
+    date = '${int.parse(dm.group(1)!)}.${int.parse(dm.group(2)!)}';
+  } else if (printedM != null) {
+    date = '${int.parse(printedM.group(3)!)}.${int.parse(printedM.group(2)!)}';
+  }
+  var printed = '';
+  if (printedM != null) {
+    final t = printedM.group(4);
+    final tt = t == null ? '' : t.split(':').map((e) => e.padLeft(2, '0')).join(':');
+    printed = '${printedM.group(1)}-${printedM.group(2)!.padLeft(2, '0')}-${printedM.group(3)!.padLeft(2, '0')} $tt';
+  }
+  final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
+  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1]);
+}
+
+String _fmtMoney(double v) {
+  final s = v.toStringAsFixed(2);
+  final p = s.split('.');
+  final neg = p[0].startsWith('-');
+  final digits = neg ? p[0].substring(1) : p[0];
+  final b = StringBuffer();
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) b.write(',');
+    b.write(digits[i]);
+  }
+  return '${neg ? '-' : ''}$b.${p[1]}';
+}
+
+// نتايج قراءة كل صورة (بتتحفظ في SharedPreferences: بتتمسح مع "مسح البيانات والكاش").
+// الفحص الجديد بيقرا بس الصور الجديدة، والباقي بيتاخد من هنا.
+const int _kScanVer = 1;
+const String _kScanCacheKey = 'closing_scan_cache_v1';
+Map<String, dynamic> _scanCache = <String, dynamic>{};
+bool _scanCacheLoaded = false;
+int _scanCacheDirty = 0;
+
+Future<void> loadScanCache() async {
+  if (_scanCacheLoaded) return;
+  try {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString(_kScanCacheKey);
+    _scanCache = raw == null ? <String, dynamic>{} : Map<String, dynamic>.from(jsonDecode(raw) as Map);
+  } catch (_) {
+    _scanCache = <String, dynamic>{};
+  }
+  // نشيل اللي أقدم من 21 يوم علشان الحجم ما يكبرش
+  final limit = DateTime.now().subtract(const Duration(days: 21)).millisecondsSinceEpoch;
+  _scanCache.removeWhere((k, v) => v is! Map || ((v['ts'] as num?) ?? 0) < limit);
+  _scanCacheLoaded = true;
+}
+
+Future<void> saveScanCache() async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kScanCacheKey, jsonEncode(_scanCache));
+    _scanCacheDirty = 0;
+  } catch (_) {}
+}
+
+Future<void> clearScanCache() async {
+  _scanCache = <String, dynamic>{};
+  _scanCacheLoaded = true;
+  _scanCacheDirty = 0;
+  try {
+    final p = await SharedPreferences.getInstance();
+    await p.remove(_kScanCacheKey);
+  } catch (_) {}
+}
+
+void _cachePut(String key, Map<String, dynamic> e) {
+  e['v'] = _kScanVer;
+  e['ts'] = DateTime.now().millisecondsSinceEpoch;
+  _scanCache[key] = e;
+  _scanCacheDirty++;
+}
+
+Map<String, dynamic> _receiptToCache(ReceiptItem it, int? rot) => {
+      'k': 'receipt',
+      'tid': it.tid,
+      'row': it.row,
+      'unit': it.unitName,
+      'amt': it.amount,
+      'date': it.date,
+      'ok': it.ok,
+      'how': it.how,
+      'bat': it.batches,
+      'alt': it.alt,
+      'rep': it.reprintSummary,
+      'nobc': it.missingBatchClosed,
+      'txn': it.txn,
+      'cands': it.cands,
+      'rot': rot,
+    };
+
+ReceiptItem _receiptFromCache(Map<String, dynamic> c, String key, String path) {
+  final tid = c['tid'] as String?;
+  final item = ReceiptItem(
+    path: path,
+    tid: tid,
+    orderNum: tid != null ? terminals[tid]!.orderNum : null,
+    row: c['row'] as int?,
+    unitName: c['unit'] as String?,
+    amount: ((c['amt'] as num?) ?? 0).toDouble(),
+    date: c['date'] as String?,
+    key: key,
+    ok: c['ok'] == true,
+    how: (c['how'] as String?) ?? 'none',
+    batches: ((c['bat'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList(),
+    alt: (c['alt'] as num?)?.toDouble(),
+    reprintSummary: c['rep'] == true,
+    missingBatchClosed: c['nobc'] == true,
+  );
+  item.txn = c['txn'] as int?;
+  item.cands = ((c['cands'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList();
+  return item;
+}
+
+void _publishClosing(List<ReceiptItem> items, [List<SysTotal> sys = const <SysTotal>[]]) {
   final sums = <int, int>{};
   final bad = <int>{};
   for (final it in items) {
@@ -950,6 +1228,23 @@ void _publishClosing(List<ReceiptItem> items) {
   for (final n in bad) {
     sums.remove(n);
   }
+  batchTxnByNum = Map<int, int>.from(sums);
+  // عدد إيصالات صورة السيستم (إيصالات إلكترونية) أدق من مجموع الباتشات: بيغلب لو موجود (أحدث صورة لكل ترمنل)
+  final latest = <String, SysTotal>{};
+  for (final sy in sys) {
+    if (sy.tid == null || sy.txn == null) continue;
+    final p = latest[sy.tid!];
+    if (p == null || sy.printed.compareTo(p.printed) > 0) latest[sy.tid!] = sy;
+  }
+  final sysMap = <int, int>{};
+  for (final e in latest.entries) {
+    final n = terminals[e.key]?.orderNum;
+    if (n != null) {
+      sums[n] = e.value.txn!;
+      sysMap[n] = e.value.txn!;
+    }
+  }
+  sysTxnByNum = sysMap;
   final cur = closingTxn.value;
   var same = cur.length == sums.length;
   if (same) {
@@ -964,6 +1259,7 @@ void _publishClosing(List<ReceiptItem> items) {
   WidgetsBinding.instance.addPostFrameCallback((_) => closingTxn.value = sums);
 }
 
+// تأكيد قبل الإرسال لو فيه حاجات لسه مفتوحة
 Future<bool> confirmSend(BuildContext context, {int review = 0, int missing = 0, int pending = 0}) async {
   if (review == 0 && missing == 0 && pending == 0) return true;
   final ar = AppSettings.of(context).isAr;
@@ -986,6 +1282,7 @@ Future<bool> confirmSend(BuildContext context, {int review = 0, int missing = 0,
   return r == true;
 }
 
+// مسح كل حاجة: ملفات الإخراج + الصور + نتايج الفحص + التصحيحات + اللوج + الكاش والملفات المؤقتة (الإعدادات واللغة والثيم بيفضلوا)
 Future<void> wipeEverything(BuildContext context) async {
   final ar = AppSettings.of(context).isAr;
   final m = ScaffoldMessenger.of(context);
@@ -1072,6 +1369,7 @@ Future<void> wipeEverything(BuildContext context) async {
   wipeTree(tmpDir);
   wipeTree(mTmpDir);
   wipeTree(defaultMDest);
+  // نسخ إيصالات الدفع المتسمية لو الفولدر مخصص
   try {
     final dest = loadMOut();
     if (dest != defaultMDest) {
@@ -1085,7 +1383,7 @@ Future<void> wipeEverything(BuildContext context) async {
       }
     }
   } catch (_) {}
-  for (final p in [fixPath, mStatePath, consoleStatePath, '$baseDir/id_debug.txt']) {
+  for (final p in [fixPath, mStatePath, '$baseDir/id_debug.txt']) {
     final f = File(p);
     if (f.existsSync()) delFile(f);
   }
@@ -1094,6 +1392,7 @@ Future<void> wipeEverything(BuildContext context) async {
     cfg.remove('doneM');
     _writeCfg(cfg);
   } catch (_) {}
+  // الكاش والملفات المؤقتة بتاعة التطبيق
   try {
     for (final e in Directory.systemTemp.listSync(followLinks: false)) {
       if (e is File) {
@@ -1105,17 +1404,19 @@ Future<void> wipeEverything(BuildContext context) async {
   } catch (_) {}
   imageCache.clear();
   imageCache.clearLiveImages();
+  await clearScanCache();
   closingTxn.value = <int, int>{};
-  consoleSummaries.value = <String, ConsoleSummaryItem>{};
+  sysTxnByNum = <int, int>{};
+  batchTxnByNum = <int, int>{};
   wipeSignal.value++;
   final mb = (bytes / 1048576).toStringAsFixed(1);
   m.showSnackBar(SnackBar(
       content: w.Text(ar ? 'تم المسح: $files ملف ($mb ميجا) 🧹' : 'Wiped: $files files ($mb MB) 🧹')));
 }
 
-final ValueNotifier<int> sharedDays = ValueNotifier<int>(0);
-final ValueNotifier<int> homeBadge = ValueNotifier<int>(0);
-final ValueNotifier<int> machBadge = ValueNotifier<int>(0);
+final ValueNotifier<int> sharedDays = ValueNotifier<int>(0); // الفترة (اليوم/يومين/...) واحدة للتابين
+final ValueNotifier<int> homeBadge = ValueNotifier<int>(0); // عدد اللي محتاج مراجعة في التقفيل
+final ValueNotifier<int> machBadge = ValueNotifier<int>(0); // عدد اللي محتاج مراجعة في إيصالات الدفع
 
 void _syncBadge(ValueNotifier<int> n, int v) {
   if (n.value == v) return;
@@ -1167,6 +1468,9 @@ class _LangScope extends InheritedNotifier<AppSettings> {
       : super(key: key, notifier: notifier, child: child);
 }
 
+// ───────────────────── الترجمة (عربي ← إنجليزي) ─────────────────────
+// النصوص مكتوبة بالعربي في الكود، وبتتترجم وقت العرض لما اللغة تكون إنجليزي.
+// أي نص عربي مش موجود في القاموس بيفضل زي ما هو.
 class Text extends StatelessWidget {
   const Text(
     this.data, {
@@ -1210,6 +1514,7 @@ late final List<RegExp> _phraseRes = [
   for (final p in _kEnPhrases) RegExp('(?<![$_arL])${RegExp.escape(p[0])}(?![$_arL])')
 ];
 
+// الوقت المستغرق في الفحص: "3 دقيقة و 25 ثانية" أو "40 ثانية"
 String fmtElapsed(Duration d) {
   final m = d.inMinutes;
   final sec = d.inSeconds % 60;
@@ -1296,6 +1601,7 @@ const List<List<String>> _kEnRules = [
   [r'(\d+) ثانية', '{1} sec']
 ];
 
+// مرتبة من الأطول للأقصر علشان العبارات الطويلة تتبدّل الأول
 const List<List<String>> _kEnPhrases = [
   ['متوازي (تجريبي)', 'parallel (experimental)'],
   ['متوازي', 'parallel'],
@@ -1569,6 +1875,7 @@ const List<List<String>> _kEnPhrases = [
   ['و', 'and']
 ];
 
+// ───────────────────── ألوان تتأقلم مع الدارك مود ─────────────────────
 bool _isDark(BuildContext c) => Theme.of(c).brightness == Brightness.dark;
 
 Color _tintBg(BuildContext c, MaterialColor m, {bool soft = false, bool strong = false}) {
@@ -1579,6 +1886,7 @@ Color _tintBg(BuildContext c, MaterialColor m, {bool soft = false, bool strong =
 Color _tintBorder(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade300 : m.shade800;
 Color _tintFg(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade200 : m.shade900;
 
+// ───────────────────── الهيدر: اسم التطبيق + زراير اللغة والدارك ─────────────────────
 class AppTitle extends StatelessWidget {
   const AppTitle({super.key});
 
@@ -1604,6 +1912,7 @@ class AppTitle extends StatelessWidget {
   }
 }
 
+// على الشاشات العريضة: أيقونة منفصلة. على الصغيرة: بتتنقل لقايمة "المزيد" (بند "المظهر واللغة").
 class HeaderButtons extends StatelessWidget {
   const HeaderButtons({super.key});
 
@@ -1731,17 +2040,17 @@ final Map<String, TerminalInfo> terminals = {
   "50335710": const TerminalInfo(1, 2, "أبيس"),
   "50335993": const TerminalInfo(2, 2, "أبيس"),
   "50335987": const TerminalInfo(3, 2, "أبيس"),
-  "50325716": const TerminalInfo(4, 3, "برج العرب"),
-  "50335998": const TerminalInfo(5, 3, "برج العرب"),
-  "50335994": const TerminalInfo(6, 3, "برج العرب"),
-  "50335711": const TerminalInfo(7, 3, "برج العرب"),
-  "50382298": const TerminalInfo(8, 4, "المنتزه"),
-  "50382315": const TerminalInfo(9, 4, "المنتزه"),
-  "50383712": const TerminalInfo(10, 4, "المنتزه"),
-  "50382306": const TerminalInfo(11, 5, "محرم بك"),
-  "50382316": const TerminalInfo(12, 5, "محرم بك"),
-  "50382308": const TerminalInfo(13, 6, "العجمي"),
-  "50383706": const TerminalInfo(14, 6, "العجمي"),
+  "50325716": const TerminalInfo(4, 3, "برج العرب"), // برج العرب 1
+  "50335998": const TerminalInfo(5, 3, "برج العرب"), // برج العرب 2
+  "50335994": const TerminalInfo(6, 3, "برج العرب"), // برج العرب 3
+  "50335711": const TerminalInfo(7, 3, "برج العرب"), // برج العرب 4
+  "50382298": const TerminalInfo(8, 4, "المنتزه"), // المنتزه 1
+  "50382315": const TerminalInfo(9, 4, "المنتزه"), // المنتزه 2
+  "50383712": const TerminalInfo(10, 4, "المنتزه"), // المنتزه 3
+  "50382306": const TerminalInfo(11, 5, "محرم بك"), // محرم بك 1
+  "50382316": const TerminalInfo(12, 5, "محرم بك"), // محرم بك 2
+  "50382308": const TerminalInfo(13, 6, "العجمي"), // العجمي 1
+  "50383706": const TerminalInfo(14, 6, "العجمي"), // العجمي 2
   "50382300": const TerminalInfo(15, 7, "القباري"),
   "50383702": const TerminalInfo(16, 8, "مصطفى كامل"),
   "50382312": const TerminalInfo(17, 9, "مديرية الأمن"),
@@ -1769,6 +2078,7 @@ final Map<String, String> tidFix = {
   "60382308": "50382308",
 };
 
+// (فاضي) المنتزه 3 = 50383712 ماكينة مستقلة
 final Map<String, String> tidAlias = {};
 
 final Map<String, int> merchantCodeMap = {
@@ -1795,7 +2105,8 @@ final Map<int, String> rowNames = {
   10: "ميناء الإسكندرية", 11: "خدمات مصر",
 };
 
-const int kBaseMachines = 19;
+// ───────── ماكينات جديدة (TID مختلف) لوحدة موجودة: بتتعرف من الـ Merchant ID أو اسم الوحدة وبتتحفظ ─────────
+const int kBaseMachines = 19; // ماكينات الأساس المكتوبة في الكود (فحص الماكينات الناقصة عليها بس)
 final Set<String> _extraTids = {};
 String get _extraTermPath => '$baseDir/extra_terminals.json';
 
@@ -1842,6 +2153,8 @@ void _saveExtraTerminals() {
   }
 }
 
+// ماكينة جديدة مكتوبة على الإيصال ومش في القايمة: بنربطها بالوحدة (من الـ Merchant ID أو اسم الوحدة)
+// ولو الوحدة مش معروفة منعملش حاجة (الإيصال بيروح للمراجعة زي الأول)
 String? discoverTerminal(List<String> texts) {
   final row = findUnitExtraIn(texts);
   if (row == null || !rowNames.containsKey(row)) return null;
@@ -1854,7 +2167,7 @@ String? discoverTerminal(List<String> texts) {
   final best = counts.entries.reduce((a, b) => a.value >= b.value ? a : b);
   final tid = best.key;
   if (terminals.containsKey(tid)) return tid;
-  if (texts.length >= 2 && best.value < 2) return null;
+  if (texts.length >= 2 && best.value < 2) return null; // أكتر من قراءة: لازم الرقم يتكرر مرتين
   final order = machineCount + 1;
   terminals[tid] = TerminalInfo(order, row, rowNames[row]!);
   numToTid[order] = tid;
@@ -1864,6 +2177,7 @@ String? discoverTerminal(List<String> texts) {
   return tid;
 }
 
+// ───────── الملفات الافتراضية: فولدر التطبيق + قالب الإكسيل (من الـ assets لو مش موجود) ─────────
 Future<void> prepareDefaultFiles() async {
   try {
     if (await Permission.manageExternalStorage.isGranted) {
@@ -1895,7 +2209,7 @@ Future<void> ensureDefaultFiles() async {
   }
 }
 
-// ───────────────────── خوارزميات الاستخراج ─────────────────────
+// ───────────────────── خوارزميات الاستخراج (منقولة من نسخة البايثون) ─────────────────────
 final List<RegExp> _markers = [
   RegExp(r'TERMINAL', caseSensitive: false),
   RegExp(r'GRAND|TOTALS?', caseSensitive: false),
@@ -1911,6 +2225,7 @@ final List<RegExp> _markers = [
 
 int receiptScore(String text) => _markers.where((r) => r.hasMatch(text)).length;
 
+// سطر نص مع مكانه في الصورة
 class OcrLine {
   final String text;
   final double left, right, top, bottom;
@@ -1932,6 +2247,7 @@ List<OcrLine> toLines(RecognizedText res) {
   return out;
 }
 
+// يرتب النص صفوف (الاسم يمين والرقم جنبه في نفس السطر) زي Tesseract بالظبط
 String rowsText(List<OcrLine> lines) {
   final ls = [...lines]..sort((a, b) => a.cy.compareTo(b.cy));
   final rows = <List<OcrLine>>[];
@@ -1957,6 +2273,7 @@ String rowsText(List<OcrLine> lines) {
 
 String readingText(List<OcrLine> lines) => lines.map((e) => e.text).join('\n');
 
+// صورة فيها أكتر من إيصال جنب بعض -> نقسمها لأعمدة
 List<List<OcrLine>> splitColumns(List<OcrLine> lines) {
   if (lines.length < 8) return [lines];
   final minL = lines.map((e) => e.left).reduce(math.min);
@@ -1990,6 +2307,7 @@ List<List<OcrLine>> splitColumns(List<OcrLine> lines) {
   return [lines];
 }
 
+// ───────────── المبالغ ─────────────
 final RegExp _amountRe =
     RegExp(r"(?<![\d,.])(\d{1,3}(?:,\d{3})*|\d+)[., ](\d{2})(?!\d)");
 final RegExp _brandRe = RegExp(
@@ -2059,6 +2377,8 @@ Parsed parseReceipt(String txt) {
   return Parsed(grand, bsum, bvals);
 }
 
+// المبالغ المقترحة للإيصال. الأولوية للجزء التحتاني (قسم GRAND TOTALS) لأن الإجمالي الصح فيه، ومن غير باقي الأرقام.
+// لو القسم ده ما اتقراش خالص (علامات/تلف): نرجع لمجموع الكروت وإجماليات الكروت بس.
 List<double> candidateAmounts(List<String> texts) {
   final grandScore = <double, int>{};
   final otherScore = <double, double>{};
@@ -2081,6 +2401,7 @@ List<double> candidateAmounts(List<String> texts) {
   return ks.take(4).toList();
 }
 
+// دمج مقترحات القراءتين: اللي ظهر في الاتنين الأول
 List<double> mergeCands(List<double> a, List<double> b) {
   bool has(List<double> l, double v) => l.any((x) => (x - v).abs() < 0.005);
   final out = <double>[];
@@ -2100,12 +2421,14 @@ class Decision {
 }
 
 Decision decide(List<Parsed> results) {
+  // 1) تطابق تام بين مجموع الكروت و GRAND TOTALS
   for (final r in results) {
     final b = r.bsum;
     if (b != null && b > 0 && r.grand.any((g) => (g - b).abs() < 0.005)) {
       return Decision(b, true);
     }
   }
+  // 2) فرق رقم واحد
   for (final r in results) {
     final b = r.bsum;
     if (b != null && b > 0 && r.bvals.length >= 2) {
@@ -2121,10 +2444,12 @@ Decision decide(List<Parsed> results) {
       }
     }
   }
+  // 3) إجمالي مكرر
   for (final r in results) {
     final c = mostCommon(r.grand);
     if (c != null && c.value >= 2 && r.bsum == null) return Decision(c.key, false);
   }
+  // 4) تصويت
   final pool = <double>[];
   for (final r in results) {
     pool.addAll(r.grand);
@@ -2143,11 +2468,9 @@ class PieceResult {
   PieceResult(this.texts, this.val, this.ok);
 }
 
+// إيصال دفع (RRN / رقم كارت مخفي / Approved ...) ولا باتش كلوز / ملخص / ري برنت؟
 String classifyReceipt(String text) {
   final up = text.toUpperCase();
-  if (up.contains('A2R') && (up.contains('CONSOLE') || text.contains('ملخص الفحص') || text.contains('مبالغ السيستم'))) {
-    return 'console_summary';
-  }
   final payRes = <RegExp>[
     RegExp(r'R{1,2}N\W{0,3}\d{9,}'),
     RegExp(r'\d{4,6}\W{0,2}\*{3,}\W{0,2}\d{4}'),
@@ -2173,6 +2496,7 @@ String classifyReceipt(String text) {
   return 'other';
 }
 
+// لو GRAND TOTAL = مجموع إجماليات الكروت (حتى لو أسماء الكروت اتقرت غلط): نرجّعه مؤكد.
 double? sumClosure(List<String> texts) {
   final cnt = <double, int>{};
   for (final t in texts) {
@@ -2226,6 +2550,7 @@ String? batchNo(List<String> texts) {
   return mostCommon(all)?.key;
 }
 
+// ───────────── الماكينة / الوحدة / التاريخ ─────────────
 String? _tidLabeledRaw(String t) {
   final m = RegExp(r"TERMINAL\s*(?:ID)?\D{0,15}?(\d[\d\s/]{6,9}\d)",
           caseSensitive: false)
@@ -2333,6 +2658,7 @@ String? findDateIn(List<String> texts) {
   return null;
 }
 
+// عدد معاملات الباتش من إيصال الإقفال: "GRAND TOTALS / Sale (010)" (ولو اتقرا مجموع الكروت بيتطابق معاه)
 int? _txnNum(String s) {
   final t = s.trim().replaceAll(RegExp(r'[Oo]'), '0').replaceAll(RegExp(r'[Il|]'), '1');
   return int.tryParse(t);
@@ -2365,7 +2691,7 @@ int? batchTxnOf(List<String> texts) {
   final g = mostCommon(grands)?.key;
   final s = mostCommon(sums)?.key;
   if (g != null && s != null && g != s) {
-    if (g > 0 && g < 1000) return g;
+    if (g > 0 && g < 1000) return g; // نثق في الإجمالي العام أكثر من مجموع الكروت
   }
   return g ?? s;
 }
@@ -2380,12 +2706,13 @@ class Analysis {
   List<double> batches;
   String? date;
   String debug = '';
-  int? txn;
-  List<double> cands = <double>[];
+  int? txn; // عدد معاملات الباتش (من إيصال الإقفال)
+  List<double> cands = <double>[]; // مبالغ مقترحة من نفس الإيصال (الأرجح الأول)
   Analysis(this.tid, this.how, this.row, this.unitName, this.val, this.ok,
       this.batches, this.date);
 }
 
+// تحليل صورة كاملة (ممكن فيها أكتر من إيصال)
 Analysis analyzeLines(List<OcrLine> all) {
   final pieces = splitColumns(all);
   final multi = pieces.length > 1;
@@ -2408,7 +2735,7 @@ Analysis analyzeLines(List<OcrLine> all) {
     }
     final b = batchNo(r.texts);
     final key = '$b|${r.val}';
-    if (b != null && seen.contains(key)) continue;
+    if (b != null && seen.contains(key)) continue; // نفس الباتش اتصور مرتين
     seen.add(key);
     batches.add(r.val);
     txns.add(batchTxnOf(r.texts));
@@ -2417,6 +2744,7 @@ Analysis analyzeLines(List<OcrLine> all) {
   var total = round2(batches.fold(0.0, (a, b) => a + b));
   var ok = allOk && batches.isNotEmpty;
 
+  // شبكة أمان: لو التقسيم مش مؤكد جرّب الصورة كلها
   if (multi && !ok) {
     final r = ocrPiece(all);
     allTexts.addAll(r.texts);
@@ -2442,7 +2770,7 @@ Analysis analyzeLines(List<OcrLine> all) {
     tid = findTerminalFuzzyIn(allTexts, u0);
     how = 'fuzzy';
     if (tid == null) {
-      tid = discoverTerminal(allTexts);
+      tid = discoverTerminal(allTexts); // ماكينة جديدة لوحدة معروفة
       if (tid != null) how = 'new-terminal';
     }
   }
@@ -2469,6 +2797,8 @@ Analysis analyzeLines(List<OcrLine> all) {
 
 double round2(double val) => double.parse(val.toStringAsFixed(2));
 
+// دمج القراءة التانية (الصورة المحسّنة) في القراءة الأولى.
+// بترجع قيمة المبلغ التانية لو متعارضة مع الأولى (علشان تتراجع)، وإلا null.
 double? mergeSecondRead(Analysis a, Analysis b) {
   a.cands = mergeCands(a.cands, b.cands);
   if (a.tid == null && b.tid != null) {
@@ -2491,19 +2821,21 @@ double? mergeSecondRead(Analysis a, Analysis b) {
     a.txn = b.txn ?? a.txn;
     return null;
   }
-  if ((a.val - b.val).abs() < 0.005) return null;
+  if ((a.val - b.val).abs() < 0.005) return null; // القراءتين متطابقتين
   if (!a.ok && b.ok) {
+    // الأولى مش مؤكدة والتانية مؤكدة بمجموع الكروت -> نعتمد التانية
     a.val = b.val;
     a.ok = true;
     a.batches = [...b.batches];
     a.txn = b.txn ?? a.txn;
     return null;
   }
-  if (a.ok && !b.ok) return null;
-  a.ok = false;
+  if (a.ok && !b.ok) return null; // الأولى مؤكدة، نتجاهل التانية
+  a.ok = false; // قراءتين مختلفتين: لازم مراجعة
   return b.val;
 }
 
+// بيحوّل صفحات ملف PDF لصور PNG (بيستخدم في حالة مفيش صور)
 Future<List<File>> extractPdfPages(File pdf) async {
   final out = <File>[];
   try {
@@ -2521,20 +2853,21 @@ Future<List<File>> extractPdfPages(File pdf) async {
   return out;
 }
 
+// ───────────────────── مسارات المجلدات ─────────────────────
 const String root = '/storage/emulated/0';
 final String baseDir = '$root/all';
 final String rawImagesDir = '$baseDir/raw_images';
-String outputDir = '$baseDir/output';
+String outputDir = '$baseDir/output'; // ممكن المستخدم يغيّره من الشاشة
 final String defaultOutputDir = '$baseDir/output';
 final String tmpDir = '$baseDir/.tmp';
+// مجلد مؤقت خاص بإيصالات الدفع: تاب التقفيل بيمسح tmpDir في آخر فحصه وكان بيمسح ملفات العد وهي شغالة
 final String mTmpDir = '$baseDir/.tmp_m';
-final String cfgPath = '$baseDir/.app_cfg.json';
-
 void _ensureMTmp() {
   try {
     Directory(mTmpDir).createSync(recursive: true);
   } catch (_) {}
 }
+final String cfgPath = '$baseDir/.app_cfg.json';
 
 String baseName(String path) => path.split('/').last;
 
@@ -2630,6 +2963,8 @@ void saveOutDir(String? f) {
   _writeCfg(m);
 }
 
+// ───────────────── معالجة الصور (تدوير / تحسين) - بتشتغل في Isolate ─────────────────
+// بتصلّح اتجاه الـ EXIF وبتدوّر الصورة لو deg != 0. بترجع true لو كتبت ملف جديد.
 bool _fixImage(String src, String dst, int deg) {
   final bytes = File(src).readAsBytesSync();
   var im = img.decodeImage(bytes);
@@ -2651,6 +2986,7 @@ bool _fixImage(String src, String dst, int deg) {
   return true;
 }
 
+// نسخة محسّنة للقراءة التانية: رمادي + كونتراست + تكبير/تصغير لمقاس مناسب للـ OCR
 void _enhanceImage(String src, String dst) {
   var im = img.decodeImage(File(src).readAsBytesSync());
   if (im == null) throw Exception('decode failed');
@@ -2672,7 +3008,9 @@ Future<bool> fixImageAsync(String src, String dst, int deg) =>
 Future<void> enhanceImageAsync(String src, String dst) =>
     Isolate.run(() => _enhanceImage(src, dst));
 
-// ───────────────── سكانر الباتش ─────────────────
+// ───────────────── سكانر الباتش: قص الإيصال من الصورة + تعديل المنظور + تحسين (زي كام سكانر) ─────────────────
+// الفكرة: الورقة البيضا (الباتش) أفتح من الخلفية (ترابيزة/إيد/أرضية). بنفصل الورقة بحدّ Otsu،
+// بنطلّع أكبر مكوّن، بنفرد منظوره (4 أركان)، وبعدين بنشيل الظلال ونبيّض الورقة ونغمّق الكتابة.
 int _otsu(List<int> hist, int total) {
   var sumAll = 0;
   for (var i = 0; i < 256; i++) {
@@ -2706,6 +3044,7 @@ List<double> _trimRange(List<double> v, double f) {
 int _ci(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
 double _cd(double v, double lo, double hi) => v < lo ? lo : (v > hi ? hi : v);
 
+// خط مستقيم q = m*p + k بأقل مربعات مع استبعاد النقط الشاردة. null لو النقط قليلة.
 List<double>? _fitLine(List<double?> qs, List<double> ps, int skip) {
   var pp = <double>[];
   var qq = <double>[];
@@ -2752,6 +3091,7 @@ List<double>? _fitLine(List<double?> qs, List<double> ps, int skip) {
   return [m, k];
 }
 
+// أركان الورقة [tlx,tly,trx,try,blx,bly,brx,bry] بإحداثيات الصورة الصغيرة
 List<double>? _quadOfComponent(List<int> pts, Int32List lab, int cid, int sw, int sh) {
   final bx = <double>[];
   final by = <double>[];
@@ -2773,6 +3113,7 @@ List<double>? _quadOfComponent(List<int> pts, Int32List lab, int cid, int sw, in
   }
   if (bx.length < 20) return null;
 
+  // أصغر مستطيل مايل يحيط بالورقة
   var bestArea = double.infinity;
   var bestDeg = 0;
   for (var deg = 0; deg < 90; deg += 2) {
@@ -2815,8 +3156,8 @@ List<double>? _quadOfComponent(List<int> pts, Int32List lab, int cid, int sw, in
   final xr = _trimRange(ax, 0.006);
   final yr = _trimRange(ay, 0.006);
   final vertical = (yr[1] - yr[0]) >= (xr[1] - xr[0]);
-  final lp = vertical ? ay : ax;
-  final lq = vertical ? ax : ay;
+  final lp = vertical ? ay : ax; // على طول الورقة
+  final lq = vertical ? ax : ay; // عرض الورقة
   final l0 = vertical ? yr[0] : xr[0];
   final l1 = vertical ? yr[1] : xr[1];
   if (l1 - l0 < 4) return null;
@@ -2862,6 +3203,7 @@ List<double>? _quadOfComponent(List<int> pts, Int32List lab, int cid, int sw, in
 }
 
 double _quadArea(List<double> q) {
+  // tl, tr, br, bl
   final xs = [q[0], q[2], q[6], q[4]];
   final ys = [q[1], q[3], q[7], q[5]];
   var s = 0.0;
@@ -2875,7 +3217,10 @@ double _quadArea(List<double> q) {
 double _dist(double x1, double y1, double x2, double y2) =>
     math.sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
 
-List<List<double>> _detectReceipts(img.Image im) {
+// بيرجّع أركان كل باتش في الصورة (بإحداثيات الصورة الأصلية). فاضي = مش عارف يلاقي ورقة.
+// mode 0: الكشف الأصلي (سطوع Otsu). mode 1: احتياطي بالتشبّع (الورقة رمادي/أبيض والترابيزة/الإيد ملوّنة).
+// mode 2: احتياطي لو الخلفية فاتحة: Otsu تاني على البكسلات الفاتحة بس (الورقة أفتح من الترابيزة الفاتحة).
+List<List<double>> _detectReceipts(img.Image im, {int mode = 0}) {
   final w = im.width, h = im.height;
   final s = 480.0 / math.max(w, h);
   final sw = math.max(16, (w * s).round());
@@ -2892,7 +3237,41 @@ List<List<double>> _detectReceipts(img.Image im) {
       hist[l]++;
     }
   }
-  final th = _otsu(hist, total);
+  var th = _otsu(hist, total);
+  if (mode == 2) {
+    final h2 = List<int>.filled(256, 0);
+    var t2 = 0;
+    for (var i = 0; i < total; i++) {
+      if (lum[i] > th) {
+        h2[lum[i]]++;
+        t2++;
+      }
+    }
+    if (t2 < total * 0.05) return [];
+    final th2 = _otsu(h2, t2);
+    if (th2 - th < 12) return [];
+    th = th2;
+  } else if (mode == 1) {
+    final sat = Uint8List(total);
+    final sh2 = List<int>.filled(256, 0);
+    for (var y = 0; y < sh; y++) {
+      for (var x = 0; x < sw; x++) {
+        final p = small.getPixel(x, y);
+        final r = p.r.toInt(), g = p.g.toInt(), b = p.b.toInt();
+        final mx = math.max(r, math.max(g, b)), mn = math.min(r, math.min(g, b));
+        final sv = mx == 0 ? 0 : _ci(((mx - mn) * 255 / mx).round(), 0, 255);
+        sat[y * sw + x] = sv;
+        sh2[sv]++;
+      }
+    }
+    final ts = _otsu(sh2, total);
+    if (ts < 8) return []; // الصورة كلها رمادي تقريباً: التشبّع مش هيفرّق
+    final darkCut = (th * 0.6).round();
+    for (var i = 0; i < total; i++) {
+      lum[i] = (sat[i] <= ts && lum[i] > darkCut) ? 255 : 0;
+    }
+    th = 127;
+  }
   final lab = Int32List(total);
   final comps = <List<int>>[];
   final stack = <int>[];
@@ -2932,6 +3311,8 @@ List<List<double>> _detectReceipts(img.Image im) {
   final mainSize = comps[order.first].length;
   if (mainSize < total * 0.04) return [];
   if (mainSize > total * 0.9) {
+    if (mode != 0) return [];
+    // الصورة كلها ورقة (سكرين/اسكانر جاهز): بس نحسّنها
     return [
       [0.0, 0.0, w.toDouble(), 0.0, 0.0, h.toDouble(), w.toDouble(), h.toDouble()]
     ];
@@ -2947,6 +3328,7 @@ List<List<double>> _detectReceipts(img.Image im) {
     if (area <= 0 || pts.length / area < 0.45) continue;
     out.add(<double>[for (final v in q) v / s]);
   }
+  // لو في أكتر من باتش في الصورة: رتّبهم شمال ليمين (أو فوق لتحت لو فوق بعض)
   out.sort((a, b) {
     final acx = (a[0] + a[2] + a[4] + a[6]) / 4, bcx = (b[0] + b[2] + b[4] + b[6]) / 4;
     final acy = (a[1] + a[3] + a[5] + a[7]) / 4, bcy = (b[1] + b[3] + b[5] + b[7]) / 4;
@@ -2957,6 +3339,7 @@ List<List<double>> _detectReceipts(img.Image im) {
   return out;
 }
 
+// بيفرد الورقة (تعديل منظور) ويحسّنها: يشيل الظلال، يبيّض الخلفية، يغمّق الكتابة
 img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   final wq = (_dist(q[0], q[1], q[2], q[3]) + _dist(q[4], q[5], q[6], q[7])) / 2;
   final hq = (_dist(q[0], q[1], q[4], q[5]) + _dist(q[2], q[3], q[6], q[7])) / 2;
@@ -2965,6 +3348,7 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   final wo = math.max(8, (wq * k).round());
   final ho = math.max(8, (hq * k).round());
 
+  // قص المنطقة المحيطة بالورقة بس (أسرع كتير) وتصغيرها لو كبيرة
   final xs = [q[0], q[2], q[4], q[6]];
   final ys = [q[1], q[3], q[5], q[7]];
   final cx0 = _ci(xs.reduce(math.min).floor() - 6, 0, im.width - 2);
@@ -2993,6 +3377,7 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   final blx = (q[4] - cx0) * sx, bly = (q[5] - cy0) * sy;
   final brx = (q[6] - cx0) * sx, bry = (q[7] - cy0) * sy;
 
+  // فرد المنظور (استيفاء ثنائي بين الأركان الأربعة)
   const inset = 0.008;
   final og = Uint8List(wo * ho);
   for (var j = 0; j < ho; j++) {
@@ -3012,6 +3397,7 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
     }
   }
 
+  // تحسين: نقدّر لون الورقة (أعلى قيمة في كل مربع) ونقسم عليه = شيل الظلال وتبييض الخلفية
   const bs = 12;
   final hb = (ho + bs - 1) ~/ bs, wb = (wo + bs - 1) ~/ bs;
   var bg = List<double>.filled(hb * wb, 0.0);
@@ -3058,6 +3444,7 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
       final bot = bg[by1 * wb + bx0] * (1 - fx) + bg[by1 * wb + bx1] * fx;
       final bgv = top * (1 - fy) + bot * fy;
       final n = _cd(og[y * wo + x] / math.max(bgv, 40.0) * 255.0, 0.0, 255.0);
+      // منحنى أغمق للكتابة (gamma) علشان الأرقام تفضل تقيلة وواضحة
       final o = math.pow(_cd((n - 30.0) / (240.0 - 30.0), 0.0, 1.0), 1.6).toDouble();
       final c = (o * 255).round();
       res.setPixelRgb(x, y, c, c, c);
@@ -3066,6 +3453,7 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   return res;
 }
 
+// بتشتغل في Isolate. بترجّع مسارات الصفحات (صفحة لكل باتش). فاضي = استخدم الصورة الأصلية.
 List<String> _scanToPages(String src, String base) {
   final cached = <String>[];
   var ci = 0;
@@ -3074,13 +3462,15 @@ List<String> _scanToPages(String src, String base) {
     ci++;
   }
   if (cached.isNotEmpty) return cached;
-  if (File('${base}_none').existsSync()) return <String>[];
+  if (File('${base}_none2').existsSync()) return <String>[];
   final out = <String>[];
   try {
     var im = img.decodeImage(File(src).readAsBytesSync());
     if (im != null) {
       im = img.bakeOrientation(im);
-      final quads = _detectReceipts(im);
+      var quads = _detectReceipts(im);
+      if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
+      if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
       for (final q in quads) {
         final o = _warpAndEnhance(im, q);
         if (o == null) continue;
@@ -3092,7 +3482,7 @@ List<String> _scanToPages(String src, String base) {
   } catch (_) {}
   if (out.isEmpty) {
     try {
-      File('${base}_none').writeAsStringSync('1');
+      File('${base}_none2').writeAsStringSync('1');
     } catch (_) {}
   }
   return out;
@@ -3110,7 +3500,8 @@ Future<List<String>> scanReceiptAsync(String src) async {
   }
 }
 
-// ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (دون مساس بالتنسيق) ─────────────────
+
+// ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
 Future<List<int>?> loadTemplateBytes() async {
   try {
     final exact = File('$baseDir/الاسكندريه 00.xlsx');
@@ -3191,6 +3582,7 @@ double _readNum(String xml, String col, int row) {
   return 0.0;
 }
 
+// بيكتب خلية واحدة محافظ على الـ style بتاعها. build(style, oldFormulaElement) -> xml الخلية
 String _setCell(String xml, String col, int row,
     String Function(String ref, String? style, String? formula) build) {
   final rm = _findRow(xml, row);
@@ -3245,6 +3637,7 @@ List<int> fillTemplate(List<int> bytes, Map<int, double> totals, Map<int, int> c
       var xml = utf8.decode(c, allowMalformed: true);
       for (var r = 2; r <= 11; r++) {
         final tot = round2(totals[r] ?? 0.0);
+        // عمود C (POS Count): عدد الأجهزة اللي اشتغلت فعلاً في الوحدة (مش عدد الباتشات)
         final cnt = counts[r] ?? 0;
         xml = _setCell(xml, 'C', r, (ref, st, f0) =>
             '<c r="$ref"${st != null ? ' s="$st"' : ''}><v>$cnt</v></c>');
@@ -3268,6 +3661,7 @@ List<int> fillTemplate(List<int> bytes, Map<int, double> totals, Map<int, int> c
   return enc;
 }
 
+// ───────────────── قنوات النظام (واتساب مباشر / فتح فولدر) ─────────────────
 const MethodChannel _chan = MethodChannel('pos/native');
 
 String todayToken() {
@@ -3281,6 +3675,7 @@ String _normAr(String s) => s
     .replaceAll('ى', 'ي')
     .toLowerCase();
 
+// ملف PDF اسمه "الاسكندريه + تاريخ النهارده" (بيقبل 5.11 / 05.11 / 5-11 / 5_11)
 bool isTodayAlexPdf(String path) {
   final name = _normAr(baseName(path));
   if (!name.endsWith('.pdf')) return false;
@@ -3294,7 +3689,7 @@ List<File> findTodayAlexPdfs(List<String> dirs) {
   final out = <File>[];
   final seen = <String>{};
   for (final d in dirs) {
-    if (d == outputDir) continue;
+    if (d == outputDir) continue; // ما نقراش الملفات اللي التطبيق نفسه طلّعها
     try {
       final dir = Directory(d);
       if (!dir.existsSync()) continue;
@@ -3307,6 +3702,7 @@ List<File> findTodayAlexPdfs(List<String> dirs) {
   return out;
 }
 
+// ───────────────────── نموذج الإيصال ─────────────────────
 class ReceiptItem {
   String path;
   String? tid;
@@ -3315,29 +3711,29 @@ class ReceiptItem {
   String? unitName;
   double amount;
   String? date;
-  String key;
-  bool ok;
-  String how;
+  String key; // اسم الملف الأصلي + حجمه (لحفظ التصحيحات اليدوية)
+  bool ok; // المبلغ مؤكد؟
+  String how; // terminal | fuzzy | name/merchant | auto-number | conflict | extra-batch | manual
   List<double> batches;
   int? suffix;
   String? origTid;
   bool conflict;
   bool skip;
-  double? alt;
-  bool dupSuspect;
-  bool userExcluded;
-  String? dupDecision;
-  int? dupOf;
-  String? unusual;
-  bool ignoredDoc;
-  String? ign;
-  bool dateOdd;
-  String? dateMain;
-  String? dateFix;
-  int? txn;
+  double? alt; // قراءة تانية مختلفة للمبلغ (للمراجعة)
+  bool dupSuspect; // مشكوك إنه مكرر: بيدخل المراجعة ومش بيتحسب لحد ما تقرر
+  bool userExcluded; // انت استبعدته في المراجعة
+  String? dupDecision; // 'keep' | 'drop' (قرارك بيتحفظ للمرة الجاية)
+  int? dupOf; // رقم الماكينة اللي شبهه
+  String? unusual; // إجمالي بعيد عن المعتاد (للمراجعة)
+  bool ignoredDoc; // صورة اتجاهلها التطبيق (شكلها إيصال دفع/مستند): بتدخل المراجعة
+  String? ign; // 'keep' | 'drop' قرارك في الصورة المتجاهلة
+  bool dateOdd; // تاريخه مختلف عن أغلب الإيصالات
+  String? dateMain; // التاريخ الأغلب
+  String? dateFix; // التاريخ اللي انت أكدته
+  int? txn; // عدد معاملات الباتش المقروء من إيصال الإقفال
   bool reprintSummary;
   bool missingBatchClosed;
-  List<double> cands = <double>[];
+  List<double> cands = <double>[]; // مبالغ مقترحة من الإيصال (للاختيار في المراجعة)
 
   ReceiptItem({
     required this.path,
@@ -3367,8 +3763,10 @@ class ReceiptItem {
     this.missingBatchClosed = false,
   }) : batches = batches ?? <double>[];
 
+  // داخل في الإجماليات والـ PDF؟
   bool get counts => !skip && !dupSuspect && !userExcluded && !ignoredDoc;
 
+  // الماكينة/الوحدة متحددة بطريقة مش مؤكدة (تلقائي / بالاسم فقط)
   bool get weakId =>
       !(how == 'terminal' || how == 'fuzzy' || how == 'manual' || how == 'extra-batch');
 
@@ -3387,6 +3785,7 @@ class ReceiptItem {
               weakId));
 }
 
+// ───────────────────── التصحيحات اليدوية (بتفضل محفوظة) ─────────────────────
 final String fixPath = '$baseDir/.app_fix.json';
 
 Map<String, dynamic> loadFixes() {
@@ -3416,6 +3815,7 @@ void saveFix(ReceiptItem item) {
   } catch (_) {}
 }
 
+// صورة كان التطبيق متجاهلها: ادخلها كباتش (هتكمّل المبلغ والماكينة بإيدك)
 void keepIgnored(ReceiptItem it) {
   try {
     if (!it.path.startsWith('$rawImagesDir/')) {
@@ -3431,6 +3831,7 @@ void keepIgnored(ReceiptItem it) {
   saveFix(it);
 }
 
+// احتساب إيصال (مشكوك أو مستبعد) كباتش إضافي للماكينة
 void keepAsExtraBatch(ReceiptItem it, List<ReceiptItem> all) {
   var k = 2;
   bool used(int n) => all.any((x) =>
@@ -3455,6 +3856,7 @@ void keepAsExtraBatch(ReceiptItem it, List<ReceiptItem> all) {
   saveFix(it);
 }
 
+// إجمالي ماكينة بعيد جداً عن متوسط الأيام اللي فاتت = غالباً قراءة غلط -> مراجعة
 void checkUnusual(List<ReceiptItem> items, String reportDate) {
   for (final r in items) {
     r.unusual = null;
@@ -3503,6 +3905,8 @@ void checkUnusual(List<ReceiptItem> items, String reportDate) {
   } catch (_) {}
 }
 
+
+// ───────── العد السريع: صور الصفحات الأصلية (JPEG) من الـ PDF الممسوح + عدّ بالهيكل ─────────
 bool _loadFast() {
   try {
     return _readCfg()['fastCount'] != false;
@@ -3511,8 +3915,10 @@ bool _loadFast() {
   }
 }
 
+// ⚡ عدّ متوازي (تجريبي): عدد الصفحات اللي بتتقرا مع بعض (recognizer لكل صفحة)
 const int _kParWorkers = 2;
-bool fastCount = true;
+
+bool fastCount = true; // السريعة ثابتة (الدقيقة بتشتغل لوحدها كاحتياطي لو السريعة فشلت)
 
 bool _loadDual() {
   try {
@@ -3522,6 +3928,7 @@ bool _loadDual() {
   }
 }
 
+// العد المزدوج: بيحسب بطريقتين من نفس القراءة، ولو اختلفوا بيعلّم الملف للمراجعة (أو بيختار اللي يطابق الباتش)
 bool dualCount = _loadDual();
 
 void toggleDualCount() {
@@ -3542,6 +3949,7 @@ void toggleFastCount() {
   } catch (_) {}
 }
 
+// بيطلّع صور الصفحات (JPEG) جاهزة من PDF ممسوح (CamScanner وغيره): من غير raster ولا PNG
 List<List<int>> _pdfJpegRanges(Uint8List b) {
   final out = <List<int>>[];
   int find(String pat, int from) {
@@ -3592,13 +4000,16 @@ class _SA {
 
 class _StructPage {
   int sm = 0, mx = 0;
-  int sm2 = 0;
-  int sm3 = 0;
+  int sm2 = 0; // الطريقة التانية: علامات إيصال الدفع بس (من غير الشعار/Terminal)
+  int sm3 = 0; // الطريقة 3 (الأساسية): عدّ بالتسلسل الرأسي للعلامات جوه كل عمود
   double h = 3000;
   final Map<String, int> types = {};
-  final List<String> dbgAmt = [];
+  final List<String> dbgAmt = []; // تشخيص: سطور AMOUNT اللي اتعدّت (نص@مكانها%)
 }
 
+// الطريقة 3: عدّ بالتسلسل الرأسي. كل إيصال علاماته بالترتيب من فوق لتحت: شعار ← Terminal ← RRN ← AMOUNT ← Approved.
+// بنمشي على علامات العمود من فوق، وكل ما الترتيب يرجع للأول (رتبة أقل أو زي اللي قبلها) يبقى ده إيصال جديد.
+// علامة ناقصة (قلم/تغطية/OCR) مش بتغيّر العدد، وعلامة زيادة قريبة جداً من نفس النوع (أقل من 0.7 من المسافة بين إيصالين) بتتدمج.
 int _seqCountCol(List<_SA> col, double h) {
   const rank = <String, int>{'logo': 0, 'term': 1, 'rrn': 2, 'amount': 3, 'appr': 4};
   final c = [...col]..sort((a, b) => a.cy.compareTo(b.cy));
@@ -3635,22 +4046,29 @@ int _seqCountCol(List<_SA> col, double h) {
   return n;
 }
 
+// ورقة تعريف صغيرة (اسم + وحدة + TID + تاريخ) بتكون جوه الملف: مش إيصال دفع فمتتعدّش
 bool _isIdSlip(RecognizedText res) {
   final lines = toLines(res);
   if (lines.isEmpty || lines.length > 16) return false;
   final all = lines.map((l) => l.text.toUpperCase()).join('\n');
+  // أي علامة من علامات إيصال الدفع = مش ورقة تعريف
   if (RegExp(r'TERMINAL|RRN|AMOUNT|APPROVED|NATIONAL|BANK\s*OF\s*EGYPT|BATCH|TOTAL|SALE|GRAND|CARD|REPRINT')
       .hasMatch(all)) {
     return false;
   }
+  // رقم RRN (12 رقم) معناه إيصال حقيقي
   if (RegExp(r'(?<!\d)\d{12}(?!\d)').hasMatch(all.replaceAll(RegExp(r'[ \t]'), ''))) return false;
+  // TID بقراءة متساهلة (TID:50335987 أو T1D أو TlD ...)
   final hasTid = RegExp(r'\bT\s?[I1L|]\s?D\b\W{0,4}[\dOo]{7,9}').hasMatch(all) ||
       RegExp(r'\bT\s?[I1L|]\s?D\b').hasMatch(all);
   if (hasTid) return true;
+  // لو كلمة TID اتقرت غلط: رقم ماكينة معروف + تاريخ، من غير أي علامات إيصال
   final hasDate = RegExp(r'\d{2}\s?[/.\-]\s?\d{2}\s?[/.\-]\s?20\d{2}').hasMatch(all);
   return hasDate && lines.length <= 8 && findTerminalIn([all]) != null;
 }
 
+// عدّ الإيصالات بالهيكل: كل إيصال له شعار + Terminal ID + RRN + AMOUNT + Approved (مرة واحدة)
+// بنجمع العلامات دي ونقسمها أعمدة، وفي كل عمود أكتر علامة متكررة = عدد الإيصالات
 _StructPage _structCount(RecognizedText res) {
   final out = _StructPage();
   final lines = toLines(res);
@@ -3678,6 +4096,7 @@ _StructPage _structCount(RecognizedText res) {
     }
     if (u.contains('APPROVED')) add('appr');
   }
+  // إزالة التكرار (نفس العلامة اتقرت مرتين)
   final ded = <_SA>[];
   for (final a in all) {
     var dup = false;
@@ -3694,6 +4113,7 @@ _StructPage _structCount(RecognizedText res) {
   }
   if (ded.isEmpty) return out;
   out.mx = out.types.values.reduce((a, b) => a > b ? a : b);
+  // أعمدة
   ded.sort((a, b) => a.cx.compareTo(b.cx));
   final cols = <List<_SA>>[];
   var cur = <_SA>[ded.first];
@@ -3705,6 +4125,11 @@ _StructPage _structCount(RecognizedText res) {
     cur.add(ded[i]);
   }
   cols.add(cur);
+  // لكل عمود: كل علامة بتظهر مرة واحدة في كل إيصال، فأكبر عدد لأي علامة = عدد الإيصالات في العمود
+  // (لو علامة اتقرت ناقصة التانية بتعوّض، ومش بيتأثر بميل الإيصال ولا بترتيب القراءة)
+  // الطريقة 1 (القديمة): أكبر عدد لأي علامة (شعار/Terminal/RRN/AMOUNT/APPROVED).
+  // الطريقة 2: علامات إيصال الدفع بس (rrn/amount/appr)، لأن الشعار و Terminal موجودين كمان في إيصال الإقفال فبيزوّدوا إيصال.
+  // الاتنين من نفس قراءة الـ OCR (من غير أي وقت زيادة).
   var n = 0, n2 = 0, n3 = 0;
   for (final c in cols) {
     final cnt = <String, int>{};
@@ -3729,6 +4154,7 @@ _StructPage _structCount(RecognizedText res) {
 bool sameDay(ReceiptItem a, ReceiptItem b) =>
     a.date == null || b.date == null || a.date == b.date;
 
+// بيجيب كل التطبيقات اللي تقدر تفتح فولدر (مدير ملفات) بأيقوناتها ويخلّيك تختار (وتحفظ الافتراضي لو عايز)
 Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
   var handlers = <Map<String, String>>[];
   try {
@@ -3744,7 +4170,7 @@ Future<bool> chooseAndOpenFolder(BuildContext context, String path) async {
     prefKey: 'defFolder',
     systemOption: <String, String>{'pkg': '', 'cls': '', 'kind': 'tree', 'label': 'متصفح ملفات النظام'},
   );
-  if (picked == null) return true;
+  if (picked == null) return true; // المستخدم قفل القايمة
   try {
     final ok = await _chan.invokeMethod<bool>('openFolderWith', {
       'path': path,
@@ -3778,6 +4204,7 @@ void _saveDefaultHandler(String key, Map<String, String>? h) {
   } catch (_) {}
 }
 
+// بيمسح الاختيارات المحفوظة (المعرض / ملفات PDF) علشان تختار من جديد
 void resetDefaultHandlers(BuildContext context) {
   for (final k in ['defFolder', 'defImage', 'defPdf']) {
     _saveDefaultHandler(k, null);
@@ -3797,6 +4224,7 @@ List<Map<String, String>> _toHandlers(dynamic r) {
   return out;
 }
 
+// لو نفس التطبيق ظهر بأكتر من طريقة فتح، بنسيب الأولى بس
 void _numberVariants(List<Map<String, String>> hs) {
   final seen = <String>{};
   hs.removeWhere((h) => !seen.add(h['pkg'] ?? ''));
@@ -3825,6 +4253,7 @@ Widget _handlerTile(Widget icon, String label, VoidCallback onTap) => InkWell(
       ),
     );
 
+// بيعرض التطبيقات المتاحة وانت تختار. لو اخترت "الافتراضي" بيتحفظ وبعدها بيفتح علطول
 Future<Map<String, String>?> chooseHandler(
   BuildContext context, {
   required String title,
@@ -3897,6 +4326,8 @@ Future<Map<String, String>?> chooseHandler(
   );
 }
 
+// اختيار صور/ملفات من أي تطبيق معرض أو ملفات (انت اللي تختار وتحفظ الافتراضي).
+// بترجع null لو الطريقة دي مش متاحة (الجزء الـ native ناقص)، ولستة فاضية لو لغيت.
 Future<List<String>?> pickFilesViaChooser(
   BuildContext context, {
   required String mime,
@@ -3929,6 +4360,7 @@ Future<List<String>?> pickFilesViaChooser(
   }
 }
 
+// بيطلب إعفاء التطبيق من توفير البطارية علشان يفضل شغال في الخلفية (مرة واحدة، أو بالقوة من القايمة)
 Future<void> askBatteryExempt({bool force = false}) async {
   try {
     final ok = await _chan.invokeMethod<bool>('batteryExempt');
@@ -3943,24 +4375,69 @@ Future<void> askBatteryExempt({bool force = false}) async {
 
 String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : d == 2 ? '3 أيام' : 'الكل';
 
-Widget _statCard(IconData icon, String label, String value, Color c) => Expanded(
-      child: Card(
-        margin: const EdgeInsets.symmetric(horizontal: 2),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-          child: Column(
-            children: [
-              Icon(icon, size: 18, color: c),
-              const SizedBox(height: 2),
-              FittedBox(
-                  child: w.Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
-              Text(label, style: const TextStyle(fontSize: 11)),
-            ],
+// كارت إحصائية صغير (أيقونة + رقم + اسم) بيتوزع بالتساوي جوه Row
+Widget _statCard(IconData icon, String label, String value, Color c,
+        {VoidCallback? onTap, bool compact = false}) =>
+    Expanded(
+      child: Builder(builder: (ctx) {
+        final dim = value == '0';
+        final cs = Theme.of(ctx).colorScheme;
+        final ic = dim ? cs.onSurfaceVariant.withAlpha(120) : c;
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          clipBehavior: Clip.antiAlias,
+          color: dim ? null : c.withAlpha(_isDark(ctx) ? 40 : 28),
+          child: InkWell(
+            onTap: onTap,
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8, horizontal: 4),
+              child: Column(
+                children: [
+                  Icon(icon, size: compact ? 16 : 18, color: ic),
+                  const SizedBox(height: 1),
+                  FittedBox(
+                      child: w.Text(value,
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: compact ? 14 : 15,
+                              color: dim ? cs.onSurfaceVariant.withAlpha(160) : null))),
+                  Text(label, style: TextStyle(fontSize: compact ? 10.5 : 11, color: cs.onSurfaceVariant)),
+                ],
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      }),
     );
 
+// فلتر مضغوط (شيبس صغيرة على نفس سطر "عرض"). شيب المراجعة رمادي لو مفيش مراجعة
+Widget _filterRowCompact(bool reviewOnly, int all, int review, void Function(bool) onPick) {
+  const tight = VisualDensity(horizontal: -3, vertical: -3);
+  const fs = TextStyle(fontSize: 12);
+  return Row(
+    children: [
+      const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+      const SizedBox(width: 8),
+      ChoiceChip(
+        label: Text('الكل ($all)', style: fs),
+        visualDensity: tight,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        selected: !reviewOnly,
+        onSelected: (_) => onPick(false),
+      ),
+      const SizedBox(width: 6),
+      ChoiceChip(
+        label: Text('مراجعة ($review)', style: fs),
+        visualDensity: tight,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        selected: reviewOnly,
+        onSelected: review == 0 ? null : (_) => onPick(true),
+      ),
+    ],
+  );
+}
+
+// لون ثابت لكل وحدة (حسب رقم الصف) علشان تتميز بالنظر
 Color _unitColor(int? row) {
   const p = [
     Colors.blue, Colors.teal, Colors.purple, Colors.orange, Colors.pink, Colors.indigo,
@@ -3987,6 +4464,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   double progress = 0;
   String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
   final List<ReceiptItem> processedItems = [];
+  final List<SysTotal> sysReads = []; // صور السيستم اللي اتقرت
   String? standardXlsxPath;
   String? generatedPdfPath;
   List<String> extraPdfPaths = [];
@@ -3996,6 +4474,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool autoRotate = false; // أبطأ: بيجرّب تدوير كل صورة مش إيصال
   String sourceNote = '';
   bool reviewOnly = false;
+  String _q = '';
+  int _sort = 0;
+  final TextEditingController _searchCtl = TextEditingController();
   bool stopReq = false;
   bool autoScan = false;
   bool settingsOpen = false;
@@ -4029,6 +4510,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() {
       processedItems.clear();
+      sysReads.clear();
       missingTerminals = [];
       warnings.clear();
       excludedPay.clear();
@@ -4041,6 +4523,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
+  // أثناء الفحص: نحدّث الشاشة بس (الملفات بتتبني في آخر المعالجة). بعد الفحص: إعادة بناء الإكسيل والـ PDF
   Future<void> _refresh() async {
     if (busy) {
       if (mounted) setState(() {});
@@ -4099,6 +4582,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  // سحب إيصال المراجعة: صح ✓ / غلط ✗ (غلط = استبعاد لو مكرر، وإلا بيفتح التصحيح)
   Widget _swipeWrap(ReceiptItem item, Widget card) {
     final okLabel = item.dupSuspect
         ? _l(context, 'احتسبه باتش ✓', 'Count it ✓')
@@ -4110,6 +4594,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       key: ValueKey('sw_${item.path}_${item.userExcluded}_${item.ok}'),
       direction: DismissDirection.horizontal,
       confirmDismiss: (dir) async {
+        HapticFeedback.lightImpact();
         await _onSwipe(item, dir == DismissDirection.startToEnd);
         return false;
       },
@@ -4148,6 +4633,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  // ───── فحص تلقائي: بيراقب الصور الجديدة ويفحصها لوحده (بيستنى لحد ما الصور تخلص تنزيل) ─────
   String _scanSig() {
     try {
       final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
@@ -4212,7 +4698,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     if (sig != _pendSig) {
-      _pendSig = sig;
+      _pendSig = sig; // لسه الصور بتنزل: نستنى الدورة الجاية
       return;
     }
     _pendSig = '';
@@ -4242,15 +4728,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         .toList();
     final total = counted.fold<double>(0, (a, e) => a + e.amount);
     final rv = processedItems.where((e) => e.needsReview).length;
-    final csCount = consoleSummaries.value.length;
     return Row(
       children: [
-        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blue),
-        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green),
-        _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber),
-        _statCard(Icons.fact_check, 'مراجعة', '$rv', Colors.orange),
-        if (csCount > 0)
-          _statCard(Icons.dashboard_customize, 'السيستم', '$csCount', Colors.teal),
+        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blue, compact: true),
+        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green, compact: true),
+        _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber,
+            compact: true, onTap: missingTerminals.isEmpty ? null : openClosingReport),
+        _statCard(Icons.fact_check, 'مراجعة', '$rv', Colors.orange,
+            compact: true, onTap: rv == 0 ? null : openReview),
       ],
     );
   }
@@ -4306,7 +4791,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final paths = await pickFilesViaChooser(context,
           mime: 'image/*', title: 'اختر تطبيق المعرض', prefKey: 'defImage');
-      if (paths == null) return;
+      if (paths == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: w.Text('منتقي الصور مش متاح في النسخة دي (الجزء الـ native ناقص).')),
+          );
+        }
+        return;
+      }
       if (paths.isNotEmpty) await runFullPipeline(manualPaths: paths);
     } catch (e) {
       _dbg('pickManualImages error: $e');
@@ -4335,6 +4827,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  // إرسال الإكسيل والـ PDF (المستخدم بيختار واتساب من قايمة المشاركة)
   Future<void> sendToWhatsApp() async {
     final x = latestOutput('.xlsx');
     final p = latestOutput('.pdf');
@@ -4352,6 +4845,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية');
   }
 
+  // أحدث ملف إخراج (إكسيل/PDF): من آخر معالجة، أو آخر ملف "الاسكندريه ..." في فولدر الإخراج
   String? latestOutput(String ext) {
     final cur = ext == '.xlsx' ? standardXlsxPath : generatedPdfPath;
     if (cur != null && File(cur).existsSync()) return cur;
@@ -4390,6 +4884,88 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  bool _isAppOutput(String path) {
+    final n = baseName(path);
+    final l = n.toLowerCase();
+    return n == 'review_report.txt' ||
+        n == 'ocr_debug.txt' ||
+        ((l.endsWith('.xlsx') || l.endsWith('.pdf')) && _normAr(n).contains('اسكندري'));
+  }
+
+  Future<bool> _confirm(String title, String body) async {
+    final r = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('مسح')),
+        ],
+      ),
+    );
+    return r == true;
+  }
+
+  // مسح الكل: ملفات فولدر الإخراج + الصور المرتبة
+  Future<void> clearAll() async {
+    final protectedDirs = <String>{
+      root,
+      baseDir,
+      '$root/Download',
+      '$root/Documents',
+      '$root/DCIM',
+      '$root/Pictures',
+    };
+    final isProtected = protectedDirs.contains(outputDir);
+    final outFiles = <File>[];
+    try {
+      final d = Directory(outputDir);
+      if (d.existsSync()) {
+        for (final e in d.listSync().whereType<File>()) {
+          if (!isProtected || _isAppOutput(e.path)) outFiles.add(e);
+        }
+      }
+    } catch (_) {}
+    final rawFiles = <File>[];
+    try {
+      final d = Directory(rawImagesDir);
+      if (d.existsSync()) rawFiles.addAll(d.listSync().whereType<File>());
+    } catch (_) {}
+    if (outFiles.isEmpty && rawFiles.isEmpty) {
+      setState(() => status = 'مفيش حاجة للمسح.');
+      return;
+    }
+    final ok = await _confirm(
+      'مسح الكل',
+      'هتتمسح ${outFiles.length} ملف من الإخراج:\n$outputDir\n\n'
+          'و ${rawFiles.length} صورة من الصور المرتبة.'
+          '${isProtected ? '\n\n(فولدر الإخراج ده عام، فهيتمسح بس ملفات التطبيق منه)' : ''}',
+    );
+    if (!ok) return;
+    var n = 0;
+    for (final f in [...outFiles, ...rawFiles]) {
+      try {
+        f.deleteSync();
+        n++;
+      } catch (_) {}
+    }
+    try {
+      Directory('$baseDir/.scans').deleteSync(recursive: true);
+    } catch (_) {}
+    await clearScanCache();
+    setState(() {
+      processedItems.clear();
+      sysReads.clear();
+      missingTerminals = [];
+      warnings.clear();
+      standardXlsxPath = null;
+      generatedPdfPath = null;
+      extraPdfPaths = [];
+      status = 'تم مسح $n ملف.';
+    });
+  }
+
   Future<void> openReview() async {
     final list = processedItems.where((e) => e.needsReview).toList();
     if (list.isEmpty) {
@@ -4409,6 +4985,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  // القلم: شاشة كاملة فيها الإيصال بزوم + تعديل المبلغ والماكينة
   Future<void> editReceipt(ReceiptItem item) async {
     final changed = await Navigator.push<bool>(
       context,
@@ -4428,6 +5005,127 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => customDir = null);
   }
 
+  // نقل ملفات التقفيل (الإكسيل والـ PDF) لفولدر أختاره من التليفون
+  Future<void> transferOutputs() async {
+    final paths = <String>[
+      if (latestOutput('.xlsx') != null) latestOutput('.xlsx')!,
+      if (latestOutput('.pdf') != null) latestOutput('.pdf')!,
+      ...extraPdfPaths,
+    ];
+    final moved = await transferFilesViaPicker(context, paths.toSet().toList());
+    if (moved == null || !mounted) return;
+    setState(() {
+      if (moved[standardXlsxPath] != null) standardXlsxPath = moved[standardXlsxPath];
+      if (moved[generatedPdfPath] != null) generatedPdfPath = moved[generatedPdfPath];
+      extraPdfPaths = extraPdfPaths.map((p) => moved[p] ?? p).toList();
+    });
+  }
+
+  Future<void> shareStandardFiles() async {
+    final files = <XFile>[];
+    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
+      files.add(XFile(standardXlsxPath!));
+    }
+    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
+      files.add(XFile(generatedPdfPath!));
+    }
+    for (final p in extraPdfPaths) {
+      if (File(p).existsSync()) files.add(XFile(p));
+    }
+    if (files.isNotEmpty) {
+      if (!await confirmSend(context,
+          review: processedItems.where((e) => e.needsReview).length, missing: missingTerminals.length)) {
+        return;
+      }
+      await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
+      );
+    }
+  }
+
+  Future<void> shareAdvancedFile() async {
+    final files = <XFile>[];
+    for (final p in ['$outputDir/review_report.txt', '$outputDir/ocr_debug.txt']) {
+      if (File(p).existsSync()) files.add(XFile(p));
+    }
+    if (files.isNotEmpty) {
+      await Share.shareXFiles(files, text: 'لوج التقفيل (تقرير المراجعة + OCR)');
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ملفات المراجعة غير متاحة حالياً.')),
+      );
+    }
+  }
+
+  Future<void> editReceiptDialog(ReceiptItem item) async {
+    final amtController = TextEditingController(text: item.amount.toStringAsFixed(2));
+    int? selectedOrder = item.orderNum;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => AlertDialog(
+          title: const Text('تعديل بيانات الإيصال'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Image.file(File(item.path), height: 160, fit: BoxFit.contain),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: amtController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(labelText: tr('المبلغ الإجمالي')),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<int>(
+                  value: selectedOrder,
+                  hint: const Text('اختر الماكينة (1..19)'),
+                  items: [
+                    for (var i = 1; i <= machineCount; i++)
+                      DropdownMenuItem(
+                        value: i,
+                        child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
+                      ),
+                  ],
+                  onChanged: (v) => setDlgState(() => selectedOrder = v),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+            FilledButton(
+              onPressed: () {
+                final newAmt = double.tryParse(amtController.text) ?? item.amount;
+                setState(() {
+                  item.amount = round2(newAmt);
+                  item.batches = [item.amount];
+                  item.ok = true;
+                  item.alt = null;
+                  item.how = 'manual';
+                  if (selectedOrder != null) {
+                    item.orderNum = selectedOrder;
+                    item.tid = numToTid[selectedOrder];
+                    item.row = terminals[item.tid]!.excelRow;
+                    item.unitName = terminals[item.tid]!.unitName;
+                  }
+                });
+                saveFix(item);
+                Navigator.pop(ctx);
+                rebuildFiles();
+              },
+              child: const Text('حفظ وتحديث الملفات'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ملخص العد (زي رسالة "اكتمل العد" في إيصالات الدفع): صور، اتسمّى، إجمالي
   String _countLine() {
     final counted = processedItems
         .where((e) => !e.userExcluded && !e.ignoredDoc && e.ign != 'drop' && e.amount > 0)
@@ -4440,6 +5138,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         '${rv > 0 ? ' ($rv للمراجعة)' : ''}';
   }
 
+  // "الباقي صح": يعلّم كل إيصالات المراجعة صح مرة واحدة (زي إيصالات الدفع)
   Future<void> _markRestOk() async {
     final list = processedItems.where((e) => e.needsReview).toList();
     if (list.isEmpty) return;
@@ -4478,6 +5177,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     }
     await _refresh();
+    if (skipped > 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: w.Text(_l(context, '$skipped إيصال ناقصه مبلغ أو ماكينة، كمّلهم من القلم.',
+              '$skipped receipt(s) are missing an amount or machine; fill them in with the pencil.'))));
+    }
+  }
+
+  Future<void> shareOneReceipt(ReceiptItem item) async {
+    if (!File(item.path).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('الصورة مش موجودة.')),
+      );
+      return;
+    }
+    await Share.shareXFiles([XFile(item.path)],
+        text: item.orderNum != null ? 'ماكينة ${item.orderNum}' : baseName(item.path));
   }
 
   Future<void> rebuildFiles() async {
@@ -4493,6 +5208,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       reportDate = dateCounts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
     }
 
+    // 1. ملفات الـ PDF المجمعة: واحد ليوم التقفيل، وواحد لكل يوم تاني لو فيه إيصالات بتاريخ مختلف
     processedItems.sort((a, b) {
       final c = (a.orderNum ?? 99).compareTo(b.orderNum ?? 99);
       return c != 0 ? c : (a.suffix ?? 1).compareTo(b.suffix ?? 1);
@@ -4515,6 +5231,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         pageNo++;
         if (!File(r.path).existsSync()) continue;
         setState(() => status = 'جاري تجهيز صفحات الـ PDF ($pageNo / ${processedItems.length})...');
+        // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
         var srcs = <String>[];
         try {
           srcs = await scanReceiptAsync(r.path);
@@ -4522,15 +5239,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (srcs.isEmpty) srcs = <String>[r.path];
         for (final p in srcs) {
           try {
-            final imgWidget = pw.MemoryImage(File(p).readAsBytesSync());
-            pdf.addPage(
-              pw.Page(
-                pageFormat: PdfPageFormat.a4,
-                margin: const pw.EdgeInsets.all(20),
-                build: (pw.Context ctx) =>
-                    pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
-              ),
-            );
+            final bytes = File(p).readAsBytesSync();
+            final imgWidget = pw.MemoryImage(bytes);
+            final sz = kFitPageToReceipt ? _jpegSize(bytes) : null;
+            if (sz != null) {
+              // صفحة بنسبة الباتش نفسه: العرض ثابت والارتفاع على قد الصورة
+              const pageW = 420.0, mg = 6.0;
+              final pageH = (pageW - 2 * mg) * sz[1] / sz[0] + 2 * mg;
+              pdf.addPage(
+                pw.Page(
+                  pageFormat: PdfPageFormat(pageW, pageH),
+                  margin: const pw.EdgeInsets.all(mg),
+                  build: (pw.Context ctx) =>
+                      pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+                ),
+              );
+            } else {
+              pdf.addPage(
+                pw.Page(
+                  pageFormat: PdfPageFormat.a4,
+                  margin: const pw.EdgeInsets.all(20),
+                  build: (pw.Context ctx) =>
+                      pw.Center(child: pw.Image(imgWidget, fit: pw.BoxFit.contain)),
+                ),
+              );
+            }
             pages++;
           } catch (_) {}
         }
@@ -4549,10 +5282,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (await buildPdf(e.value, f)) extraPdfPaths.add(f.path);
     }
 
+    // حساب إجماليات كل وحدة
     final unitTotals = <int, double>{};
     for (var r = 2; r <= 11; r++) {
       unitTotals[r] = 0.0;
     }
+    // عدد الأجهزة الفعلي لكل وحدة: كل جهاز بيتعدّ مرة واحدة حتى لو عمل أكتر من باتش في اليوم
     final unitDevices = <int, Set<String>>{};
     for (final item in mainItems) {
       if (item.row != null && item.amount > 0) {
@@ -4564,11 +5299,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final unitCounts = <int, int>{for (final e in unitDevices.entries) e.key: e.value.length};
 
+    // الإكسيل: نفس القالب بالظبط، بنكتب بس عمود C (عدد الأجهزة) و D (مبلغ كل وحدة) و F (الإجمالي)
     var xlsxLine = '• تم توليد الإكسيل: الاسكندريه $reportDate.xlsx';
     standardXlsxPath = null;
     final tpl = await loadTemplateBytes();
     if (tpl == null) {
-      xlsxLine = '⚠️ قالب "الاسكندريه 00.xlsx" مش موجود في فولدر all، فمتعملش إكسيل.';
+      xlsxLine = '⚠️ قالب "الاسكندريه 00.xlsx" مش موجود في فولدر all (ولا مضاف للتطبيق)، فمتعملش إكسيل.';
     } else {
       try {
         final outBytes = fillTemplate(tpl, unitTotals, unitCounts);
@@ -4593,29 +5329,275 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (var i = 1; i <= 19; i++)
         if (!foundOrders.contains(i) && !ignore.contains(i)) i
     ];
+    writeReport(reportDate);
 
     setState(() => status = 'اكتمل العد: ${_countLine()}\n'
         '$xlsxLine\n'
-        '• تم توليد ملف الـ PDF المجمع.');
+        '• تم توليد ملف الـ PDF المجمع.' +
+        (extraPdfPaths.isEmpty
+            ? ''
+            : '\n• فيه إيصالات بتواريخ تانية (${otherByDate.keys.join(' ، ')}): اتعمل لها PDF منفصل لكل يوم، ومش داخلة في إجماليات يوم $reportDate.') +
+        (sourceNote.isEmpty ? '' : '\n$sourceNote'));
   }
 
-  String subtitleOf(ReceiptItem item) {
+  // مبلغ السيستم الخاص بترمنل الباتش ده (أحدث صورة لنفس الترمنل وتاريخ الباتش)
+  SysTotal? _sysOf(ReceiptItem r) {
+    final tid = r.tid ?? r.origTid;
+    if (tid == null) return null;
+    final d = r.date ?? r.dateMain;
+    SysTotal? best;
+    for (final s in sysReads) {
+      if (s.tid != tid || s.amount == null) continue;
+      if (d != null && s.date != null && s.date != d) continue;
+      if (best == null || s.printed.compareTo(best.printed) > 0) best = s;
+    }
+    return best;
+  }
+
+  // تقرير التقفيل: مبالغ السيستم + الماكينات الناقصة + كل الملاحظات + الإيصالات اللي محتاجة مراجعة
+  Future<void> openClosingReport() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ClosingReportPage(
+          items: processedItems,
+          sysReads: sysReads,
+          missing: missingTerminals,
+          warnings: List<String>.from(warnings),
+          subtitleOf: subtitleOf,
+          onOpen: editReceipt,
+        ),
+      ),
+    );
+    if (mounted) setState(() {});
+  }
+
+  Widget _sysCard(BuildContext context) {
+    final best = <String, SysTotal>{};
+    for (final s in sysReads) {
+      if (s.tid == null || s.amount == null) continue;
+      final k = '${s.tid}|${s.date ?? ''}';
+      final p = best[k];
+      if (p == null || s.printed.compareTo(p.printed) > 0) best[k] = s;
+    }
+    if (best.isEmpty) return const SizedBox.shrink();
+    final list = best.values.toList()
+      ..sort((a, b) => (terminals[a.tid]?.orderNum ?? 999).compareTo(terminals[b.tid]?.orderNum ?? 999));
+    final lines = <String>[];
+    for (final s in list) {
+      final t = terminals[s.tid];
+      final nm = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : 'ترمنل ${s.tid}';
+      lines.add('$nm: ${_fmtMoney(s.amount!)} ج.م${s.date != null ? ' (${s.date})' : ''}');
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: _tintBg(context, Colors.blue, soft: true),
+        border: Border.all(color: _tintBorder(context, Colors.blue)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('🖥️ مبالغ السيستم (${list.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          Text(lines.join('\n'), style: const TextStyle(fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  // فرق مبلغ السيستم عن مجموع باتشات نفس الماكينة (null = مفيش صورة سيستم). مقياس بس
+  double? _sysDiffOf(ReceiptItem item) {
+    if (item.ignoredDoc || item.userExcluded) return null;
+    final sys = _sysOf(item);
+    if (sys == null) return null;
+    var tot = 0.0;
+    for (final x in processedItems) {
+      if (x.counts && x.amount > 0 && x.orderNum != null && x.orderNum == item.orderNum) tot += x.amount;
+    }
+    return round2(tot - sys.amount!);
+  }
+
+  // شريط تنبيهات صغير (ناقص / ملاحظات): التفاصيل في زر التقرير
+  List<ReceiptItem> _visibleItems(bool reviewOnlyEff) {
+    var l = processedItems.where((e) => !reviewOnlyEff || e.needsReview).toList();
+    final q = _q.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      l = l
+          .where((e) => [e.unitName ?? '', '${e.orderNum ?? ''}', e.tid ?? '', e.amount.toStringAsFixed(2), baseName(e.path)]
+              .any((t) => t.toLowerCase().contains(q)))
+          .toList();
+    }
+    switch (_sort) {
+      case 1:
+        _stableSort<ReceiptItem>(l, (a, b) => (a.orderNum ?? 999).compareTo(b.orderNum ?? 999));
+        break;
+      case 2:
+        _stableSort<ReceiptItem>(l, (a, b) => (b.needsReview ? 1 : 0).compareTo(a.needsReview ? 1 : 0));
+        break;
+      case 3:
+        _stableSort<ReceiptItem>(l, (a, b) => b.amount.compareTo(a.amount));
+        break;
+    }
+    return l;
+  }
+
+  Widget _alertStrip() {
+    final nm = missingTerminals.length, nw = warnings.length;
+    if (nm == 0 && nw == 0) return const SizedBox.shrink();
+    Widget chip(String label, MaterialColor c) => ActionChip(
+          label: w.Text(label, style: TextStyle(fontSize: 12, color: _tintFg(context, c))),
+          backgroundColor: _tintBg(context, c, soft: true),
+          side: BorderSide(color: _tintBorder(context, c)),
+          visualDensity: const VisualDensity(horizontal: -3, vertical: -3),
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          onPressed: openClosingReport,
+        );
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 4,
+        children: [
+          if (nm > 0) chip(_l(context, '⚠️ ناقص $nm', '⚠️ Missing $nm'), Colors.amber),
+          if (nw > 0) chip(_l(context, '📝 ملاحظات $nw', '📝 Notes $nw'), Colors.orange),
+        ],
+      ),
+    );
+  }
+
+  // السطر التحتاني للكارت من غير المبلغ (المبلغ بيتعرض كبير لوحده)
+  // التحذيرات كشارات صغيرة ملونة بدل سطور نص طويلة (التفاصيل الكاملة في شاشة التقرير)
+  Widget _warnChips(ReceiptItem item) {
+    final chips = <Widget>[];
+    void add(String t, MaterialColor c) => chips.add(_flagChip(context, t, c));
+    if (item.reprintSummary) add('🚨 REPRINT / SUMMARY', Colors.red);
+    if (item.missingBatchClosed && !item.reprintSummary && !item.ignoredDoc) add('⚠️ BATCH CLOSED ناقص', Colors.orange);
+    if (item.ignoredDoc) add('📄 مستند متجاهل - راجعه', Colors.grey);
+    if (item.dupSuspect) {
+      add('⚠️ مشكوك مكرر${item.dupOf != null ? ' (ماكينة ${item.dupOf})' : ''}', Colors.orange);
+    } else if (item.userExcluded) {
+      add('🚫 مستبعد (مكرر)', Colors.grey);
+    }
+    if (item.alt != null) add('⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}', Colors.amber);
+    if (item.dateOdd) add('📅 تاريخ ${item.date} (الأغلب ${item.dateMain})', Colors.amber);
+    if (!item.ignoredDoc && !item.userExcluded && !item.dupSuspect && item.weakId && item.row != null) {
+      add('❓ ماكينة تلقائية - اتأكد', Colors.blue);
+    }
+    if (item.unusual != null) add('📊 ${item.unusual}', Colors.blue);
+    if (chips.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(spacing: 6, runSpacing: 4, children: chips),
+    );
+  }
+
+  String _subtitleSmall(ReceiptItem item) {
+    final full = subtitleOf(item, flags: false);
+    if (item.ignoredDoc || item.amount <= 0) return full;
+    return full.replaceFirst(' | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م', '');
+  }
+
+  String subtitleOf(ReceiptItem item, {bool flags = true}) {
     final sfx = item.suffix != null ? ' (باتش ${item.suffix})' : '';
     final bt = item.batches.length > 1
         ? '\n= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}'
         : '';
     final alt = item.alt != null ? '\n⚠️ قراءة تانية: ${item.alt!.toStringAsFixed(2)}' : '';
     final txnStr = item.txn != null ? ' | المعاملات: ${item.txn}' : '';
-    
-    String csInfo = '';
-    if (item.tid != null && consoleSummaries.value.containsKey(item.tid)) {
-      final cs = consoleSummaries.value[item.tid]!;
-      final diffAmt = item.amount - cs.systemAmount;
-      csInfo = '\n📊 سيستم المرور: ${cs.systemAmount.toStringAsFixed(2)} ج.م (${cs.electronicTxn} عملية)' +
-               (diffAmt.abs() < 0.01 ? ' • مطابق للسيستم ✓' : ' • فرق مالي: ${diffAmt.toStringAsFixed(2)}');
+    final extra = StringBuffer();
+    if (item.reprintSummary) {
+      extra.write('\n🚨 تحذير شديد: الإيصال ده REPRINT أو SUMMARY (ممكن يكون مكرر)!');
+    } else if (item.missingBatchClosed && !item.ignoredDoc) {
+      extra.write('\n⚠️ مش مكتوب فيه BATCH CLOSED SUCCESSFULLY - اتأكد منه');
     }
+    if (item.ignoredDoc) {
+      extra.write('\n📄 اتجاهلته: شكله إيصال دفع/مستند مش باتش - راجعه');
+    }
+    if (item.dateOdd) {
+      extra.write('\n📅 تاريخه ${item.date} والأغلب ${item.dateMain}');
+    }
+    if (!item.ignoredDoc && !item.userExcluded && !item.dupSuspect && item.weakId && item.row != null) {
+      extra.write('\n❓ الماكينة/الوحدة اتحددت تلقائياً - اتأكد');
+    }
+    var sysStr = '';
+    final sys = (item.ignoredDoc || item.userExcluded) ? null : _sysOf(item);
+    if (sys != null) {
+      var tot = 0.0;
+      var n = 0;
+      for (final x in processedItems) {
+        if (x.counts && x.amount > 0 && x.orderNum != null && x.orderNum == item.orderNum) {
+          tot += x.amount;
+          n++;
+        }
+      }
+      final diff = round2(tot - sys.amount!);
+      final multi = n > 1 ? ' (مجموع $n باتشات)' : '';
+      final res = diff == 0 ? '✅ مطابق$multi' : '⚠️ فرق ${diff > 0 ? '+' : ''}${diff.toStringAsFixed(2)}$multi';
+      sysStr = '\n🖥️ السيستم: ${_fmtMoney(sys.amount!)} ج.م | $res';
+    }
+    final unu = item.unusual != null ? '\n📊 ${item.unusual}' : '';
+    final dup = item.dupSuspect
+        ? '\n⚠️ مشكوك إنه مكرر (نفس مبلغ ماكينة ${item.dupOf ?? ''}) - مش محسوب لحد ما تراجعه'
+        : item.userExcluded
+            ? '\n🚫 مستبعد (مكرر)'
+            : '';
+    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$sysStr${flags ? '$alt$dup$unu$extra' : ''}';
+  }
 
-    return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$alt$csInfo';
+  String warningsText() {
+    final sb = StringBuffer('ملاحظات للمراجعة (${warnings.length}):');
+    for (final w in warnings) {
+      sb.write('\n• $w');
+    }
+    return sb.toString();
+  }
+
+  void writeReport(String date) {
+    try {
+      final line = '=' * 50;
+      final sb = StringBuffer('تقرير المراجعة - $date\n$line\n');
+      var total = 0.0;
+      for (final r in processedItems) {
+        final flags = <String>[];
+        if (r.dupSuspect) flags.add('مشكوك إنه مكرر - مش محسوب لحد ما تراجعه');
+        if (r.userExcluded) flags.add('مستبعد');
+        if (r.ignoredDoc) flags.add('صورة متجاهلة - محتاجة قرار');
+        if (r.dateOdd) flags.add('تاريخ مختلف ${r.date}');
+        if (r.unusual != null) flags.add('إجمالي بعيد عن المعتاد');
+        if (r.amount <= 0) flags.add('المبلغ غير مقروء');
+        if (r.row == null) flags.add('الوحدة غير معروفة');
+        if (!r.ok && r.amount > 0) flags.add('المبلغ يحتاج مراجعة');
+        if (r.how == 'auto-number' || r.how == 'conflict' || r.how == 'extra-batch') {
+          flags.add('رقم الماكينة: ${r.how}');
+        }
+        if (r.batches.length > 1) flags.add('${r.batches.length} باتشات');
+        if (r.alt != null) flags.add('قراءة تانية: ${r.alt!.toStringAsFixed(2)}');
+        if (r.reprintSummary) flags.add('تحذير: REPRINT أو SUMMARY');
+        if (r.missingBatchClosed) flags.add('غير مكتوب BATCH CLOSED');
+        if (r.amount > 0 && r.row != null && r.counts) total += r.amount;
+        final mark = flags.isEmpty ? '✓' : '⚠️';
+        final extra = flags.isEmpty ? '' : '   [${flags.join(' | ')}]';
+        final txnStr = r.txn != null ? ' | معاملات: ${r.txn}' : '';
+        final sy = (r.ignoredDoc || r.userExcluded) ? null : _sysOf(r);
+        final sysTxt = sy != null ? ' | السيستم: ${_fmtMoney(sy.amount!)}' : '';
+        sb.writeln('$mark ${baseName(r.path)}  ${r.unitName ?? '??'}  '
+            '${r.amount.toStringAsFixed(2)}$txnStr$sysTxt$extra');
+      }
+      sb.writeln(line);
+      sb.writeln('الإجمالي العام: ${total.toStringAsFixed(2)} ج.م');
+      if (missingTerminals.isNotEmpty) {
+        sb.writeln('ماكينات ناقصة: ${missingTerminals.join(' ، ')}');
+      }
+      for (final w in warnings) {
+        sb.writeln('- $w');
+      }
+      File('$outputDir/review_report.txt')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(sb.toString());
+    } catch (_) {}
   }
 
   Future<void> runFullPipeline({List<String>? manualPaths, bool auto = false}) async {
@@ -4642,7 +5624,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
       }
       if (autoScan) {
-        await _watchService(true);
+        await _watchService(true); // نفضل شغالين نراقب الإيصالات الجديدة
       } else if (!chainRunning) {
         try {
           await _chan.invokeMethod('stopKeepAlive');
@@ -4651,6 +5633,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!chainRunning) {
         try {
           await _chan.invokeMethod('keepScreenOn', {'on': false});
+        } catch (_) {}
+      }
+      if (_life != AppLifecycleState.resumed && !chainRunning) {
+        final rv = processedItems.where((e) => e.needsReview).length;
+        final txt = 'تم فحص ${processedItems.length} إيصال'
+            '${missingTerminals.isNotEmpty ? ' - ناقص ${missingTerminals.length} ماكينة' : ''}'
+            '${rv > 0 ? ' - $rv للمراجعة' : ''}'
+            ' - ⏱ ${fmtElapsed(sw.elapsed)}';
+        try {
+          await _chan.invokeMethod('notify', {'title': tr('A2R POS - انتهى الفحص'), 'text': tr(txt)});
         } catch (_) {}
       }
     }
@@ -4664,11 +5656,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     await prepareDefaultFiles();
 
+    await loadScanCache();
     setState(() {
       busy = true;
       stopReq = false;
       progress = 0;
       processedItems.clear();
+      sysReads.clear();
       missingTerminals.clear();
       warnings.clear();
       excludedPay.clear();
@@ -4700,14 +5694,68 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } catch (_) {}
     }
     todo.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
+    sourceNote = '';
     if (manualPaths != null) {
       todo.addAll(manualPaths.map((p) => File(p)));
+      sourceNote = '• المصدر: صور محددة يدوياً (${todo.length} صورة)';
+    }
+
+    // فولدر اخترته بإيدك (مش واتساب): أي ملف PDF جواه بيتفحص، بأي اسم وبأي تاريخ
+    if (manualPaths == null && customDir != null && customDir != outputDir) {
+      final cpdfs = <File>[];
+      try {
+        for (final e in Directory(customDir!).listSync().whereType<File>()) {
+          final n = baseName(e.path);
+          if (!n.startsWith('.') && n.toLowerCase().endsWith('.pdf')) cpdfs.add(e);
+        }
+      } catch (_) {}
+      cpdfs.sort((a, b) => baseName(a.path).compareTo(baseName(b.path)));
+      var pdfPages = 0;
+      final used = <String>[];
+      for (final pf in cpdfs) {
+        setState(() => status = 'بقرأ صفحات ملف PDF: ${baseName(pf.path)}...');
+        final pages = await extractPdfPages(pf);
+        if (pages.isEmpty) continue;
+        todo.addAll(pages);
+        pdfPages += pages.length;
+        used.add(baseName(pf.path));
+      }
+      if (used.isNotEmpty) {
+        sourceNote = '• المصدر: ملف PDF ${used.take(3).join(' ، ')}${used.length > 3 ? ' ...' : ''} ($pdfPages صفحة)';
+      }
+    }
+
+    // مفيش صور؟ دوّر على PDF اسمه "الاسكندريه + تاريخ النهارده"
+    if (todo.isEmpty) {
+      setState(() => status = 'مفيش صور. بدوّر على ملف PDF اسمه "الاسكندريه ${todayToken()}"...');
+      final searchDirs = <String>[];
+      if (customDir != null) searchDirs.add(customDir!);
+      for (final d in findWhatsAppImageDirs()) {
+        final p = d.path;
+        if (p.endsWith('WhatsApp Images')) {
+          searchDirs.add(p.substring(0, p.length - 'WhatsApp Images'.length) + 'WhatsApp Documents');
+        }
+      }
+      searchDirs.addAll([baseDir, '$root/Download', '$root/Documents']);
+      final pdfs = findTodayAlexPdfs(searchDirs);
+      if (pdfs.isNotEmpty) {
+        final pages = await extractPdfPages(pdfs.first);
+        if (pages.isNotEmpty) {
+          todo.addAll(pages);
+          sourceNote = '• المصدر: ملف PDF ${baseName(pdfs.first.path)} (${pages.length} صفحة)';
+        }
+      }
     }
 
     if (todo.isEmpty) {
       setState(() {
         busy = false;
-        status = 'لا توجد صور في مجلد الواتساب بالفترة المحددة.';
+        status = customDir != null
+            ? 'مفيش صور (في الفترة المحددة) ولا ملفات PDF في المجلد المختار.'
+            : (dirs.isEmpty
+                    ? 'تعذر العثور على مجلد صور الواتساب تلقائياً.'
+                    : 'لا توجد صور في مجلد الواتساب بالفترة المحددة.') +
+                '\nولا يوجد ملف PDF باسم "الاسكندريه ${todayToken()}".';
       });
       return;
     }
@@ -4715,60 +5763,233 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
     Directory(rawImagesDir).createSync(recursive: true);
     Directory(outputDir).createSync(recursive: true);
+    try {
+      File('$outputDir/ocr_debug.txt').writeAsStringSync('');
+    } catch (_) {}
     final fixes = loadFixes();
     final rawReceipts = <ReceiptItem>[];
     final ignoredItems = <ReceiptItem>[];
-    final consoleMap = Map<String, ConsoleSummaryItem>.from(consoleSummaries.value);
+    // تصحيح يدوي محفوظ من مرة سابقة (بيتطبق على القراءة الجديدة وعلى المحفوظة)
+    void applyFix(ReceiptItem item, String key) {
+          final fx = fixes[key];
+          if (fx is Map) {
+            final v = fx['val'];
+            if (v is num && v > 0) {
+              item.amount = round2(v.toDouble());
+              item.batches = [item.amount];
+            }
+            final ft = fx['tid'];
+            if (ft is String && terminals.containsKey(ft)) {
+              final t = tidAlias[ft] ?? ft;
+              final info = terminals[t]!;
+              item.tid = t;
+              item.orderNum = info.orderNum;
+              item.row = info.excelRow;
+              item.unitName = info.unitName;
+            }
+            item.ok = true;
+            item.alt = null;
+            item.how = 'manual';
+            final dd = fx['dup'];
+            if (dd is String) item.dupDecision = dd;
+            final ig = fx['ign'];
+            if (ig is String) item.ign = ig;
+            final fd = fx['date'];
+            if (fd is String) {
+              item.date = fd;
+              item.dateFix = fd;
+            }
+            if (fx['rep'] == true || fx['rep'] == false) item.reprintSummary = fx['rep'];
+            if (fx['nobc'] == true || fx['nobc'] == false) item.missingBatchClosed = fx['nobc'];
+          }
+    }
 
+
+    // ═════════ المرحلة 1: قراءة الصور ═════════
     for (var i = 0; i < todo.length; i++) {
       if (stopReq) break;
       final f = todo[i];
       try {
         Directory(tmpDir).createSync(recursive: true);
         var workPath = f.path;
-        var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
-        final fkey = '${baseName(f.path)}:${f.lengthSync()}';
-        
-        // فحص ملخص سيستم المرور (Console v60) بالسطور والأرقام الذكية
-        final csItem = ConsoleSummaryItem.fromOcr(toLines(res), res.text, f.path);
-        if (csItem != null && csItem.tid.isNotEmpty) {
-          consoleMap[csItem.tid] = csItem;
-          saveConsoleSummaries(consoleMap);
-          if (mounted) {
+        int? rotDeg;
+        // نتيجة محفوظة لنفس الصورة؟ ما نقراهاش تاني
+        final ckey = '${baseName(f.path)}:${f.lengthSync()}';
+        final fxPre = fixes[ckey];
+        final ignPre = (fxPre is Map && fxPre['ign'] is String) ? fxPre['ign'] as String : null;
+        final ce = _scanCache[ckey];
+        if (ce is Map && ce['v'] == _kScanVer) {
+          final kind = ce['k'];
+          var hit = true;
+          if (ignPre == 'keep' && kind != 'receipt') hit = false;
+          if (kind == 'none' && autoRotate && ce['ar'] != true) hit = false;
+          if (hit && kind == 'receipt') {
+            final ct = ce['tid'];
+            if (ct is String && !terminals.containsKey(ct)) hit = false;
+          }
+          if (hit) {
+            if (kind == 'console') {
+              sysReads.add(SysTotal.fromJson(ce));
+            } else if (kind == 'pay') {
+              excludedPay.add(baseName(f.path));
+              if (ignPre != 'drop') {
+                final igItem = ReceiptItem(path: f.path, key: ckey, how: 'none', ignoredDoc: true);
+                ignoredItems.add(igItem);
+                processedItems.add(igItem);
+              }
+            } else if (kind == 'receipt') {
+              final rot = ce['rot'];
+              final inRawC = f.path.startsWith('$rawImagesDir/');
+              final dstC = inRawC ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
+              File lf;
+              if (rot is int) {
+                final noExtC = dstC.contains('.') ? dstC.substring(0, dstC.lastIndexOf('.')) : dstC;
+                final jdC = '$noExtC.jpg';
+                await fixImageAsync(f.path, jdC, rot);
+                if (jdC != dstC && inRawC) {
+                  try {
+                    File(dstC).deleteSync();
+                  } catch (_) {}
+                }
+                lf = File(jdC);
+              } else if (inRawC || File(dstC).existsSync()) {
+                lf = File(dstC);
+              } else {
+                await fixImageAsync(f.path, dstC, 0);
+                lf = File(dstC);
+              }
+              final cItem = _receiptFromCache(Map<String, dynamic>.from(ce), ckey, lf.path);
+              applyFix(cItem, ckey);
+              rawReceipts.add(cItem);
+              processedItems.add(cItem);
+            }
+            if (!mounted) return;
             setState(() {
               progress = ((i + 1) / todo.length) * 0.5;
-              status = 'ملخص سيستم المرور: ${csItem.unitName} (${csItem.electronicTxn} عملية)';
+              status = 'فحص OCR: ${i + 1} من ${todo.length} (محفوظ)';
             });
+            continue;
           }
-          continue;
         }
-
+        var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
+        final fkey = '${baseName(f.path)}:${f.lengthSync()}';
         final fxm = fixes[fkey];
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
-        if (ign != 'keep' && _isIdSlip(res)) continue;
-        
+        // صورة السيستم (A2R Operations Console): مش باتش، بناخد منها الترمنل والإجمالي بس
+        if (ign != 'keep') {
+          final sp = parseSysConsole(res.text, baseName(f.path), rt: res);
+          if (sp != null) {
+            sysReads.add(sp);
+            _cachePut(fkey, {'k': 'console', ...sp.toJson()});
+            if (!mounted) return;
+            setState(() {
+              progress = ((i + 1) / todo.length) * 0.5;
+              status = 'فحص OCR: ${i + 1} من ${todo.length} (صورة سيستم)';
+            });
+            continue;
+          }
+        }
+        if (ign != 'keep' && _isIdSlip(res)) {
+          _cachePut(fkey, {'k': 'slip'});
+          if (!mounted) return;
+          setState(() {
+            progress = ((i + 1) / todo.length) * 0.5;
+            status = 'فحص OCR: ${i + 1} من ${todo.length}';
+          });
+          continue; // ورقة تعريف: مش باتش
+        }
         var isReceipt = receiptScore(res.text) >= 2 || findTerminalIn([res.text]) != null;
-        if (ign == 'keep') isReceipt = true;
+        if (ign == 'keep') isReceipt = true; // قررت قبل كده إنها باتش
+        // إيصال دفع أو مستند مش باتش/ملخص/ري برنت: بيدخل المراجعة (مش بيتتجاهل نهائي)
         var skipPay = false;
         if (isReceipt && ign != 'keep' && classifyReceipt(res.text) == 'payment') {
           isReceipt = false;
           skipPay = true;
         }
 
+        // صورة مقلوبة؟ جرّب EXIF ثم 90 / 270 / 180
+        if (!isReceipt && !skipPay && autoRotate) {
+          for (final deg in const [0, 90, 270, 180]) {
+            final tp = '$tmpDir/rot_$deg.jpg';
+            try {
+              final wrote = await fixImageAsync(f.path, tp, deg);
+              if (!wrote) continue;
+              final r2 = await recognizer.processImage(InputImage.fromFilePath(tp));
+              if ((receiptScore(r2.text) >= 2 || findTerminalIn([r2.text]) != null) &&
+                  classifyReceipt(r2.text) != 'payment') {
+                res = r2;
+                workPath = tp;
+                rotDeg = deg;
+                isReceipt = true;
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+
         if (isReceipt) {
           final key = '${baseName(f.path)}:${f.lengthSync()}';
           final a = analyzeLines(toLines(res));
+
+          // قراءة تانية بتنسيق مختلف (صورة محسّنة) علشان نكشف الأخطاء
           double? alt;
           bool hasBatchClosed = RegExp(r'BATCH\s*CLOS', caseSensitive: false).hasMatch(res.text.toUpperCase());
           bool hasReprint = RegExp(r'REPRINT|SUMMARY|DUPLICATE', caseSensitive: false).hasMatch(res.text.toUpperCase());
 
+          // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
+          final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0 || !hasBatchClosed || hasReprint;
+          if (needSecond) {
+            try {
+            final ep = '$tmpDir/enh.jpg';
+            await enhanceImageAsync(workPath, ep);
+            final res2 = await recognizer.processImage(InputImage.fromFilePath(ep));
+            final a2 = analyzeLines(toLines(res2));
+            if (RegExp(r'BATCH\s*CLOS', caseSensitive: false).hasMatch(res2.text.toUpperCase())) hasBatchClosed = true;
+            if (RegExp(r'REPRINT|SUMMARY|DUPLICATE', caseSensitive: false).hasMatch(res2.text.toUpperCase())) hasReprint = true;
+            try {
+              File('$outputDir/ocr_debug.txt').writeAsStringSync(
+                  '##### ${baseName(f.path)} (2nd read) total=${a2.val} ok=${a2.ok}\n',
+                  mode: FileMode.append);
+            } catch (_) {}
+            alt = mergeSecondRead(a, a2);
+            } catch (_) {}
+          }
+
+          if (a.tid == null) {
+            final fnNum = int.tryParse(baseName(f.path).split('.').first);
+            final ft = fnNum != null ? numToTid[fnNum] : null;
+            if (ft != null && (a.row == null || terminals[ft]!.excelRow == a.row)) {
+              a.tid = ft;
+              a.row = terminals[ft]!.excelRow;
+              a.unitName = terminals[ft]!.unitName;
+              a.how = 'file-number';
+            }
+          }
+          try {
+            File('$outputDir/ocr_debug.txt').writeAsStringSync(
+                '##### ${baseName(f.path)} => tid=${a.tid} how=${a.how} total=${a.val} ok=${a.ok} alt=$alt rotated=${workPath != f.path}\n'
+                '${a.debug}\n--- raw ML Kit ---\n${res.text}\n\n',
+                mode: FileMode.append);
+          } catch (_) {}
+
+          // نسخة الصورة اللي هتدخل الـ PDF (متظبطة الاتجاه)
           final inRaw = f.path.startsWith('$rawImagesDir/');
           final dst = inRaw ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
           File localFile;
-          if (inRaw || File(dst).existsSync()) {
+          if (workPath != f.path) {
+            final noExt = dst.contains('.') ? dst.substring(0, dst.lastIndexOf('.')) : dst;
+            final jd = '$noExt.jpg';
+            File(workPath).copySync(jd);
+            if (jd != dst && inRaw) {
+              try {
+                File(dst).deleteSync();
+              } catch (_) {}
+            }
+            localFile = File(jd);
+          } else if (inRaw || File(dst).existsSync()) {
             localFile = File(dst);
           } else {
-            await fixImageAsync(f.path, dst, 0);
+            await fixImageAsync(f.path, dst, 0); // نسخ + تصحيح EXIF لو لازم
             localFile = File(dst);
           }
 
@@ -4790,57 +6011,270 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           );
           item.txn = a.txn;
           item.cands = a.cands;
+
+          _cachePut(key, _receiptToCache(item, workPath != f.path ? rotDeg : null));
+          applyFix(item, key);
           rawReceipts.add(item);
+          processedItems.add(item); // يظهر فوراً (مؤقت) ويتنظّم في آخر المعالجة
         } else if (skipPay) {
           excludedPay.add(baseName(f.path));
+          _cachePut(fkey, {'k': 'pay'});
+          if (ign != 'drop') {
+            final igItem = ReceiptItem(
+              path: f.path,
+              key: fkey,
+              how: 'none',
+              ignoredDoc: true,
+            );
+            ignoredItems.add(igItem);
+            processedItems.add(igItem); // يظهر فوراً (مؤقت)
+          }
+        } else {
+          _cachePut(fkey, {'k': 'none', 'ar': autoRotate});
         }
       } catch (e) {
         warnings.add('${baseName(f.path)}: فشلت القراءة (${e.toString().split('\n').first})');
       }
 
-      if (mounted) {
-        setState(() {
-          progress = ((i + 1) / todo.length) * 0.5;
-          status = 'فحص OCR: ${i + 1} من ${todo.length}';
-        });
-      }
+      if (_scanCacheDirty >= 25) await saveScanCache();
+      if (!mounted) return;
+      setState(() {
+        progress = ((i + 1) / todo.length) * 0.5;
+        status = 'فحص OCR: ${i + 1} من ${todo.length}';
+      });
     }
 
-    consoleSummaries.value = consoleMap;
-    saveConsoleSummaries(consoleMap);
+    await saveScanCache();
+    for (final s in sysReads) {
+      if (s.amount == null) {
+        warnings.add('${s.file}: صورة سيستم (A2R Operations Console) بس مش قادر أقرا المبلغ - مش محسوبة كباتش');
+      }
+    }
     await recognizer.close();
 
+    // العناصر المؤقتة اللي ظهرت أثناء القراءة: بتتشال هنا وبتتضاف تاني مرتبة في آخر المعالجة
+    void dropProvisional() =>
+        processedItems.removeWhere((e) => rawReceipts.contains(e) || ignoredItems.contains(e));
+
+    if (stopReq) {
+      dropProvisional();
+      if (mounted) {
+        setState(() {
+          busy = false;
+          status = 'اتوقف الفحص. اضغط "بدء" لو عايز تبدأ من جديد.';
+        });
+      }
+      return;
+    }
+
+    if (rawReceipts.isEmpty) {
+      dropProvisional();
+      processedItems.addAll(ignoredItems);
+      setState(() {
+        busy = false;
+        status = 'تم فحص ${todo.length} صورة، ولم يتم العثور على إيصالات مطابقة.';
+      });
+      return;
+    }
+
+    // ═════════ المرحلة 2: التكرار وترقيم الماكينات ═════════
+    setState(() => status = 'مراجعة التكرار وترقيم الماكينات...');
+    final prio = <String, int>{'manual': 0, 'terminal': 0, 'new-terminal': 0, 'fuzzy': 1, 'file-number': 2};
     final withTid = rawReceipts.where((r) => r.tid != null && !r.userExcluded).toList();
+    withTid.sort((a, b) {
+      final c = (prio[a.how] ?? 3).compareTo(prio[b.how] ?? 3);
+      return c != 0 ? c : rawReceipts.indexOf(a).compareTo(rawReceipts.indexOf(b));
+    });
+
     final taken = <int, ReceiptItem>{};
     for (final r in withTid) {
       final n = r.orderNum!;
-      if (!taken.containsKey(n)) {
+      final prev = taken[n];
+      if (prev == null) {
         taken[n] = r;
+      } else if (r.amount > 0 &&
+          (prev.amount - r.amount).abs() < 0.005 &&
+          sameDay(prev, r)) {
+        if (r.dupDecision == 'drop') {
+          r.userExcluded = true; // انت قررت قبل كده إنه مكرر (بيفضل ظاهر وتقدر ترجّعه)
+          r.dupOf = n;
+          warnings.add('${baseName(r.path)}: إيصال مكرر للماكينة $n (استبعدته قبل كده - تقدر ترجّعه)');
+        } else if (r.dupDecision == 'keep') {
+          r.origTid = r.tid; // انت قررت قبل كده إنه باتش تاني حقيقي
+          r.tid = null;
+          r.conflict = true;
+        } else {
+          // نفس الماكينة ونفس المبلغ = مشكوك إنه مكرر: بيدخل المراجعة (مش بيتستبعد)
+          r.dupSuspect = true;
+          r.dupOf = n;
+          warnings.add('${baseName(r.path)}: نفس الماكينة $n ونفس المبلغ '
+              '${r.amount.toStringAsFixed(2)} (مشكوك إنه مكرر) - راجعه من زر المراجعة');
+        }
+      } else {
+        r.origTid = r.tid;
+        r.tid = null;
+        r.conflict = true;
       }
     }
 
-    processedItems.clear();
-    processedItems.addAll(rawReceipts);
-    await rebuildFiles();
-
-    if (mounted) {
-      setState(() {
-        busy = false;
-        progress = 1.0;
-      });
+    final usedSuffix = <String>{};
+    void giveSuffix(ReceiptItem r) {
+      var k = 2;
+      while (usedSuffix.contains('${r.origTid}:$k')) {
+        k++;
+      }
+      usedSuffix.add('${r.origTid}:$k');
+      r.tid = r.origTid;
+      r.suffix = k;
+      r.how = 'extra-batch';
     }
+
+    for (final r in rawReceipts) {
+      if (r.skip || r.userExcluded || r.tid != null || r.row == null) continue;
+      if (r.conflict &&
+          (r.how == 'terminal' || r.how == 'new-terminal' || r.how == 'fuzzy' || r.dupDecision == 'keep')) {
+        giveSuffix(r); // نفس الماكينة بمبلغ مختلف = باتش إضافي
+        continue;
+      }
+      final free = <int>[];
+      for (var n = 1; n <= machineCount; n++) {
+        if (terminals[numToTid[n]!]!.excelRow == r.row && !taken.containsKey(n)) {
+          free.add(n);
+        }
+      }
+      if (free.isNotEmpty) {
+        final n = free.first;
+        final t = numToTid[n]!;
+        r.tid = t;
+        r.orderNum = n;
+        r.unitName = terminals[t]!.unitName;
+        taken[n] = r;
+        r.how = r.conflict ? 'conflict' : 'auto-number';
+      } else if (r.origTid != null) {
+        giveSuffix(r);
+      }
+    }
+
+    final kept = rawReceipts.where((r) => !r.skip).toList();
+
+    // التاريخ الأكثر تكراراً + تحذيرات
+    final dateVotes = <String, int>{};
+    for (final r in kept) {
+      if (r.date != null) dateVotes[r.date!] = (dateVotes[r.date!] ?? 0) + 1;
+    }
+    final mainDate = mostCommon(dateVotes.keys.expand((k) => List.filled(dateVotes[k]!, k)).toList())?.key;
+
+    for (final r in kept) {
+      final nm = baseName(r.path);
+      if (mainDate != null && r.date != null && r.date != mainDate && r.dateFix == null) {
+        r.dateOdd = true; // بيدخل المراجعة
+        r.dateMain = mainDate;
+      }
+      if (r.row != null && r.amount > 0) {
+        if (!r.ok) warnings.add('$nm: ${r.unitName} = ${r.amount.toStringAsFixed(2)} (راجع المبلغ يدوياً)');
+        if (r.alt != null) {
+          warnings.add('$nm: القراءة التانية للمبلغ ${r.alt!.toStringAsFixed(2)} مختلفة عن ${r.amount.toStringAsFixed(2)} - راجع الصورة');
+        }
+        if (r.how == 'extra-batch') {
+          warnings.add('$nm: الماكينة ${r.orderNum} ظهرت في صورة تانية بمبلغ مختلف - اتحسبت كباتش إضافي ${r.suffix}');
+        } else if (r.how == 'auto-number' || r.how == 'conflict') {
+          warnings.add('$nm: رقم الماكينة اتحدد تلقائياً (${r.orderNum}) - اتأكد منه');
+        } else if (!(r.how == 'terminal' || r.how == 'fuzzy' || r.how == 'manual')) {
+          warnings.add('$nm: الوحدة اتحددت بالاسم/الميرشانت فقط');
+        }
+      } else {
+        warnings.add('$nm: مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل');
+      }
+    }
+
+    // ═════════ المرحلة 3: إعادة التسمية (على مرحلتين عشان التعارض) ═════════
+    setState(() => status = 'إعادة تسمية الصور وترتيبها...');
+    final moves = <ReceiptItem>[];
+    final newNames = <ReceiptItem, String>{};
+    var dupN = 0;
+    for (final r in kept) {
+      if (r.tid == null || r.orderNum == null) continue;
+      final ext = r.path.split('.').last;
+      final sfx = r.suffix != null
+          ? '_${r.suffix}'
+          : ((r.dupSuspect || r.userExcluded) ? '_dup${++dupN}' : '');
+      final target = '$rawImagesDir/${r.orderNum}$sfx.$ext';
+      if (r.path != target) {
+        moves.add(r);
+        newNames[r] = target;
+      }
+    }
+    for (var k = 0; k < moves.length; k++) {
+      final r = moves[k];
+      final tmp = '$rawImagesDir/__tmp$k.${r.path.split('.').last}';
+      try {
+        r.path = File(r.path).renameSync(tmp).path;
+      } catch (_) {}
+    }
+    for (final r in moves) {
+      try {
+        final dst = newNames[r]!;
+        if (File(dst).existsSync()) File(dst).deleteSync();
+        r.path = File(r.path).renameSync(dst).path;
+      } catch (_) {}
+    }
+
+    dropProvisional();
+    processedItems.addAll(kept);
+    processedItems.addAll(ignoredItems);
+    await rebuildFiles();
+    try {
+      Directory(tmpDir).deleteSync(recursive: true);
+    } catch (_) {}
+
+    if (!mounted) return;
+    setState(() {
+      busy = false;
+      progress = 1.0;
+    });
   }
+
+  Widget _card(String title, List<Widget> children) => Card(
+        margin: const EdgeInsets.only(bottom: 10),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              const SizedBox(height: 8),
+              ...children,
+            ],
+          ),
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !busy,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (!didPop && busy) {
+          // الفحص شغال: نرجّع التطبيق للخلفية بس علشان الفحص يكمّل
+          try {
+            await _chan.invokeMethod('moveToBack');
+          } catch (_) {}
+        }
+      },
+      child: _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     AppSettings.of(context);
     final xlsx = latestOutput('.xlsx');
     final pdf = latestOutput('.pdf');
     final reviewCount = processedItems.where((e) => e.needsReview).length;
+    final reviewOnlyEff = reviewOnly && reviewCount > 0;
+    final visItems = _visibleItems(reviewOnlyEff);
     _syncBadge(homeBadge, reviewCount);
-    _publishClosing(processedItems);
+    _publishClosing(processedItems, sysReads);
     homeBusyG = busy;
-
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 54,
@@ -4867,10 +6301,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           _settingsCard([
             _switchRow('فحص تلقائي (بيراقب الإيصالات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
-            _periodRow(days, busy, (d) {
-              setState(() => days = d);
-              sharedDays.value = d;
-            }),
+            const Divider(height: 4),
+            _sourceChips(context,
+                busy: busy,
+                days: days,
+                onDays: (d) {
+                  setState(() => days = d);
+                  sharedDays.value = d;
+                },
+                periodLabel: _periodLabel(),
+                sourcePath: customDir,
+                onPickSource: pickFolder,
+                onUseWhatsApp: useWhatsApp),
+            _outputCard(context,
+                busy: busy,
+                outPath: customOut ?? defaultOutputDir,
+                outIsDefault: customOut == null,
+                onPickOut: pickOutFolder,
+                onUseDefaultOut: useDefaultOut,
+                onOpenOut: () => openFolder(outputDir)),
+            _switchRow('فحص الصور المقلوبة (أبطأ)', autoRotate,
+                busy ? null : (v) => setState(() => autoRotate = v)),
           ]),
           _runAllCard(),
           _statusBox(status),
@@ -4878,6 +6329,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _statsRow(),
           const SizedBox(height: 6),
           _actionRow([
+            _quickBtn(Icons.insights, _l(context, 'التقرير', 'Report'),
+                processedItems.isEmpty && sysReads.isEmpty ? null : openClosingReport),
             _quickBtn(
                 Icons.table_chart,
                 'إكسيل',
@@ -4887,15 +6340,69 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
             _quickBtn(Icons.picture_as_pdf, 'PDF',
                 pdf == null ? null : () => openFile(pdf, 'application/pdf')),
+            _quickBtn(Icons.drive_file_move, _l(context, 'نقل', 'Move'), busy ? null : transferOutputs),
             _quickBtn(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
-            _quickBtn(Icons.fact_check, 'مراجعة ($reviewCount)', openReview),
             _quickBtn(Icons.add_photo_alternate, 'يدوي', busy ? null : pickManualImages),
           ]),
+          if (processedItems.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            _filterRowCompact(reviewOnlyEff, processedItems.length, reviewCount, (v) => setState(() => reviewOnly = v)),
+            _reviewTools(context,
+                hint: reviewCount > 0
+                    ? _l(context, '💡 اسحب إيصال المراجعة: صح ✓ في ناحية وغلط ✗ في الناحية التانية',
+                        '💡 Swipe a review receipt: OK ✓ one way, wrong ✗ the other')
+                    : '',
+                count: reviewCount,
+                reviewOnly: reviewOnlyEff,
+                busy: busy,
+                onRestOk: _markRestOk),
+            _listTools(context,
+                remaining: reviewCount,
+                total: processedItems.length,
+                controller: _searchCtl,
+                onQuery: (v) => setState(() => _q = v),
+                sort: _sort,
+                sortLabels: [
+                  _l(context, 'الترتيب الأصلي', 'Original order'),
+                  _l(context, 'رقم الماكينة', 'Machine number'),
+                  _l(context, 'المراجعة أولاً', 'Review first'),
+                  _l(context, 'المبلغ الأكبر', 'Largest amount'),
+                ],
+                onSort: (v) => setState(() => _sort = v)),
+          ],
+          _alertStrip(),
           const SizedBox(height: 10),
-          for (final item in processedItems.where((e) => !reviewOnly || e.needsReview))
+          if (processedItems.isEmpty && busy) const _SkeletonList(),
+          if (processedItems.isEmpty && !busy)
+            _emptyState(context, Icons.receipt_long, _l(context, 'مفيش إيصالات لسه', 'No receipts yet'),
+                _l(context, 'اضغط "فحص التقفيل" علشان نقرا الباتشات وصور السيستم.',
+                    'Tap "Scan closing" to read the batches and system images.'),
+                actionLabel: _l(context, 'فحص التقفيل', 'Scan closing'), onAction: () => runFullPipeline()),
+          if (processedItems.isNotEmpty && visItems.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(child: w.Text(_l(context, 'مفيش نتايج.', 'No results.'))),
+            ),
+          for (final item in visItems)
             _swipeWrap(item, Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
-              child: ListTile(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(
+                  color: item.reprintSummary
+                      ? Colors.red
+                      : (item.missingBatchClosed ? Colors.orange : Theme.of(context).colorScheme.outlineVariant),
+                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.0),
+                ),
+              ),
+              clipBehavior: Clip.antiAlias,
+              color: item.reprintSummary ? _tintBg(context, Colors.red, soft: true) : null,
+              child: AnimatedContainer(
+               duration: const Duration(milliseconds: 350),
+               decoration: BoxDecoration(
+                 border: BorderDirectional(start: BorderSide(color: _itemStatusColor(item), width: 5)),
+               ),
+               child: ListTile(
                 onTap: () => editReceipt(item),
                 leading: Image.file(
                   File(item.path),
@@ -4903,24 +6410,93 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   height: 48,
                   fit: BoxFit.cover,
                 ),
-                title: Text(
-                  'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                title: Row(
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      margin: const EdgeInsetsDirectional.only(end: 8),
+                      decoration: BoxDecoration(shape: BoxShape.circle, color: _unitColor(item.row)),
+                    ),
+                    Flexible(
+                      child: Text(
+                        item.ignoredDoc || item.ign == 'drop'
+                            ? 'مستند متجاهل - ${baseName(item.path)}'
+                            : 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    if (item.needsReview)
+                      Padding(
+                        padding: const EdgeInsetsDirectional.only(start: 6),
+                        child: Icon(Icons.swipe, size: 14, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      ),
+                    if ((_sysDiffOf(item) ?? 0) != 0)
+                      Padding(
+                        padding: const EdgeInsetsDirectional.only(start: 4),
+                        child: Icon(Icons.warning_amber, size: 16, color: _tintBorder(context, Colors.amber)),
+                      ),
+                  ],
                 ),
-                subtitle: Text(subtitleOf(item)),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (!item.ignoredDoc && item.amount > 0)
+                      w.Text('${item.amount.toStringAsFixed(2)} ج.م',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                    w.Text(_subtitleSmall(item),
+                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                    _warnChips(item),
+                  ],
+                ),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (item.userExcluded)
+                      IconButton(
+                        tooltip: tr('رجّعه (احتسبه)'),
+                        icon: const Icon(Icons.undo, color: Colors.red),
+                        onPressed: busy
+                            ? null
+                            : () async {
+                                if (item.ign == 'drop') {
+                                  keepIgnored(item);
+                                  setState(() {});
+                                } else {
+                                  keepAsExtraBatch(item, processedItems);
+                                  await rebuildFiles();
+                                }
+                              },
+                      ),
                     if (item.needsReview)
                       Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange))
+                    else if (item.ignoredDoc || item.ign == 'drop' || item.userExcluded)
+                      const Icon(Icons.remove_circle_outline, color: Colors.grey)
+                    else if (item.tid != null && item.amount > 0)
+                      const Icon(Icons.check_circle, color: Colors.green)
                     else
-                      const Icon(Icons.check_circle, color: Colors.green),
-                    IconButton(
-                      icon: Icon(Icons.edit, color: Theme.of(context).colorScheme.primary),
-                      onPressed: () => editReceipt(item),
+                      const Icon(Icons.cancel, color: Colors.red),
+                    PopupMenuButton<String>(
+                      tooltip: tr('المزيد'),
+                      padding: EdgeInsets.zero,
+                      onSelected: (v) {
+                        if (v == 'edit') {
+                          editReceipt(item);
+                        } else if (v == 'open') {
+                          openFile(item.path, 'image/*');
+                        } else if (v == 'share') {
+                          shareOneReceipt(item);
+                        }
+                      },
+                      itemBuilder: (_) => [
+                        PopupMenuItem(value: 'edit', child: w.Text(_l(context, 'تعديل', 'Edit'))),
+                        PopupMenuItem(value: 'open', child: w.Text(_l(context, 'فتح الصورة', 'Open image'))),
+                        PopupMenuItem(value: 'share', child: w.Text(_l(context, 'إرسال الصورة', 'Send image'))),
+                      ],
                     ),
                   ],
                 ),
+              ),
               ),
             )),
           const SizedBox(height: 64),
@@ -4939,15 +6515,51 @@ class FolderPicker extends StatefulWidget {
   State<FolderPicker> createState() => _FolderPickerState();
 }
 
+String? _lastPickedFolder; // آخر فولدر اتختار (في الجلسة دي)
+
 class _FolderPickerState extends State<FolderPicker> {
   late String path = widget.start;
   List<Directory> dirs = [];
   String? error;
+  String q = '';
+  final TextEditingController _search = TextEditingController();
+  final ScrollController _crumbs = ScrollController();
+  final List<List<Object>> shortcuts = []; // [أيقونة، اسم، مسار]
 
   @override
   void initState() {
     super.initState();
     load();
+    _buildShortcuts();
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    _crumbs.dispose();
+    super.dispose();
+  }
+
+  void _buildShortcuts() {
+    void add(IconData ic, String name, String p) {
+      try {
+        if (Directory(p).existsSync() && !shortcuts.any((e) => e[2] == p)) shortcuts.add([ic, name, p]);
+      } catch (_) {}
+    }
+
+    try {
+      for (final d in findWhatsAppDocDirs()) {
+        add(Icons.chat, 'واتساب - مستندات', d.path);
+        break;
+      }
+      for (final d in findWhatsAppImageDirs()) {
+        add(Icons.photo_library_outlined, 'واتساب - صور', d.path);
+        break;
+      }
+    } catch (_) {}
+    add(Icons.download, 'Download', '$root/Download');
+    add(Icons.description_outlined, 'Documents', '$root/Documents');
+    if (_lastPickedFolder != null) add(Icons.history, 'آخر اختيار', _lastPickedFolder!);
   }
 
   void load() {
@@ -4967,61 +6579,213 @@ class _FolderPickerState extends State<FolderPicker> {
     }
   }
 
-  void go(String p) => setState(() {
-        path = p;
-        load();
-      });
+  void go(String p) {
+    setState(() {
+      path = p;
+      q = '';
+      _search.clear();
+      load();
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_crumbs.hasClients) _crumbs.jumpTo(_crumbs.position.maxScrollExtent);
+    });
+  }
+
+  List<List<String>> _crumbList() {
+    final out = <List<String>>[];
+    var base = '';
+    var rest = path;
+    if (path == root || path.startsWith('$root/')) {
+      out.add(['الذاكرة', root]);
+      base = root;
+      rest = path.substring(root.length);
+    }
+    var cur = base;
+    for (final seg in rest.split('/').where((e) => e.isNotEmpty)) {
+      cur = '$cur/$seg';
+      out.add([seg, cur]);
+    }
+    if (out.isEmpty) out.add(['/', '/']);
+    return out;
+  }
+
+  Future<void> _newFolder() async {
+    final ctl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('فولدر جديد'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'اسم الفولدر'),
+          onSubmitted: (v) => Navigator.pop(c, v),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(c, ctl.text), child: const Text('إنشاء')),
+        ],
+      ),
+    );
+    final n = name?.trim() ?? '';
+    if (n.isEmpty || n.contains('/')) return;
+    try {
+      Directory('$path/$n').createSync();
+      go('$path/$n');
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: w.Text('مش قادر أعمل الفولدر ده هنا.')));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final canUp = path.length > root.length;
+    final shown = q.trim().isEmpty
+        ? dirs
+        : dirs.where((d) => baseName(d.path).toLowerCase().contains(q.trim().toLowerCase())).toList();
+    final crumbs = _crumbList();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_crumbs.hasClients) _crumbs.jumpTo(_crumbs.position.maxScrollExtent);
+    });
     return Scaffold(
-      appBar: AppBar(title: const Text('اختيار فولدر')),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(path, textDirection: TextDirection.ltr),
+      appBar: AppBar(
+        title: const Text('اختيار فولدر'),
+        actions: [
+          IconButton(
+            tooltip: 'فولدر جديد',
+            icon: const Icon(Icons.create_new_folder_outlined),
+            onPressed: _newFolder,
+          ),
+        ],
+      ),
+      bottomNavigationBar: Material(
+        elevation: 8,
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: FilledButton.icon(
+              onPressed: () {
+                _lastPickedFolder = path;
+                Navigator.pop(context, path);
+              },
+              icon: const Icon(Icons.check),
+              label: w.Text('اختيار "${baseName(path)}"', maxLines: 1, overflow: TextOverflow.ellipsis),
+              style: FilledButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 50), textStyle: const TextStyle(fontSize: 16)),
             ),
-            if (error != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Text(error!),
-              ),
-            Expanded(
+          ),
+        ),
+      ),
+      body: Column(
+        children: [
+          // مسار قابل للضغط (breadcrumb)
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: SizedBox(
+              height: 44,
               child: ListView(
+                controller: _crumbs,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 children: [
-                  if (canUp)
-                    ListTile(
-                      leading: const Icon(Icons.arrow_upward),
-                      title: const Text('..'),
-                      onTap: () => go(Directory(path).parent.path),
+                  for (var i = 0; i < crumbs.length; i++) ...[
+                    if (i > 0) Icon(Icons.chevron_right, size: 18, color: cs.onSurfaceVariant),
+                    Center(
+                      child: ActionChip(
+                        label: w.Text(crumbs[i][0], style: const TextStyle(fontSize: 13)),
+                        visualDensity: VisualDensity.compact,
+                        backgroundColor: i == crumbs.length - 1 ? cs.primaryContainer : null,
+                        onPressed: i == crumbs.length - 1 ? null : () => go(crumbs[i][1]),
+                      ),
                     ),
-                  for (final d in dirs)
-                    ListTile(
-                      leading: const Icon(Icons.folder),
-                      title: Text(baseName(d.path), textDirection: TextDirection.ltr),
-                      onTap: () => go(d.path),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          if (shortcuts.isNotEmpty)
+            SizedBox(
+              height: 42,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                children: [
+                  for (final sc in shortcuts)
+                    Padding(
+                      padding: const EdgeInsetsDirectional.only(end: 6),
+                      child: ActionChip(
+                        avatar: Icon(sc[0] as IconData, size: 18),
+                        label: w.Text(sc[1] as String, style: const TextStyle(fontSize: 13)),
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () => go(sc[2] as String),
+                      ),
                     ),
                 ],
               ),
             ),
+          if (dirs.length > 6 || q.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.all(12),
-              child: FilledButton(
-                onPressed: () => Navigator.pop(context, path),
-                child: const Text('اختيار هذا الفولدر'),
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+              child: SizedBox(
+                height: 40,
+                child: TextField(
+                  controller: _search,
+                  onChanged: (v) => setState(() => q = v),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: 'بحث في الفولدرات',
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
+                  ),
+                ),
               ),
             ),
-          ],
-        ),
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: w.Text(error!, style: TextStyle(color: cs.error)),
+            ),
+          Expanded(
+            child: ListView(
+              children: [
+                if (canUp)
+                  ListTile(
+                    leading: const Icon(Icons.arrow_upward),
+                    title: const Text('..'),
+                    onTap: () => go(Directory(path).parent.path),
+                  ),
+                for (final d in shown)
+                  ListTile(
+                    leading: const Icon(Icons.folder),
+                    title: Text(baseName(d.path), textDirection: TextDirection.ltr),
+                    onTap: () => go(d.path),
+                  ),
+                if (shown.isEmpty && error == null)
+                  Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(children: [
+                      Icon(Icons.folder_open, size: 48, color: cs.onSurfaceVariant),
+                      const SizedBox(height: 8),
+                      w.Text(q.isEmpty ? 'مفيش فولدرات جوه الفولدر ده' : 'مفيش نتايج للبحث',
+                          style: TextStyle(color: cs.onSurfaceVariant)),
+                    ]),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
+
 // ───────────────────── شاشة المراجعة ─────────────────────
+// ───────── صورة بتتكبّر (قرصة بصباعين + دبل تاب) علشان تشوف تفاصيل الباتش ─────────
 class ZoomableImage extends StatefulWidget {
   final String path;
   const ZoomableImage({super.key, required this.path});
@@ -5093,8 +6857,8 @@ class ReceiptZoomPage extends StatelessWidget {
 
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
-  final List<ReceiptItem>? allItems;
-  final bool single;
+  final List<ReceiptItem>? allItems; // كل الإيصالات (لحساب رقم الباتش الإضافي)
+  final bool single; // فتحناها من القلم لإيصال واحد
   const ReviewPage({super.key, required this.items, this.allItems, this.single = false});
 
   @override
@@ -5104,7 +6868,7 @@ class ReviewPage extends StatefulWidget {
 class _ReviewPageState extends State<ReviewPage> {
   int idx = 0;
   bool changed = false;
-  int rev = 0;
+  int rev = 0; // بيتغير لما الصورة تتدوّر علشان تتحدّث
   final done = <ReceiptItem>{};
   late TextEditingController amt;
   int? order;
@@ -5173,6 +6937,7 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // صورة متجاهلة: ادخلها كباتش، أو تجاهلها نهائي
   void resolveIgnored(bool keep) {
     final it = item;
     if (keep) {
@@ -5196,6 +6961,7 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // تاريخ مختلف: سيبه بتاريخه، أو انقله لتاريخ الأغلب
   void resolveDate(bool toMain) {
     final it = item;
     if (toMain && it.dateMain != null) it.date = it.dateMain;
@@ -5213,6 +6979,7 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // قرار الإيصال المشكوك إنه مكرر: استبعده، أو احتسبه كباتش إضافي
   void resolveDup(bool keep) {
     final it = item;
     final all = widget.allItems ?? widget.items;
@@ -5497,17 +7264,17 @@ class _ReviewPageState extends State<ReviewPage> {
           const SizedBox(height: 8),
           Row(
             children: [
+              OutlinedButton.icon(
+                onPressed: rotate,
+                icon: const Icon(Icons.rotate_right),
+                label: const Text('تدوير'),
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: FilledButton(
                   onPressed: () => save(),
                   child: Text(idx < widget.items.length - 1 ? 'حفظ والتالي' : 'حفظ'),
                 ),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton.icon(
-                onPressed: rotate,
-                icon: const Icon(Icons.rotate_right),
-                label: const Text('تدوير'),
               ),
             ],
           ),
@@ -5566,9 +7333,11 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 }
 
+
 // ───────────────────── ملفات الماكينات (PDF لكل ماكينة) ─────────────────────
 String? loadPdfDir() => _readCfg()['pdfDir'] as String?;
 
+// فولدرات مستندات واتساب (جنب فولدرات الصور)
 List<Directory> findWhatsAppDocDirs() {
   final out = <Directory>[];
   for (final d in findWhatsAppImageDirs()) {
@@ -5602,6 +7371,7 @@ void savePdfDir(String? f) {
   _writeCfg(m);
 }
 
+// الاسم الجديد: "1.أبيس.1.يوم.4.11" (وحدة فيها أكتر من ماكينة) أو "17.مديرية.الأمن.يوم.4.11"
 String machineNewName(TerminalInfo info, String day, String month) {
   final same = terminals.values.where((t) => t.excelRow == info.excelRow).toList()
     ..sort((a, b) => a.orderNum.compareTo(b.orderNum));
@@ -5617,6 +7387,9 @@ String machineNewName(TerminalInfo info, String day, String month) {
   ].join('.');
 }
 
+// ───────── عدّ إيصالات الدفع: كل إيصال دفع ليه سطر RRN (12 رقم، بيبدأ بـ 63) ─────────
+// بنقرا الصفحة على شرائح رأسية ضيقة (القراءة أدق من الصفحة كلها)، وبنجمع "نقاط ارتكاز"
+// (سطر RRN) لكل إيصال. إيصالات الإقفال والملخص ما فيهاش RRN فمبتتعدّش.
 final RegExp _dateRe = RegExp(r'(20\d{2})[^\d\n]{1,3}(\d{2})[^\d\n]{1,3}(\d{2})');
 
 String? _dayKey(String text) {
@@ -5627,6 +7400,7 @@ String? _dayKey(String text) {
   return null;
 }
 
+// null = مفيش RRN في السطر | 12 رقم = RRN كامل | 'P' = RRN مقروء ناقص
 String? _anchorOf(String t) {
   final m = RegExp(r'R{1,2}N\W{0,3}((?:\d\s?){9,12})', caseSensitive: false).firstMatch(t) ??
       RegExp(r'(?<!\d)(63(?:\d\s?){7,10})(?!\d)').firstMatch(t);
@@ -5639,13 +7413,15 @@ String? _anchorOf(String t) {
 
 const double _stripScale = 1.5;
 
+// بيقص الصفحة لـ 5 شرائح رأسية (أعمدة) متداخلة ويكبّرها. بيرجّع [عرض، ارتفاع، x0 لكل شريحة...]
 List<int> _makeStrips(String src, String prefix) {
   final im = img.decodeImage(File(src).readAsBytesSync());
   if (im == null) return [];
   final w = im.width, h = im.height;
+  // التحسين الأقصى للسرعة والدقة: 4 شرائح عريضة بدلاً من 5 أو 6.
   const n = 4;
-  final sw = w * 0.40;
-  final step = (w - sw) / (n - 1);
+  final sw = w * 0.40; // 40% من العرض
+  final step = (w - sw) / (n - 1); // مسافة التحرك
   final out = <int>[w, h];
   
   for (var i = 0; i < n; i++) {
@@ -5669,13 +7445,14 @@ class Anchor {
 
 class MCollector {
   final List<List<Anchor>> pages = [];
-  int slips = 0;
+  int slips = 0; // أوراق تعريف اتجاهلت
   final StringBuffer text = StringBuffer();
   double pageH = 3000;
 
   void add(Anchor n) {
     final list = pages.last;
     for (final a in list) {
+      // نفس الإيصال اتقرا من شريحتين متداخلتين: نفس المكان على الصفحة
       if (a.l < n.r && n.l < a.r && (a.cy - n.cy).abs() < pageH * 0.012) {
         a.rrn ??= n.rrn;
         a.day ??= n.day;
@@ -5711,6 +7488,7 @@ class MCollector {
             caseSensitive: false)
         .hasMatch(all);
 
+    // الماكينة: أكتر Terminal ID متكرر
     final tc = <String, int>{};
     for (final m in RegExp(r'(?<!\d)(\d{8})(?!\d)').allMatches(all)) {
       var c = m.group(1)!;
@@ -5721,6 +7499,7 @@ class MCollector {
         ? tc.entries.reduce((a, b) => a.value >= b.value ? a : b).key
         : (findTerminalIn([all]) ?? discoverTerminal([all]));
 
+    // اليوم الأغلب + الإيصالات اللي مش تبع نفس اليوم
     if (days.isEmpty) {
       for (final m in _dateRe.allMatches(all)) {
         final k = _dayKey(m.group(0)!);
@@ -5740,6 +7519,7 @@ class MCollector {
       }
     }
 
+    // تسلسل أرقام الإيصالات (آخر 6 أرقام من الـ RRN): أكبر مجموعة متتالية
     final nums = r.rrnDay.keys.map((k) => int.parse(k.substring(6))).toList()..sort();
     if (nums.length >= 2) {
       var bestStart = 0, bestLen = 1, start = 0;
@@ -5813,11 +7593,13 @@ void _collect(RecognizedText res, double x0, double scale, MCollector col) {
   }
 }
 
-int _tmStrips = 0, _tmOcr = 0;
+// قراءة الصفحة كلها + قراءة شرائح مكبّرة، وبعدين دمج النتايج (نفس الإيصال بيتعدّ مرة)
+int _tmStrips = 0, _tmOcr = 0; // تشخيص: مجموع الوقت (ms) لعمل الشرائح وللـ OCR
 
 Future<void> ocrPageStrips(
     TextRecognizer rec, String pngPath, String prefix, MCollector col) async {
   final sw = Stopwatch()..start();
+  // تقطيع الشرائح (Dart صرف وبطيء) بيشتغل في isolate بالتوازي مع OCR الصفحة الكاملة
   final stripsF = Isolate.run(() => _makeStrips(pngPath, prefix))
       .then<List<int>>((v) => v, onError: (_) => <int>[]);
   RecognizedText? whole;
@@ -5854,6 +7636,7 @@ Future<void> ocrPageStrips(
   _tmOcr += tWhole + (sw.elapsedMilliseconds - t1);
 }
 
+// ───────── حالة فحص إيصالات الدفع: بتتحفظ بعد كل ملف علشان لو التطبيق اتقفل يكمّل من مكانه ─────────
 final String mStatePath = '$baseDir/.app_machines.json';
 final String defaultMDest = '$baseDir/وحدات';
 
@@ -5865,6 +7648,20 @@ void saveMOut(String? f) {
   _writeCfg(m);
 }
 
+// عدد الإيصالات الإلكترونية من صورة السيستم لكل ماكينة (رقم الماكينة -> العدد). مقياس بس
+Map<int, int> sysTxnByNum = <int, int>{};
+Map<int, int> batchTxnByNum = <int, int>{}; // رقم الماكينة -> عدد الباتش فقط (من غير السيستم)
+
+// لو عدد الـ PDF = عدد السيستم (إلكترونية): ملاحظة التسلسل (RRN) متتحسبش مراجعة. ده القرار الوحيد اللي السيستم بيحسمه
+bool _sysCntMatch(MResult r) {
+  final n = r.orderNum;
+  if (n == null || r.count < 0) return false;
+  return sysTxnByNum[n] == r.count;
+}
+
+// الفرق (في عدد الإيصالات) الأقل من الرقم ده = تحذير بس، مش مراجعة. لملفات إيصالات الدفع فقط
+const int kSoftGap = 6;
+
 class MResult {
   final String pdfName;
   String srcPath = '';
@@ -5872,23 +7669,32 @@ class MResult {
   String? openPath;
   int? orderNum;
   String? newName;
-  int count = -1;
+  int count = -1; // -1 = لسه ما اتعدّش
   int tries = 0;
   String detail = '';
   final List<String> idNotes = [];
   final List<String> cntNotes = [];
-  List<String> altTids = [];
+  List<String> altTids = []; // مرشحين تانيين للماكينة (مش بيتحفظوا)
   Map<String, double> votes = {};
   String? tidUsed, dayUsed, monthUsed;
   bool idOk = true;
   bool cntOk = true;
-  int verdict = 0;
+  int verdict = 0; // 0 = لسه ما اتراجعش، 1 = صح (يفضل مع ملفات اليوم)، -1 = غلط (مستبعد)
   final TextEditingController ctl = TextEditingController();
   MResult(this.pdfName);
 
   bool get excluded => verdict < 0;
   bool get pending => count < 0 && !excluded;
-  bool get ok => verdict != 0 || (idOk && cntOk);
+  bool seqBad = false; // العدد مختلف عن تسلسل الـ RRN بـ kSoftGap إيصالات أو أكتر
+  bool get ok => verdict != 0 || (idOk && cntOk && (!seqBad || _sysCntMatch(this)));
+  // فرق بسيط (أقل من kSoftGap إيصالات، ناقص أو زيادة): الملف سليم ومش بيدخل المراجعة، بس عليه علامة تحذير ⚠️
+  bool get softWarn {
+    if (excluded || pending || verdict != 0 || !ok) return false;
+    final sl = _statsOf(this).seqLen;
+    final g = sl == null ? null : count - sl;
+    final d = _batchDiff(this);
+    return (g != null && g != 0 && g.abs() < kSoftGap) || (d != null && d != 0 && d.abs() < kSoftGap);
+  }
   String get key => '$pdfName:$size';
   List<String> get notes => [...idNotes, ...cntNotes];
 
@@ -5907,6 +7713,7 @@ class MResult {
         'cntNotes': cntNotes,
         'idOk': idOk,
         'cntOk': cntOk,
+        'seqBad': seqBad,
         'verdict': verdict,
         'exp': ctl.text,
       };
@@ -5926,6 +7733,7 @@ class MResult {
     r.cntNotes.addAll(((j['cntNotes'] as List?) ?? const []).map((e) => e.toString()));
     r.idOk = j['idOk'] != false;
     r.cntOk = j['cntOk'] != false;
+    r.seqBad = j['seqBad'] == true;
     r.verdict = (j['verdict'] as num?)?.toInt() ?? 0;
     r.ctl.text = (j['exp'] ?? '').toString();
     return r;
@@ -5955,6 +7763,7 @@ void saveMState(List<MResult> rs) {
   } catch (_) {}
 }
 
+// تعريف سريع: الماكينة (Terminal ID) + اليوم من نص صفحة أو أكتر
 class MIdent {
   String? tid, day, month;
 }
@@ -5984,6 +7793,8 @@ MIdent _identify(String all) {
   return r;
 }
 
+// ───────── تعريف الماكينة من جوه الـ PDF بس (تصويت بين الصفحات) — مفيش اعتماد على اسم الملف ─────────
+// أصوات صفحة واحدة: "TERMINAL ID" بوزن 3، أي رقم 8 خانات معروف بوزن 1، وتقريبي (غلطة رقم) بوزن 0.5
 Map<String, double> _tidVotes(String text) {
   final v = <String, double>{};
   final lab = _tidLabeled(text);
@@ -6015,7 +7826,7 @@ String _l(BuildContext c, String ar, String en) => AppSettings.of(c).isAr ? ar :
 
 class _NoteKind {
   final String key;
-  final int sev;
+  final int sev; // 2 = لازم تراجع، 1 = انتبه، 0 = معلومة
   final IconData icon;
   final String titleAr, titleEn, whyAr, whyEn, fixAr, fixEn;
   const _NoteKind(this.key, this.sev, this.icon, this.titleAr, this.titleEn, this.whyAr, this.whyEn,
@@ -6202,34 +8013,19 @@ _St _statusOf(MResult r) {
   if (r.excluded) return const _St('مستبعد', 'Excluded', Colors.grey);
   if (r.pending) return const _St('لسه ما اتعدّش', 'Not counted yet', Colors.blueGrey);
   if (r.verdict > 0) return const _St('اتراجع: صح', 'Reviewed: OK', Colors.green);
+  if (r.ok && r.softWarn) return const _St('سليم ⚠️ فرق بسيط', 'OK ⚠️ small difference', Colors.amber);
   if (r.ok) return const _St('سليم', 'OK', Colors.green);
   return const _St('محتاج مراجعة', 'Needs review', Colors.orange);
 }
 
+// الباتش = العدد اللي مكتوب في خانة "الصح" (من إيصال الباتش)، والفعلي = العدد اللي التطبيق عدّه
 int? _batchManual(MResult r) => int.tryParse(r.ctl.text.trim());
-
-// ─────────────────────────────────────────────────────────────────────────────
-// الربط الذكي مع السيستم والباتش في تاب إيصالات الدفع
-// ─────────────────────────────────────────────────────────────────────────────
-int? _batchAutoOf(MResult r) {
-  // 1. الأولوية الأولى: سيستم المرور (Console v60) بالترمنل أو بالماكينة
-  final tid = r.tidUsed ?? (r.orderNum != null ? numToTid[r.orderNum!] : null);
-  if (tid != null && consoleSummaries.value.containsKey(tid)) {
-    final cs = consoleSummaries.value[tid]!;
-    if (cs.electronicTxn > 0) return cs.electronicTxn;
-    if (cs.totalTxn > 0) return cs.totalTxn;
-  }
-  // 2. الأولوية الثانية: إجمالي معاملات الباتش البنكي من التقفيل
-  if (r.orderNum != null && closingTxn.value.containsKey(r.orderNum!)) {
-    final b = closingTxn.value[r.orderNum!];
-    if (b != null && b > 0) return b;
-  }
-  return null;
-}
-
+int? _batchAutoOf(MResult r) => r.orderNum == null ? null : closingTxn.value[r.orderNum!];
 int? _batchOf(MResult r) => _batchManual(r) ?? _batchAutoOf(r);
 bool _batchIsAuto(MResult r) => _batchManual(r) == null && _batchAutoOf(r) != null;
 
+// مطابقة الباتش: لو انت راجعت الملف يدوي وعلّمته صح ✓ يتحسب مطابق (أخضر) حتى لو العدد المقروء مختلف عن رقم الباتش.
+// null = مفيش حاجة نقارنها. الرقم اللي بتكتبه بإيدك في خانة "الصح" بيغلب الرقم التلقائي من التقفيل.
 bool? _batchMatch(MResult r) {
   if (r.excluded || r.pending) return null;
   if (r.verdict > 0) return true;
@@ -6247,34 +8043,437 @@ String _diffText(BuildContext c, int d) => d == 0
     ? _l(c, 'مطابق ✓', 'Match ✓')
     : (d > 0 ? _l(c, 'ناقص $d', 'Missing $d') : _l(c, 'زيادة ${-d}', 'Extra ${-d}'));
 
-MaterialColor _diffColor(int d) => d == 0 ? Colors.green : (d > 0 ? Colors.red : Colors.orange);
+MaterialColor _diffColor(int d) =>
+    d == 0 ? Colors.green : (d.abs() < kSoftGap ? Colors.amber : (d > 0 ? Colors.red : Colors.orange));
+
+// فرق الباتش بسيط (أقل من kSoftGap): تحذير أصفر بدل الأحمر
+bool _batchSoft(MResult r) {
+  if (r.verdict != 0) return false;
+  final d = _batchDiff(r);
+  return d != null && d != 0 && d.abs() < kSoftGap;
+}
 
 String _mSummary(BuildContext c, MResult r) {
   if (r.excluded) return _l(c, 'مستبعد (علامة غلط)', 'Excluded (marked wrong)');
   if (r.pending) return _l(c, 'لسه ما اتعدّش (اضغط بدء العد)', 'Not counted yet (tap Start counting)');
-  final b = StringBuffer('${_l(c, 'عدد المعاملات', 'Transactions')}: ${r.count}');
-  
-  // إظهار ربط السيستم بوضوح تام
-  final tid = r.tidUsed ?? (r.orderNum != null ? numToTid[r.orderNum!] : null);
-  final hasCs = tid != null && consoleSummaries.value.containsKey(tid);
-  final cs = hasCs ? consoleSummaries.value[tid] : null;
-
-  final bt = _batchOf(r);
-  final d = _batchDiff(r);
-  if (bt != null && d != null) {
-    final tag = _batchIsAuto(r)
-        ? (hasCs ? _l(c, ' (سيستم المرور)', ' (Console)') : _l(c, ' (من التقفيل)', ' (from closing)'))
-        : (_batchManual(r) != null ? _l(c, ' (يدوي)', ' (manual)') : '');
-    final res = (r.verdict > 0 && d != 0)
-        ? _l(c, 'راجعته يدوي: صح ✓', 'Manually reviewed: OK ✓')
-        : _diffText(c, d);
-    b.write('\n${_l(c, 'السيستم/الباتش', 'Target')}: $bt$tag • ${_l(c, 'الفعلي', 'Actual')}: ${r.count} • $res');
-    if (cs != null && cs.systemAmount > 0) {
-      b.write('\nمبلغ السيستم: ${cs.systemAmount.toStringAsFixed(2)} ج.م');
-    }
-  }
-  return b.toString();
+  // الأرقام دايماً إنجليزي (Dart بيكتب الأرقام ASCII حتى لو الواجهة عربي)
+  final manual = _batchManual(r);
+  final n = r.orderNum;
+  final batch = manual ?? (n == null ? null : batchTxnByNum[n]);
+  final sys = n == null ? null : sysTxnByNum[n];
+  String v(int? x) => x == null ? '—' : '$x';
+  // ملاحظة: رسالة "فرق بسيط - سليم" بقت بتظهر جوه تفاصيل الكارت بس
+  return '${_l(c, 'عدد الإيصالات', 'Receipts')}: ${r.count}\n'
+      '${_l(c, 'الباتش', 'Batch')}: ${v(batch)}\n'
+      '${_l(c, 'السيستم', 'System')}: ${v(sys)}';
 }
+
+// ───────── كارت الماكينة (تاب إيصالات الدفع): مربعات أرقام + شارات ─────────
+int? _mBatchShown(MResult r) {
+  final manual = _batchManual(r);
+  final n = r.orderNum;
+  return manual ?? (n == null ? null : batchTxnByNum[n]);
+}
+
+int? _mSysShown(MResult r) => r.orderNum == null ? null : sysTxnByNum[r.orderNum!];
+
+class _MName {
+  final String order, unit, date;
+  final String? idx;
+  const _MName(this.order, this.unit, this.idx, this.date);
+}
+
+// اسم الملف: رقم.الوحدة[.ترتيب].يوم.يوم.شهر  ←  بنفصله علشان نعرضه على سطرين
+_MName? _splitMName(String? name) {
+  if (name == null) return null;
+  final parts = name.split('.');
+  final di = parts.lastIndexOf('يوم');
+  if (di < 2 || parts.length - di < 3) return null;
+  var head = parts.sublist(1, di);
+  String? idx;
+  if (head.length >= 2 && RegExp(r'^\d+$').hasMatch(head.last)) {
+    idx = head.last;
+    head = head.sublist(0, head.length - 1);
+  }
+  return _MName(parts.first, head.join(' '), idx, '${parts[di + 1]}.${parts[di + 2]}');
+}
+
+Widget _mTitle(BuildContext c, MResult r) {
+  final n = _splitMName(r.newName);
+  final cs = Theme.of(c).colorScheme;
+  final main = n == null ? (r.newName ?? '؟ ${r.pdfName}') : '${n.unit}${n.idx != null ? ' ${n.idx}' : ''}';
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(children: [
+        if (r.softWarn)
+          Padding(
+            padding: const EdgeInsetsDirectional.only(end: 4),
+            child: Icon(Icons.warning_amber, size: 18, color: _tintBorder(c, Colors.amber)),
+          ),
+        Flexible(
+          child: Text(main,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  decoration: r.excluded ? TextDecoration.lineThrough : null)),
+        ),
+        if (!r.ok && !r.excluded)
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 6),
+            child: Icon(Icons.swipe, size: 14, color: cs.onSurfaceVariant),
+          ),
+      ]),
+      if (n != null)
+        Text('${_l(c, 'ماكينة', 'Machine')} ${n.order} • ${n.date}',
+            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+    ],
+  );
+}
+
+Widget _statBox(BuildContext c, String label, String value, MaterialColor? tone) {
+  final cs = Theme.of(c).colorScheme;
+  return Expanded(
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4),
+      decoration: BoxDecoration(
+        color: tone == null ? cs.surfaceContainerHighest.withAlpha(120) : _tintBg(c, tone),
+        borderRadius: BorderRadius.circular(8),
+        border: tone == null ? null : Border.all(color: _tintBorder(c, tone), width: 0.8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(value,
+              style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.bold, color: tone == null ? null : _tintFg(c, tone))),
+          Text(label, style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+        ],
+      ),
+    ),
+  );
+}
+
+// شارة تحذير صغيرة (بدل سطور النص الطويلة)
+Widget _flagChip(BuildContext c, String text, MaterialColor col) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: _tintBg(c, col),
+        border: Border.all(color: _tintBorder(c, col), width: 0.8),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(text,
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _tintFg(c, col))),
+    );
+
+Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
+  if (r.excluded || r.pending) {
+    return Text(
+        r.pending && busy
+            ? _l(c, 'بيتعدّ...', 'Counting...')
+            : (r.pending ? _l(c, 'لسه ما اتعدّش', 'Not counted yet') : _mSummary(c, r)),
+        style: TextStyle(fontSize: 12, color: Theme.of(c).colorScheme.onSurfaceVariant));
+  }
+  final match = _batchMatch(r);
+  final soft = _batchSoft(r);
+  final batch = _mBatchShown(r);
+  final sys = _mSysShown(r);
+  String v(int? x) => x == null ? '—' : '$x';
+  MaterialColor? gap(int? x) {
+    if (r.verdict > 0 || x == null || x == r.count) return null;
+    return (x - r.count).abs() < kSoftGap ? Colors.amber : Colors.red;
+  }
+
+  final MaterialColor? cTone = r.verdict > 0
+      ? Colors.green
+      : (match == null ? null : (match ? Colors.green : (soft ? Colors.amber : Colors.red)));
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(children: [
+          _statBox(c, _l(c, 'الإيصالات', 'Receipts'), '${r.count}', cTone),
+          const SizedBox(width: 6),
+          _statBox(c, _l(c, 'الباتش', 'Batch'), v(batch), gap(batch)),
+          const SizedBox(width: 6),
+          _statBox(c, _l(c, 'السيستم', 'System'), v(sys), gap(sys)),
+        ]),
+      ),
+      if (r.verdict > 0 || r.notes.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Wrap(spacing: 6, runSpacing: 4, children: [
+            if (r.verdict > 0) _flagChip(c, _l(c, '✓ اتراجع: صح', '✓ Reviewed: OK'), Colors.green),
+            if (r.notes.isNotEmpty)
+              _flagChip(c, _l(c, '⚠️ ${r.notes.length} ملاحظة', '⚠️ ${r.notes.length} note(s)'), Colors.orange),
+          ]),
+        ),
+    ],
+  );
+}
+
+Color _mStripColor(MResult r) {
+  if (r.excluded) return Colors.grey;
+  if (r.pending) return Colors.blueGrey;
+  final m = _batchMatch(r);
+  if (r.verdict > 0 || m == true) return Colors.green;
+  if (m == false) return _batchSoft(r) ? Colors.amber : Colors.red;
+  return r.ok ? Colors.green : Colors.orange;
+}
+
+Color _itemStatusColor(ReceiptItem i) {
+  if (i.reprintSummary) return Colors.red;
+  if (i.needsReview) return Colors.orange;
+  if (i.ignoredDoc || i.ign == 'drop' || i.userExcluded) return Colors.grey;
+  if (i.tid != null && i.amount > 0) return Colors.green;
+  return Colors.red;
+}
+
+// ───────── أدوات القوائم: عدّاد المراجعة + بحث + ترتيب + حالة فاضية + هيكل تحميل ─────────
+// true = كل صفحة في الـ PDF بنسبة الباتش نفسه (بتملا عرض الشاشة من غير تكبير).
+// false = رجوع لصفحات A4 زي الأول.
+const bool kFitPageToReceipt = true;
+
+// بيقرا أبعاد صورة JPEG من الهيدر من غير ما يفكها. null لو مش JPEG.
+List<int>? _jpegSize(Uint8List b) {
+  if (b.length < 4 || b[0] != 0xFF || b[1] != 0xD8) return null;
+  var i = 2;
+  while (i + 9 < b.length) {
+    if (b[i] != 0xFF) {
+      i++;
+      continue;
+    }
+    final m = b[i + 1];
+    if (m == 0xFF) {
+      i++;
+      continue;
+    }
+    if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) {
+      i += 2;
+      continue;
+    }
+    if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+      final h = (b[i + 5] << 8) | b[i + 6];
+      final w0 = (b[i + 7] << 8) | b[i + 8];
+      return (w0 > 0 && h > 0) ? <int>[w0, h] : null;
+    }
+    i += 2 + ((b[i + 2] << 8) | b[i + 3]);
+  }
+  return null;
+}
+
+void _stableSort<T>(List<T> l, int Function(T, T) cmp) {
+  final idx = <T, int>{for (var i = 0; i < l.length; i++) l[i]: i};
+  l.sort((a, b) {
+    final c = cmp(a, b);
+    return c != 0 ? c : idx[a]!.compareTo(idx[b]!);
+  });
+}
+
+Widget _listTools(
+  BuildContext context, {
+  required int remaining,
+  required int total,
+  required TextEditingController controller,
+  required void Function(String) onQuery,
+  required int sort,
+  required List<String> sortLabels,
+  required void Function(int) onSort,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  final done = total - remaining;
+  final allOk = remaining == 0;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (total > 0)
+        Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(children: [
+                Expanded(
+                  child: w.Text(
+                      allOk
+                          ? _l(context, '✅ كله تمام - مفيش حاجة للمراجعة', '✅ All good - nothing to review')
+                          : _l(context, 'فاضل $remaining للمراجعة من $total', '$remaining left to review of $total'),
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: allOk ? _tintFg(context, Colors.green) : _tintFg(context, Colors.orange))),
+                ),
+                w.Text('${(done * 100 / total).round()}%',
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+              ]),
+              const SizedBox(height: 4),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: LinearProgressIndicator(
+                  value: done / total,
+                  minHeight: 6,
+                  color: allOk ? Colors.green : Colors.orange,
+                ),
+              ),
+            ],
+          ),
+        ),
+      Row(children: [
+        Expanded(
+          child: SizedBox(
+            height: 40,
+            child: TextField(
+              controller: controller,
+              onChanged: onQuery,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: _l(context, 'بحث: وحدة / رقم ماكينة / مبلغ', 'Search: unit / machine / amount'),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: controller.text.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () {
+                          controller.clear();
+                          onQuery('');
+                        },
+                      ),
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
+              ),
+            ),
+          ),
+        ),
+        PopupMenuButton<int>(
+          tooltip: _l(context, 'ترتيب', 'Sort'),
+          icon: Icon(Icons.sort, color: sort == 0 ? null : cs.primary),
+          onSelected: onSort,
+          itemBuilder: (_) => [
+            for (var i = 0; i < sortLabels.length; i++)
+              CheckedPopupMenuItem<int>(value: i, checked: sort == i, child: w.Text(sortLabels[i])),
+          ],
+        ),
+      ]),
+      const SizedBox(height: 4),
+    ],
+  );
+}
+
+Widget _emptyState(BuildContext context, IconData icon, String title, String sub,
+    {String? actionLabel, VoidCallback? onAction}) {
+  final cs = Theme.of(context).colorScheme;
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 24),
+    child: Column(
+      children: [
+        CircleAvatar(
+          radius: 40,
+          backgroundColor: cs.primaryContainer,
+          child: Icon(icon, size: 40, color: cs.onPrimaryContainer),
+        ),
+        const SizedBox(height: 16),
+        w.Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 6),
+        w.Text(sub, textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+        if (actionLabel != null && onAction != null) ...[
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: onAction,
+            icon: const Icon(Icons.play_arrow),
+            label: w.Text(actionLabel),
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 48), padding: const EdgeInsets.symmetric(horizontal: 24)),
+          ),
+        ],
+      ],
+    ),
+  );
+}
+
+// هيكل تحميل نابض أثناء أول فحص (بدل قائمة فاضية)
+class _SkeletonList extends StatefulWidget {
+  const _SkeletonList();
+  @override
+  State<_SkeletonList> createState() => _SkeletonListState();
+}
+
+class _SkeletonListState extends State<_SkeletonList> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final base = cs.surfaceContainerHighest;
+    Widget bar(double wd, double h) => Container(
+          width: wd,
+          height: h,
+          decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(6)),
+        );
+    return FadeTransition(
+      opacity: Tween<double>(begin: 0.35, end: 1).animate(_c),
+      child: Column(
+        children: [
+          for (var i = 0; i < 4; i++)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(children: [
+                  Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(color: base, borderRadius: BorderRadius.circular(8))),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [bar(140, 14), const SizedBox(height: 8), bar(double.infinity, 28)],
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// أزرار كبيرة لتقرير الإيصال (صح / غلط) + أزرار ثانوية
+Widget _bigVerdict(BuildContext c, IconData icon, String label, MaterialColor col, VoidCallback? onTap,
+        {bool selected = false}) =>
+    FilledButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 24),
+      label: w.Text(label),
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(0, 58),
+        textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        backgroundColor: selected ? col.shade700 : _tintBg(c, col, strong: true),
+        foregroundColor: selected ? Colors.white : _tintFg(c, col),
+      ),
+    );
+
+Widget _bigAct(IconData icon, String label, VoidCallback? onTap) => FilledButton.tonalIcon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 22),
+      label: w.Text(label),
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(0, 50),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      ),
+    );
 
 Widget _statusChip(BuildContext c, _St st) => Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
@@ -6369,9 +8568,6 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
             color: r.count == stats.seqLen ? Colors.green : Colors.orange),
     ];
 
-    final tid = r.tidUsed ?? (r.orderNum != null ? numToTid[r.orderNum!] : null);
-    final csItem = (tid != null && consoleSummaries.value.containsKey(tid)) ? consoleSummaries.value[tid] : null;
-
     return Scaffold(
       appBar: AppBar(title: w.Text(_l(context, 'تقرير الإيصال', 'Receipt report'))),
       body: ListView(
@@ -6409,19 +8605,14 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 child: Text(r.detail, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
               ),
           ]),
-          section(_l(context, 'مطابقة سيستم المرور والباتش', 'Reconciliation'), [
-            if (csItem != null) ...[
-              kv('إيصالات إلكترونية بالسيستم', '${csItem.electronicTxn} عملية', color: Colors.blue),
-              kv('إجمالي مبالغ السيستم', '${csItem.systemAmount.toStringAsFixed(2)} ج.م', color: Colors.green),
-              const Divider(height: 12),
-            ],
+          section(_l(context, 'ربط الباتش', 'Batch link'), [
             TextField(
               controller: r.ctl,
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
                 isDense: true,
-                labelText: _l(context, 'عدد معاملات الباتش / السيستم (اكتب رقم لو عايز تغيّره)',
-                    'Batch / Console transaction count (type a number to override)'),
+                labelText: _l(context, 'عدد معاملات الباتش (بيتقري من التقفيل، اكتب رقم لو عايز تغيّره)',
+                    'Batch transaction count (read from closing; type a number to override)'),
                 hintText: _batchAutoOf(r)?.toString(),
               ),
               onChanged: (_) {
@@ -6432,8 +8623,8 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
             const SizedBox(height: 8),
             if (bd == null || bt == null)
               w.Text(
-                  _l(context, 'مفيش عدد باتش أو سيستم مسجل لماكينة دي. اكتبه هنا علشان نقارنه بالعدد الفعلي.',
-                      'No batch or system count found. Enter it here to compare with actual count.'),
+                  _l(context, 'مفيش عدد باتش اتقرا من التقفيل لماكينة دي. اكتبه هنا علشان نقارنه بالعدد الفعلي.',
+                      'No batch count was read from closing for this machine. Enter it here to compare with the actual count.'),
                   style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
             else
               Container(
@@ -6445,34 +8636,61 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 ),
                 child: Column(
                   children: [
-                    kv(_l(context, 'المستهدف (سيستم/باتش)', 'Target'),
-                        '$bt${_batchIsAuto(r) ? (csItem != null ? ' (سيستم المرور)' : ' (تلقائي)') : ''}'),
-                    kv(_l(context, 'الفعلي بالملف', 'Actual'), '${r.count}'),
+                    kv(_l(context, 'الباتش', 'Batch'),
+                        '$bt${_batchIsAuto(r) ? _l(context, ' (من التقفيل/السيستم)', ' (from closing/system)') : ''}'),
+                    kv(_l(context, 'الفعلي', 'Actual'), '${r.count}'),
                     kv(
                         _l(context, 'الفرق', 'Difference'),
                         '${_diffText(context, bd)}${r.verdict > 0 && bd != 0 ? _l(context, ' • راجعته يدوي: صح ✓', ' • manually reviewed: OK ✓') : ''}',
                         color: _tintFg(context, r.verdict > 0 ? Colors.green : _diffColor(bd))),
+                    if (r.softWarn)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: w.Text(
+                            _l(context, '⚠️ فرق بسيط (أقل من $kSoftGap إيصالات) - سليم ومش محتاج مراجعة',
+                                '⚠️ Small difference (under $kSoftGap receipts) - OK, no review needed'),
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                      ),
                   ],
                 ),
               ),
           ]),
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Wrap(
-              alignment: WrapAlignment.center,
-              spacing: 6,
-              runSpacing: 6,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Column(
               children: [
-                _mini(Icons.picture_as_pdf, _l(context, 'فتح الملف', 'Open file'), widget.onOpenPdf, filled: true),
-                _mini(Icons.check, _l(context, 'صح ✓', 'OK ✓'), !can ? null : () { widget.onVerdict(1); setState(() {}); }),
-                _mini(Icons.close, _l(context, 'غلط ✗', 'Wrong ✗'), !can ? null : () { widget.onVerdict(-1); setState(() {}); }),
-                if (r.verdict != 0)
-                  _mini(Icons.undo, _l(context, 'إلغاء العلامة', 'Clear mark'), !can ? null : () { widget.onVerdict(0); setState(() {}); }),
-                _mini(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can ? null : () {
-                  widget.onRecount();
-                  setState(() {});
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".', 'Marked for counting. Go back and tap "Start counting".'))));
-                }),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _bigVerdict(context, Icons.check_circle_outline, _l(context, 'صح ✓', 'OK ✓'), Colors.green,
+                          !can ? null : () { HapticFeedback.lightImpact(); widget.onVerdict(1); setState(() {}); },
+                          selected: r.verdict > 0),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _bigVerdict(context, Icons.highlight_off, _l(context, 'غلط ✗', 'Wrong ✗'), Colors.red,
+                          !can ? null : () { HapticFeedback.lightImpact(); widget.onVerdict(-1); setState(() {}); },
+                          selected: r.verdict < 0),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    _bigAct(Icons.picture_as_pdf, _l(context, 'فتح الملف', 'Open file'), widget.onOpenPdf),
+                    if (r.verdict != 0)
+                      _bigAct(Icons.undo, _l(context, 'إلغاء العلامة', 'Clear mark'),
+                          !can ? null : () { widget.onVerdict(0); setState(() {}); }),
+                    _bigAct(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can ? null : () {
+                      widget.onRecount();
+                      setState(() {});
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".', 'Marked for counting. Go back and tap "Start counting".'))));
+                    }),
+                  ],
+                ),
               ],
             ),
           ),
@@ -6555,7 +8773,7 @@ class MachinesReportPage extends StatefulWidget {
 }
 
 class _MachinesReportPageState extends State<MachinesReportPage> {
-  int filter = 0;
+  int filter = 0; // 0 الكل، 1 مراجعة، 2 فروق الباتش
 
   @override
   Widget build(BuildContext context) {
@@ -6569,11 +8787,12 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
     final pend = all.where((r) => r.pending).length;
     final linked = counted.where((r) => _batchOf(r) != null).toList();
     final matched = linked.where((r) => _batchMatch(r) == true).length;
-    final diffs = linked.length - matched;
+    final softN = linked.where(_batchSoft).length;
+    final diffs = linked.length - matched - softN;
     final batchSum = linked.fold<int>(0, (a, r) => a + _batchOf(r)!);
     final actualSum = linked.fold<int>(0, (a, r) => a + r.count);
     final shown = all
-        .where((r) => filter == 0 || (filter == 1 && !r.ok) || (filter == 2 && _batchMatch(r) == false))
+        .where((r) => filter == 0 || (filter == 1 && !r.ok) || (filter == 2 && _batchMatch(r) == false && !_batchSoft(r)))
         .toList();
 
     Widget stat(String label, String value, MaterialColor c) => Container(
@@ -6628,20 +8847,23 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  w.Text(_l(context, 'ربط الباتش والسيستم', 'Batch & Console Link'),
+                  w.Text(_l(context, 'ربط الباتش', 'Batch link'),
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                   const SizedBox(height: 6),
                   if (linked.isEmpty)
                     w.Text(
-                        _l(context, 'عدد الباتش والسيستم بيتقري تلقائي. لو ما ظهرش اكتبه في خانة "الصح".',
-                            'Target count is read automatically. If missing, type it in "Correct".'),
+                        _l(context, 'عدد الباتش بيتقري تلقائي من إيصالات تاب التقفيل. لو ما ظهرش اكتبه في خانة "الصح" أو في تقرير الإيصال.',
+                            'The batch count is read automatically from the closing tab receipts. If it is missing, type it in the "Correct" field or in the receipt report.'),
                         style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
                   else ...[
                     kv(_l(context, 'ماكينات مربوطة', 'Linked machines'), '${linked.length} / ${counted.length}'),
                     kv(_l(context, 'مطابقة', 'Matching'), '$matched', color: Colors.green),
                     kv(_l(context, 'فيها فرق', 'With a difference'), '$diffs',
                         color: diffs > 0 ? Colors.red : Colors.green),
-                    kv(_l(context, 'إجمالي المستهدف', 'Target total'), '$batchSum'),
+                    if (softN > 0)
+                      kv(_l(context, 'فرق بسيط (أقل من $kSoftGap) ⚠️', 'Small difference (under $kSoftGap) ⚠️'), '$softN',
+                          color: Colors.amber),
+                    kv(_l(context, 'إجمالي الباتشات', 'Batch total'), '$batchSum'),
                     kv(_l(context, 'إجمالي الفعلي', 'Actual total'), '$actualSum'),
                     kv(_l(context, 'صافي الفرق', 'Net difference'), _diffText(context, batchSum - actualSum),
                         color: _tintFg(context, _diffColor(batchSum - actualSum))),
@@ -6708,6 +8930,217 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
   }
 }
 
+class ClosingReportPage extends StatefulWidget {
+  final List<ReceiptItem> items;
+  final List<SysTotal> sysReads;
+  final List<int> missing;
+  final List<String> warnings;
+  final String Function(ReceiptItem) subtitleOf;
+  final Future<void> Function(ReceiptItem) onOpen;
+  const ClosingReportPage({
+    super.key,
+    required this.items,
+    required this.sysReads,
+    required this.missing,
+    required this.warnings,
+    required this.subtitleOf,
+    required this.onOpen,
+  });
+
+  @override
+  State<ClosingReportPage> createState() => _ClosingReportPageState();
+}
+
+class _ClosingReportPageState extends State<ClosingReportPage> {
+  @override
+  Widget build(BuildContext context) {
+    AppSettings.of(context);
+    final cs = Theme.of(context).colorScheme;
+    final items = widget.items;
+    final counted = items.where((e) => !e.userExcluded && !e.ignoredDoc && e.ign != 'drop' && e.amount > 0).toList();
+    final total = counted.fold<double>(0, (a, e) => a + e.amount);
+    final review = items.where((e) => e.needsReview).toList();
+
+    // أحدث صورة سيستم لكل (ترمنل + تاريخ)، ومقارنتها بمجموع باتشات الماكينة
+    final best = <String, SysTotal>{};
+    for (final s in widget.sysReads) {
+      if (s.tid == null || s.amount == null) continue;
+      final k = '${s.tid}|${s.date ?? ''}';
+      final p = best[k];
+      if (p == null || s.printed.compareTo(p.printed) > 0) best[k] = s;
+    }
+    final sysList = best.values.toList()
+      ..sort((a, b) => (terminals[a.tid]?.orderNum ?? 999).compareTo(terminals[b.tid]?.orderNum ?? 999));
+    var sysDiffs = 0;
+    final sysRows = <Widget>[];
+    for (final s in sysList) {
+      final t = terminals[s.tid];
+      final nm = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : 'ترمنل ${s.tid}';
+      var tot = 0.0;
+      var n = 0;
+      if (t != null) {
+        for (final x in counted) {
+          if (x.counts && x.orderNum == t.orderNum) {
+            tot += x.amount;
+            n++;
+          }
+        }
+      }
+      final diff = round2(tot - s.amount!);
+      final okMatch = diff == 0;
+      if (!okMatch) sysDiffs++;
+      sysRows.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: w.Text(
+                  '$nm${s.date != null ? ' (${s.date})' : ''}\n${_fmtMoney(s.amount!)} ج.م${n > 1 ? ' • مجموع $n باتشات' : ''}${s.txn != null ? '\nإيصالات إلكترونية: ${s.txn}${s.txnAll != null && s.txnAll != s.txn ? ' (إجمالي العمليات ${s.txnAll})' : ''}' : ''}',
+                  style: const TextStyle(fontSize: 13)),
+            ),
+            w.Text(okMatch ? '✅ مطابق' : '⚠️ فرق ${diff > 0 ? '+' : ''}${diff.toStringAsFixed(2)}',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: _tintFg(context, okMatch ? Colors.green : Colors.orange))),
+          ],
+        ),
+      ));
+    }
+
+    Widget stat(String label, String value, MaterialColor c) => Container(
+          width: 108,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          decoration: BoxDecoration(
+            color: _tintBg(context, c, soft: true),
+            border: Border.all(color: _tintBorder(context, c)),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Column(
+            children: [
+              w.Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _tintFg(context, c))),
+              const SizedBox(height: 2),
+              w.Text(label, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: _tintFg(context, c))),
+            ],
+          ),
+        );
+
+    Widget box(MaterialColor c, List<Widget> kids, {bool soft = false}) => Container(
+          margin: const EdgeInsets.only(top: 8),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: _tintBg(context, c, soft: soft),
+            border: Border.all(color: _tintBorder(context, c)),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: kids),
+        );
+
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+      appBar: AppBar(
+        title: w.Text(_l(context, 'تقرير التقفيل', 'Closing report')),
+        bottom: TabBar(tabs: [
+          Tab(text: _l(context, 'ملخص', 'Summary')),
+          Tab(text: '${_l(context, 'مراجعة', 'Review')} (${review.length + widget.warnings.length})'),
+        ]),
+      ),
+      body: TabBarView(children: [
+        ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              stat(_l(context, 'إيصالات', 'Receipts'), '${counted.length}', Colors.blue),
+              stat(_l(context, 'الإجمالي', 'Total'), total.toStringAsFixed(2), Colors.green),
+              stat(_l(context, 'ناقص', 'Missing'), '${widget.missing.length}',
+                  widget.missing.isNotEmpty ? Colors.amber : Colors.green),
+              stat(_l(context, 'مراجعة', 'Review'), '${review.length}',
+                  review.isNotEmpty ? Colors.orange : Colors.green),
+              stat(_l(context, 'مبالغ السيستم', 'System amounts'), '${sysList.length}', Colors.blueGrey),
+              stat(_l(context, 'فروق السيستم', 'System differences'), '$sysDiffs',
+                  sysDiffs > 0 ? Colors.red : Colors.green),
+            ],
+          ),
+          if (sysList.isNotEmpty)
+            box(Colors.blue, [
+              w.Text('🖥️ ${_l(context, 'مبالغ السيستم', 'System amounts')} (${sysList.length})',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              ...sysRows,
+            ], soft: true),
+          if (widget.missing.isNotEmpty)
+            box(Colors.amber, [
+              w.Text('⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} (${widget.missing.length} ${_l(context, 'من', 'of')} ${terminals.length}):',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, Colors.amber))),
+              const SizedBox(height: 4),
+              w.Text(
+                  widget.missing
+                      .map((n) {
+                        final tid = numToTid[n];
+                        return '$n (${tid == null ? '' : terminals[tid]?.unitName ?? ''})';
+                      })
+                      .join(' ، '),
+                  style: const TextStyle(fontSize: 13)),
+            ]),
+          const SizedBox(height: 16),
+        ],
+      ),
+      ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
+          if (widget.warnings.isNotEmpty)
+            box(Colors.orange, [
+              w.Text('${_l(context, 'ملاحظات للمراجعة', 'Notes for review')} (${widget.warnings.length}):',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              for (final x in widget.warnings)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: w.Text('• $x', style: const TextStyle(fontSize: 12)),
+                ),
+            ], soft: true),
+          const SizedBox(height: 10),
+          w.Text('${_l(context, 'إيصالات محتاجة مراجعة', 'Receipts needing review')} (${review.length})',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          const SizedBox(height: 4),
+          if (review.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Center(
+                  child: w.Text(_l(context, 'مفيش إيصالات محتاجة مراجعة.', 'No receipts need review.'),
+                      style: TextStyle(color: cs.onSurfaceVariant))),
+            ),
+          for (final it in review)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 2),
+              child: ListTile(
+                onTap: () async {
+                  await widget.onOpen(it);
+                  if (mounted) setState(() {});
+                },
+                leading: Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange)),
+                title: w.Text(
+                    it.ignoredDoc || it.ign == 'drop'
+                        ? 'مستند متجاهل - ${baseName(it.path)}'
+                        : 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? 'وحدة غير معروفة'}',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: w.Text(widget.subtitleOf(it), style: const TextStyle(fontSize: 12)),
+              ),
+            ),
+          const SizedBox(height: 16),
+        ],
+      ),
+      ]),
+      ),
+    );
+  }
+}
+
 class MachinesPage extends StatefulWidget {
   const MachinesPage({super.key});
 
@@ -6716,11 +9149,14 @@ class MachinesPage extends StatefulWidget {
 }
 
 class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver {
-  String? pdfDir;
+  String? pdfDir; // null = مستندات واتساب (تلقائي)
   int days = 0;
   bool skipDone = true;
   bool reviewOnly = false;
-  bool namingDone = false;
+  String _q = '';
+  int _sort = 0;
+  final TextEditingController _searchCtl = TextEditingController();
+  bool namingDone = false; // التسمية خلصت (حتى لو العد لسه شغال): زرار الإرسال يتفعل
   bool busy = false;
   bool stopReq = false;
   bool settingsOpen = false;
@@ -6729,12 +9165,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   final List<MResult> results = [];
   AppLifecycleState _life = AppLifecycleState.resumed;
   String destDir = loadMOut();
-  String _curLabel = '';
+  String _curLabel = ''; // اسم الملف اللي بيتعد دلوقتي (للتقدّم صفحة صفحة)
   bool autoScan = false;
   Timer? _autoTimer;
   String _doneSig = '';
   String _pendSig = '';
 
+  // ───── فحص تلقائي: بيراقب ملفات PDF الجديدة ويفحصها لوحده (زي التقفيل) ─────
   String _scanSig() {
     try {
       final dirs = pdfDir != null ? [Directory(pdfDir!)] : findWhatsAppDocDirs();
@@ -6757,7 +9194,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           }
           if (!isPdf || _isAppReportName(b)) continue;
           final len = e.lengthSync();
-          if (skipDone && have.contains('$b:$len')) continue;
+          if (skipDone && have.contains('$b:$len')) continue; // اتفحص قبل كده
           n++;
           size += len;
           final ms = fd.millisecondsSinceEpoch;
@@ -6800,7 +9237,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       return;
     }
     if (sig != _pendSig) {
-      _pendSig = sig;
+      _pendSig = sig; // لسه الملفات بتنزل: نستنى الدورة الجاية
       return;
     }
     _pendSig = '';
@@ -6822,6 +9259,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
+  // ⚡ عدّ متوازي (تجريبي): نفس العد بالظبط بس بيقرا صفحتين مع بعض. لو طلع مش دقيق نمسحه (دي + كتلة par في _countOneFast + الزرار)
   bool _parCount = false;
 
   Future<void> _startCountParallel() async {
@@ -6834,13 +9272,36 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
+  // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
+  List<MResult> _visibleResults() {
+    var l = results.where((r) => !reviewOnly || !r.ok).toList();
+    final q = _q.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      l = l
+          .where((r) => [r.newName ?? '', r.pdfName, '${r.orderNum ?? ''}'].any((t) => t.toLowerCase().contains(q)))
+          .toList();
+    }
+    switch (_sort) {
+      case 1:
+        _stableSort<MResult>(l, (a, b) => (a.orderNum ?? 999).compareTo(b.orderNum ?? 999));
+        break;
+      case 2:
+        _stableSort<MResult>(l, (a, b) => (_batchDiff(b)?.abs() ?? -1).compareTo(_batchDiff(a)?.abs() ?? -1));
+        break;
+      case 3:
+        _stableSort<MResult>(l, (a, b) => b.count.compareTo(a.count));
+        break;
+    }
+    return l;
+  }
+
   Future<void> _startCountAll({bool auto = false}) async {
     _doneSig = _scanSig();
     if (!auto) {
       for (final r in results) {
         if (r.count <= 0 && r.verdict == 0) {
           r.count = -1;
-          r.tries = 0;
+          r.tries = 0; // من غير ده الملف اللي فشل قبل كده بيتخطّى على طول
           r.cntNotes.clear();
         }
       }
@@ -6848,6 +9309,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     await start(count: true);
   }
 
+  // ملخص العد (نفس رسالة "اكتمل العد")
   String _countLine() {
     final pend = results.where((r) => r.pending).length;
     final total = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
@@ -6869,13 +9331,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
     closingTxn.addListener(_onClosing);
-    consoleSummaries.addListener(_onClosing); // استماع لتحديثات السيستم لتحديث الواجهة فوراً
     results.addAll(loadMState());
     results.sort(_cmpM);
     final pend = results.where((r) => r.pending).length;
     if (results.isNotEmpty) {
       status = pend > 0
-          ? 'فيه $pend ملف لسه ما اتعدّش. اضغط "بدء العد" لما تحب.'
+          ? 'فيه $pend ملف لسه ما اتعدّش. اضغط \"بدء العد\" لما تحب.'
           : 'آخر نتيجة: ${results.length} ملف.';
     }
   }
@@ -6889,7 +9350,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     closingTxn.removeListener(_onClosing);
-    consoleSummaries.removeListener(_onClosing);
     WidgetsBinding.instance.removeObserver(this);
     for (final r in results) {
       r.ctl.dispose();
@@ -6964,7 +9424,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     try {
       final paths = await pickFilesViaChooser(context,
           mime: 'application/pdf', title: 'اختر تطبيق الملفات', prefKey: 'defPdf');
-      if (paths == null) return;
+      if (paths == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: w.Text('منتقي الملفات مش متاح في النسخة دي (الجزء الـ native ناقص).')),
+          );
+        }
+        return;
+      }
       if (paths.isNotEmpty) await start(manualPaths: paths);
     } catch (e) {
       _dbg('pickManualPdfs error: $e');
@@ -7014,6 +9481,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
+  // نقل PDF الإيصالات اللي اتفحصت واتسمّت وبقت تمام لفولدر أختاره من التليفون
   Future<void> transferGood() async {
     final good = results
         .where((r) => !r.excluded && r.newName != null && r.ok && r.openPath != null && File(r.openPath!).existsSync())
@@ -7028,6 +9496,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     setState(() {});
   }
 
+  // ───── المشاركة: كل الملفات مرة واحدة، أو ملف ملف ─────
   Future<void> shareAll() async {
     final files = results
         .where((r) => !r.excluded && r.newName != null && r.openPath != null && File(r.openPath!).existsSync())
@@ -7048,6 +9517,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     await Share.shareXFiles(files, text: 'إيصالات الدفع (${files.length} ملف)');
   }
 
+  // صح = يفضل مع ملفات اليوم، غلط = يتشال من الإرسال والعد والفولدر. الضغط تاني بيلغي الاختيار
   void setVerdict(MResult r, int v, {bool toggle = true}) {
     final nv = (toggle && r.verdict == v) ? 0 : v;
     final wasExcluded = r.excluded;
@@ -7055,12 +9525,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final op = r.openPath;
     try {
       if (nv < 0 && !wasExcluded) {
+        // مسح النسخة المتسمية بس (مش الأصلي أبداً)
         if (op != null && op != r.srcPath && op.startsWith(destDir)) File(op).deleteSync();
       } else if (nv >= 0 && wasExcluded && r.newName != null) {
         final src = File(r.srcPath);
         if (op != null && op != r.srcPath && src.existsSync()) {
           if (File(op).existsSync()) {
-            r.openPath = r.srcPath;
+            r.openPath = r.srcPath; // فيه ملف تاني واخد الاسم ده
           } else {
             Directory(File(op).parent.path).createSync(recursive: true);
             src.copySync(op);
@@ -7070,9 +9541,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     } catch (_) {}
     saveMState(results);
     setState(() {});
+    // علّمته صح بس التطبيق مش عارف ماكينته: اسأل عليها وسمّيه وعدّه
     if (nv > 0 && r.newName == null && r.tidUsed == null && !busy) assignMachine(r);
   }
 
+  // تحديد الماكينة بإيدك لملف مش معروف: بيتسمّى وبيتعدّ وبيدخل في إيصالات اليوم
   Future<void> assignMachine(MResult r) async {
     if (busy) return;
     int? guess = r.orderNum;
@@ -7111,6 +9584,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final tid = numToTid[picked];
     String? day = r.dayUsed, month = r.monthUsed;
     if (day == null || month == null) {
+      // التاريخ من اسم الملف (آخر شكل 7.11)، وإلا تاريخ النهاردة
       final ms = RegExp(r'(\d{1,2})\.(\d{1,2})').allMatches(r.pdfName).toList();
       for (final m in ms.reversed) {
         final d = int.parse(m.group(1)!), mo = int.parse(m.group(2)!);
@@ -7132,12 +9606,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     r.verdict = 1;
     r.cntNotes.clear();
-    r.count = -1;
+    r.count = -1; // يتعدّ من جديد
     r.tries = 0;
     r.detail = '';
     saveMState(results);
     if (!mounted) return;
-    setState(() => status = 'اتسمّى ماكينة $picked. اضغط "بدء العد" لعدّ إيصالاته.');
+    setState(() => status = 'اتسمّى ماكينة $picked. اضغط \"بدء العد\" لعدّ إيصالاته.');
   }
 
   Future<void> markRestOk() async {
@@ -7210,6 +9684,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     setState(() => status = 'تم مسح $n ملف ونتيجة الفحص.');
   }
 
+  // ───── التشغيل ─────
   Future<void> start({bool resumeOnly = false, bool count = false, List<String>? manualPaths}) async {
     if (busy) return;
     final perm = await Permission.manageExternalStorage.request();
@@ -7236,7 +9711,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
       }
       if (autoScan) {
-        await _watchService(true);
+        await _watchService(true); // نفضل شغالين نراقب الملفات الجديدة
       } else if (!chainRunning) {
         try {
           await _chan.invokeMethod('stopKeepAlive');
@@ -7285,6 +9760,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     String? idle;
     String? crashed;
     try {
+      // المرحلة 1 (سريعة): تعريف الوحدة وتسمية كل الملفات
       try {
         final lf = File('$baseDir/id_debug.txt');
         if (!resumeOnly && lf.existsSync() && lf.lengthSync() > 300000) lf.deleteSync();
@@ -7297,6 +9773,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
       await closeRec();
 
+      // المرحلة 2 (بطيئة): عدّ الإيصالات جوه كل ملف
       if (count) {
         _dbg('PHASE2 start');
         rec = TextRecognizer(script: TextRecognitionScript.latin);
@@ -7306,6 +9783,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       _flagDuplicates();
     } catch (e, st) {
+      // أي خطأ غير متوقع: نسجّله ونفك حالة "busy" علشان الزرار ما يفضلش واقف
       crashed = e.toString().split('\n').first;
       _dbg('RUN_ERROR $e\n$st');
     } finally {
@@ -7328,14 +9806,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       busy = false;
       progressValue = 0;
       if (crashed != null) {
-        status = 'حصل خطأ أثناء الفحص ($crashed). اتحفظ اللي خلص، اضغط "فحص وتسمية وعد" وهيكمّل من مكانه.';
+        status = 'حصل خطأ أثناء الفحص ($crashed). اتحفظ اللي خلص، اضغط \"فحص وتسمية وعد\" وهيكمّل من مكانه.';
       } else if (stopReq) {
         status = 'اتوقف. فاضل $pend ملف لسه ما اتعدّش، اضغط "فحص" وهيكمّل من مكانه.';
       } else if (results.isEmpty && idle != null) {
         status = idle;
       } else if (!count) {
         status = 'تمت التسمية: ${results.length} ملف، $named اتسمّى واتنسخ.'
-            '${pend > 0 ? ' اضغط "بدء العد" لعدّ إيصالات $pend ملف.' : ''}';
+            '${pend > 0 ? ' اضغط \"بدء العد\" لعدّ إيصالات $pend ملف.' : ''}';
       } else {
         status = 'اكتمل العد: ${results.length} ملف، $named اتسمّى، إجمالي $total إيصال.'
             '${pend > 0 ? ' (فاضل $pend لسه)' : ''}';
@@ -7343,6 +9821,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     });
   }
 
+  // بيرجّع رسالة لو مفيش حاجة جديدة يفحصها
   Future<String?> _identifyAll(TextRecognizer rec, {List<String>? manualPaths}) async {
     final dirs = pdfDir != null ? [Directory(pdfDir!)] : findWhatsAppDocDirs();
     if (manualPaths != null) dirs.clear();
@@ -7355,19 +9834,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pdfs = <File>[];
     var skipped = 0;
     for (final d in dirs) {
-      if (d.path == destDir || d.path == defaultMDest) continue;
+      if (d.path == destDir || d.path == defaultMDest) continue; // ناتج التطبيق نفسه
       try {
         for (final e in d.listSync().whereType<File>()) {
           final n = baseName(e.path);
           final fd = fileDate(e);
           var isPdf = n.toLowerCase().trim().endsWith('.pdf');
           if (!isPdf && !fd.isBefore(cutoff) && !n.substring(n.lastIndexOf('.') + 1).contains(RegExp(r'[A-Za-z0-9]'))) {
-            isPdf = _hasPdfHeader(e);
+            isPdf = _hasPdfHeader(e); // ملفات واتساب DOC-... من غير امتداد
           }
           if (!isPdf) {
             if (!fd.isBefore(cutoff)) _dbg('SKIP(مش PDF) $n  size=${e.lengthSync()}');
             continue;
           }
+          // إخراج التقفيل بتاع التطبيق بس (الاسكندريه 5.11.pdf)، أي اسم تاني بيتفحص عادي
           if (_isAppReportName(n)) {
             _dbg('SKIP(تقرير التطبيق) $n');
             continue;
@@ -7395,7 +9875,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           ? 'كل الملفات في الفترة دي اتفحصت قبل كده ($skipped ملف).'
           : 'مفيش ملفات PDF في الفترة دي.';
     }
-
+    // امسح كل النتايج/النسخ القديمة للملفات اللي هنفحصها دلوقتي *قبل* التسمية،
+    // علشان أسماء قديمة متعملش تضارب وتطلّع "_2" من غير ما يكون فيه ملف مكرر.
     for (final pf in pdfs) {
       final pn = baseName(pf.path);
       final ps = pf.lengthSync();
@@ -7414,6 +9895,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       final f = pdfs[i];
       final name = baseName(f.path);
       final size = f.lengthSync();
+      // لو الملف ده اتفحص قبل كده وإحنا بنعيد: امسح الإدخال القديم ونسخته
       for (final o in results.where((x) => x.key == '$name:$size').toList()) {
         try {
           if (o.newName != null && o.openPath != null) File(o.openPath!).deleteSync();
@@ -7449,12 +9931,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     return null;
   }
 
+  // قراءة صفحات الـ PDF (لحد 6) وتصويت على Terminal ID، وبعدين مطابقتها باسم الملف الأصلي
   Future<void> _identifyOne(MResult r, File f, TextRecognizer rec) async {
     final bytes = await f.readAsBytes();
     final sb = StringBuffer();
     final votes = <String, double>{};
     var id = MIdent();
     for (var pi = 0; pi < 25; pi++) {
+      // بعد 6 صفحات لو لقينا ماكينة نوقف، ولو لسه مفيش نكمّل لحد 25 صفحة
       if (pi >= 6 && votes.isNotEmpty) break;
       var got = false;
       try {
@@ -7475,11 +9959,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           } catch (_) {}
         }
       } catch (e) {
-        if (!_pageEnd(e) || pi == 0) rethrow;
+        if (!_pageEnd(e) || pi == 0) rethrow; // آخر صفحة عدّت = مش خطأ
       }
       if (!got) break;
       id = _identify(sb.toString());
       final rk = _rankVotes(votes);
+      // وقف بدري لو الماكينة واضحة (Terminal ID مقروء بوضوح) واليوم معروف
       if (id.day != null &&
           rk.isNotEmpty &&
           rk.first.value >= 3 &&
@@ -7493,6 +9978,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     var tid = rk.isNotEmpty ? rk.first.key : id.tid;
     var fromUnit = false;
     if (tid == null) {
+      // مفيش Terminal ID مقروء: نحدد الوحدة من Merchant ID/اسم الوحدة جوه الـ PDF،
+      // ولو الوحدة فيها ماكينة واحدة بس نستخدمها (وتتعلّم للمراجعة)
       final row = findUnitExtraIn([sb.toString()]);
       if (row != null) {
         final same = terminals.entries.where((e) => e.value.excelRow == row).toList();
@@ -7514,6 +10001,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final weak = tid != null &&
         ((!fromUnit && top < 2) || !_plausibleDay(id.day, id.month));
     if (weak) {
+      // مش واضح إنه إيصال ماكينة (توكيل / ملف تاني): تحت المراجعة، من غير تسمية ولا عد
       r.tidUsed = null;
       r.newName = null;
       if (id.day != null && id.month != null) {
@@ -7524,6 +10012,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.idNotes.add('الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه');
       r.count = 0;
       r.cntOk = true;
+      r.seqBad = false;
       r.detail = 'للمراجعة (مش معدود)';
       return;
     }
@@ -7534,6 +10023,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
+  // لو ملفين اتعرفوا على نفس الماكينة: الأقوى (أكتر أصوات) يفضل، والتاني ياخد مرشحه التاني لو قراءته واضحة
   Future<void> _resolveDuplicates() async {
     final groups = <String, List<MResult>>{};
     for (final r in results) {
@@ -7567,6 +10057,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
+  // بيعلّم الملفات اللي لسه واخدة نفس الماكينة (مفيش حل تلقائي)
   void _flagDuplicates() {
     const tag = 'نفس الماكينة';
     for (final r in results) {
@@ -7594,6 +10085,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   Future<void> _applyName(MResult r, File f, String? tid, String? day, String? month) async {
     r.idOk = true;
     r.idNotes.clear();
+    // نسخة قديمة متسمية للملف ده: نمسحها قبل ما نسمّي من جديد
     if (r.newName != null &&
         r.openPath != null &&
         r.openPath != r.srcPath &&
@@ -7621,6 +10113,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.monthUsed = month;
     final name = machineNewName(info, day, month);
     var final0 = name;
+    // "_2" بس لو فعلاً ملف تاني (من نفس الفحص) واخد نفس الاسم؛ أي ملف قديم في الفولدر بنكتب فوقه
     var k = 2;
     while (results.any((x) => x != r && !x.excluded && x.newName == final0)) {
       final0 = '${name}_$k';
@@ -7644,6 +10137,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   }
 
   Future<void> _countAll(TextRecognizer rec) async {
+    // ملف التطبيق اتقفل أثناء عدّه 3 مرات: نعدّيه بدل ما نلف في دايرة
     for (final r in results) {
       if (r.pending && r.tries >= 3) {
         r.count = 0;
@@ -7655,7 +10149,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     for (var i = 0; i < todo.length; i++) {
       if (stopReq) break;
       final r = todo[i];
-      if (r.excluded) continue;
+      if (r.excluded) continue; // اتعلّم غلط وإحنا بنعد
       r.tries++;
       saveMState(results);
       _curLabel = 'عدّ الإيصالات ${i + 1} / ${todo.length}: ${r.newName ?? r.pdfName}';
@@ -7682,7 +10176,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     _curLabel = '';
   }
 
+
+  // العد السريع: بيقرا صورة كل صفحة مرة واحدة من غير تحويل PNG ولا شرائح. بيرجّع false لو الملف مش ممسوح
   Future<bool> _countOneFast(MResult r, TextRecognizer rec, Uint8List bytes, File src) async {
+    // البحث في الـ bytes بيشتغل في isolate علشان الواجهة ما تهنجش مع الملفات الكبيرة
     final ranges = await Isolate.run(() => _pdfJpegRanges(bytes));
     if (ranges.isEmpty) return false;
     final col = MCollector();
@@ -7690,12 +10187,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     var total = 0, totalMx = 0, failed = 0, slips = 0, total3 = 0;
     final diff = <String>[];
     final empty = <int>[];
-    final pageSm = <int, int>{};
-    final pageSm2 = <int, int>{};
-    final pageSm3 = <int, int>{};
+    final pageSm = <int, int>{}; // رقم الصفحة -> عدد الإيصالات المعدودة فيها (الطريقة 1)
+    final pageSm2 = <int, int>{}; // نفس الشيء بالطريقة 2
+    final pageSm3 = <int, int>{}; // نفس الشيء بالطريقة 3 (الأساسية)
     var total2 = 0;
     final par = _parCount;
-
+    // ⚡ المتوازي (تجريبي): بنقرا صفحتين مع بعض، وبعدين بنعالج النتايج بترتيب الصفحات (نفس منطق العد العادي)
     if (par) {
       final extra = <TextRecognizer>[
         for (var k = 1; k < _kParWorkers; k++) TextRecognizer(script: TextRecognitionScript.latin)
@@ -7799,14 +10296,16 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       await Future.delayed(const Duration(milliseconds: 2));
     }
     _dbg('FAST${par ? '-PAR' : ''} ${r.pdfName}: ${ranges.length} صفحة، ${sw.elapsedMilliseconds ~/ 1000}ث، عدد $total (بالطريقة التانية $totalMx)، فشل $failed');
-    if (total == 0 || failed == ranges.length) return false;
+    if (total == 0 || failed == ranges.length) return false; // نرجع للطريقة القديمة
     final sc = col.finish();
-    final total1 = total;
+    final total1 = total; // الطريقة 1 (القديمة)
     var dualInfo = '';
     var dualNote = '';
+    // العدد الأساسي = الطريقة 3 (التسلسل الرأسي). الطريقتين التانيين (1 و2) للمقارنة والتحذير.
     if (total3 > 0) total = total3;
     final bt = _batchOf(r);
     if (bt != null && bt != total) {
+      // الباتش (من التقفيل أو اللي كتبته بإيدك) بيطابق طريقة تانية: نختارها
       if (bt == total1) {
         total = total1;
         dualInfo = ' • اتختار $total1 (طابق الباتش) بدل $total3';
@@ -7823,6 +10322,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         }
       }
       final pgTxt = pg.isEmpty ? '' : ' • الصفحات: ${pg.join('، ')}';
+      // مفيش باتش يحسم: العدد الأساسي (طريقة 3) بيفضل، ونعلّم الملف للمراجعة
       dualNote = 'الطرق اختلفت: $total1 / $total2 / $total3 (اتختار $total)$pgTxt (راجع)';
     }
     r.count = total;
@@ -7844,6 +10344,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (diff.isNotEmpty) {
       r.cntNotes.add('صفحات الطريقتين اختلفوا فيها: ${diff.join('، ')} (راجعها لو العدد مهم)');
     }
+    // الصفحات الكاملة غالباً نفس العدد (10 أو 15 مثلاً) وآخر صفحة بس بتقل: نعلّم الصفحة الشاذة
     if (pageSm3.length >= 4) {
       final keys = pageSm3.keys.toList()..sort();
       final lastK = keys.last;
@@ -7864,8 +10365,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         }
       }
     }
+    // نقارن بتسلسل الـ RRN بس لو الأرقام اتقرت كفاية
     if (sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen) {
-      r.cntOk = false;
+      // فرق أقل من kSoftGap إيصالات (ناقص أو زيادة): ملاحظة تحذير بس ومش مراجعة
+      if ((total - sc.rangeLen!).abs() >= kSoftGap) r.seqBad = true;
       final miss = sc.seqMissing.take(10).map((n) => n.toString().padLeft(6, '0')).join(' - ');
       r.cntNotes.add('العدد $total بس التسلسل ${sc.rangeLen}'
           '${sc.seqMissing.isNotEmpty ? '\nأرقام مش لاقيها: [ $miss ]${sc.seqMissing.length > 10 ? ' ...' : ''}' : ''}');
@@ -7896,6 +10399,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     r.cntNotes.clear();
     r.cntOk = true;
+    r.seqBad = false;
     if (src == null) {
       r.count = 0;
       r.cntOk = false;
@@ -7911,13 +10415,15 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       r.cntNotes.clear();
       r.cntOk = true;
+      r.seqBad = false;
     }
     final col = MCollector();
     _tmStrips = 0;
     _tmOcr = 0;
     var nPages = 0, tRaster = 0;
     final swAll = Stopwatch()..start();
-    double? dpiCache;
+    double? dpiCache; // مقاس الصفحات في الملف الممسوح واحد: نقيس مرة بس
+    // صفحة صفحة (مش الملف كله مرة واحدة) علشان الذاكرة ما تخلصش والتطبيق ما يقفلش
     final failedPages = <int>[];
     var consecFail = 0;
     for (var pg = 1; pg <= 400; pg++) {
@@ -7945,10 +10451,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         } catch (e) {
           lastErr = e;
           if (got && !_pageEnd(e)) {
-            failedPages.add(pg);
+            failedPages.add(pg); // الصفحة اتقرت جزئياً وفشلت: نسجّلها بدل ما تتبلع
             _dbg('PAGE_FAIL ${r.pdfName} p$pg: ${e.toString().split('\n').first}');
           }
-          if (_pageEnd(e) || got) break;
+          if (_pageEnd(e) || got) break; // آخر صفحة عدّت، أو الصفحة اتقرت جزئياً: ما نعيدهاش
         }
       }
       if (got) {
@@ -7956,7 +10462,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         await Future.delayed(const Duration(milliseconds: 5));
         continue;
       }
-      if (lastErr == null || _pageEnd(lastErr)) break;
+      if (lastErr == null || _pageEnd(lastErr)) break; // نهاية الملف
+      // خطأ مش معروف: لو أول صفحة الملف كله فشل، غير كده نسجّل الصفحة ونكمّل (صفحتين ورا بعض = نهاية الملف)
       if (nPages == 0) throw lastErr;
       _dbg('PAGE_FAIL ${r.pdfName} p$pg: $lastErr');
       failedPages.add(pg);
@@ -7978,7 +10485,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         '${col.slips > 0 ? ' • أوراق تعريف مُتجاهلة ${col.slips}' : ''}'
         ' • ⏱ ${fmtElapsed(Duration(seconds: (swAll.elapsedMilliseconds / 1000).round()))}';
     if (!sc.agree) {
-      r.cntOk = false;
+      // فرق أقل من kSoftGap إيصالات (ناقص أو زيادة): ملاحظة تحذير بس ومش مراجعة
+      if ((sc.count - sc.rangeLen!).abs() >= kSoftGap) r.seqBad = true;
       r.cntNotes.add(sc.seqNote);
     }
     if (sc.otherDay.isNotEmpty) {
@@ -7989,6 +10497,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       r.cntNotes.add('فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)');
     }
     if (r.newName == null && sc.tid != null) {
+      // التعريف السريع فشل: نسمّي من نتيجة العد الكاملة
       await _applyName(r, src, sc.tid, sc.day, sc.month);
     } else if (sc.tid != null && terminals[sc.tid] != null && r.orderNum != null &&
         terminals[sc.tid]!.orderNum != r.orderNum) {
@@ -8001,7 +10510,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.count = -1;
     r.tries = 0;
     saveMState(results);
-    if (mounted) setState(() => status = 'اتعلّم للعد. اضغط "بدء العد".');
+    if (mounted) setState(() => status = 'اتعلّم للعد. اضغط \"بدء العد\".');
   }
 
   List<String> missingMachines() {
@@ -8064,6 +10573,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       canPop: !busy,
       onPopInvokedWithResult: (didPop, _) async {
         if (!didPop && busy) {
+          // الفحص شغال: ما نقفلش الشاشة، نرجّع التطبيق للخلفية بس علشان الفحص يكمّل
           _dbg('BACK while busy -> moveToBack');
           try {
             await _chan.invokeMethod('moveToBack');
@@ -8081,6 +10591,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pendCount = results.where((r) => r.pending).length;
     final named = results.where((r) => r.newName != null && !r.excluded).length;
     final totalRc = results.fold<int>(0, (a, r) => a + (r.count > 0 && !r.excluded ? r.count : 0));
+    final visRes = _visibleResults();
     _syncBadge(machBadge, reviewN);
     machBusyG = busy;
     return Scaffold(
@@ -8116,50 +10627,28 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                     setState(() {});
                   }),
             const Divider(height: 4),
-            InkWell(
-              onTap: () => setState(() => settingsOpen = !settingsOpen),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Row(
-                  children: [
-                    const Icon(Icons.tune, size: 18),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                          'إعدادات المصدر • ${_periodLabelOf(days)} • ${pdfDir == null ? 'واتساب' : baseName(pdfDir!)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13)),
-                    ),
-                    Icon(settingsOpen ? Icons.expand_less : Icons.expand_more),
-                  ],
+            _sourceChips(context,
+                busy: busy,
+                days: days,
+                onDays: (d) {
+                  setState(() => days = d);
+                  sharedDays.value = d;
+                },
+                periodLabel: _periodLabelOf(days),
+                sourcePath: pdfDir,
+                onPickSource: pickDir,
+                onUseWhatsApp: () {
+                  savePdfDir(null);
+                  setState(() => pdfDir = null);
+                },
                 ),
-              ),
-            ),
-            if (settingsOpen) ...[
-              const Divider(height: 4),
-              _periodRow(days, busy, (d) {
-                setState(() => days = d);
-                sharedDays.value = d;
-              }),
-              const Divider(height: 10),
-              _pathRow(Icons.folder_open, 'المصدر', pdfDir ?? 'واتساب - مستندات (تلقائي)',
-                  busy ? null : pickDir,
-                  onReset: pdfDir != null && !busy
-                      ? () {
-                          savePdfDir(null);
-                          setState(() => pdfDir = null);
-                        }
-                      : null),
-              _pathRow(Icons.drive_file_move_outline, 'الإخراج',
-                  '$destDir${destDir == defaultMDest ? ' (افتراضي)' : ''}', busy ? null : pickOut,
-                  onReset: destDir != defaultMDest && !busy ? useDefaultOut : null,
-                  actions: [
-                    _pathAct(Icons.open_in_new, 'فتح فولدر الإخراج', 'Open output folder', openDest),
-                    _pathAct(Icons.drive_file_move, 'نقل الملفات لفولدر', 'Move files to a folder',
-                        busy ? null : transferGood),
-                  ]),
-            ],
+            _outputCard(context,
+                busy: busy,
+                outPath: destDir,
+                outIsDefault: destDir == defaultMDest,
+                onPickOut: pickOut,
+                onUseDefaultOut: useDefaultOut,
+                onOpenOut: openDest),
           ]),
           _runAllCard(),
           _statusBox(status),
@@ -8179,6 +10668,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 results.isEmpty ? null : openOverview),
             _quickBtnG(context, Icons.chat, 'إرسال الكل ($named)',
                 (busy && !namingDone) || named == 0 ? null : shareAll),
+            _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
+                busy || named == 0 ? null : transferGood),
             _quickBtnG(context, Icons.bolt, 'عد متوازي',
                 (busy || chainRunning) ? null : _startCountParallel),
             _quickBtnG(context, Icons.picture_as_pdf, 'يدوي', busy ? null : pickManualPdfs),
@@ -8192,6 +10683,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               reviewOnly: reviewOnly,
               busy: busy,
               onRestOk: markRestOk),
+          if (results.isNotEmpty)
+            _listTools(context,
+                remaining: reviewN,
+                total: results.length,
+                controller: _searchCtl,
+                onQuery: (v) => setState(() => _q = v),
+                sort: _sort,
+                sortLabels: [
+                  _l(context, 'الترتيب الأصلي', 'Original order'),
+                  _l(context, 'رقم الماكينة', 'Machine number'),
+                  _l(context, 'الأكبر فرقاً', 'Largest gap'),
+                  _l(context, 'الأكثر إيصالات', 'Most receipts'),
+                ],
+                onSort: (v) => setState(() => _sort = v)),
           if (missing.isNotEmpty) ...[
             const SizedBox(height: 10),
             Container(
@@ -8206,12 +10711,32 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             ),
           ],
           const SizedBox(height: 10),
-          for (final r in results.where((r) => !reviewOnly || !r.ok))
+          if (results.isEmpty && busy) const _SkeletonList(),
+          if (results.isEmpty && !busy)
+            _emptyState(context, Icons.folder_copy, _l(context, 'مفيش ملفات لسه', 'No files yet'),
+                _l(context, 'اضغط "فحص إيصالات الدفع" علشان نقرا ملفات الـ PDF ونسمّيها.',
+                    'Tap "Scan payment receipts" to read and rename the PDF files.'),
+                actionLabel: _l(context, 'فحص إيصالات الدفع', 'Scan payment receipts'),
+                onAction: () => _startCountAll()),
+          if (results.isNotEmpty && visRes.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(child: w.Text(_l(context, 'مفيش نتايج.', 'No results.'))),
+            ),
+          for (final r in visRes)
             Builder(builder: (context) {
               final match = _batchMatch(r);
+              final soft = _batchSoft(r);
+              final stripColor = _mStripColor(r);
+              final Color? cardTint = r.excluded
+                  ? _tintBg(context, Colors.grey, strong: true)
+                  : (match == null
+                      ? null
+                      : (match ? _tintBg(context, Colors.green) : (soft ? _tintBg(context, Colors.amber) : _tintBg(context, Colors.red))));
               return Dismissible(
-                key: ValueKey('t_${r.key}'),
+                key: ObjectKey(r),
                 confirmDismiss: (dir) async {
+                  HapticFeedback.lightImpact();
                   setVerdict(r, dir == DismissDirection.startToEnd ? 1 : -1, toggle: false);
                   return false;
                 },
@@ -8227,32 +10752,52 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: const Text('غلط ✗', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
-                child: Card(
+                child: TweenAnimationBuilder<Color?>(
+                  tween: ColorTween(end: cardTint ?? Theme.of(context).colorScheme.surfaceContainerLow),
+                  duration: const Duration(milliseconds: 350),
+                  builder: (context, cardCol, _) => Card(
                   margin: const EdgeInsets.symmetric(vertical: 2),
-                  color: r.excluded
-                      ? _tintBg(context, Colors.grey, strong: true)
-                      : (match == null
-                          ? null
-                          : (match ? _tintBg(context, Colors.green) : _tintBg(context, Colors.red))),
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                  clipBehavior: Clip.antiAlias,
+                  color: cardCol,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 350),
+                    decoration: BoxDecoration(
+                      border: BorderDirectional(start: BorderSide(color: stripColor, width: 5)),
+                    ),
+                    child: InkWell(
                     onTap: () => openReport(r),
-                    title: Text(r.newName ?? '؟ ${r.pdfName}',
-                        style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            decoration: r.excluded ? TextDecoration.lineThrough : null)),
-                    subtitle: w.Text(
-                        '${r.verdict > 0 ? _l(context, '✓ اتراجع: صح\n', '✓ Reviewed: OK\n') : ''}'
-                        '${r.pending && busy ? _l(context, 'بيتعدّ...', 'Counting...') : _mSummary(context, r)}'
-                        '${r.notes.isEmpty ? '' : '\n${_l(context, '⚠️ ${r.notes.length} ملاحظة - اضغط لفتح التقرير', '⚠️ ${r.notes.length} note(s) - tap to open the report')}'}'),
-                    trailing: SizedBox(
+                    child: Padding(
+                    padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 4, 6),
+                    child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _mTitle(context, r),
+                          const SizedBox(height: 2),
+                          _mSubtitle(context, r, busy),
+                        ],
+                      ),
+                    ),
+                    SizedBox(
                       width: 118,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           SizedBox(
                             width: 66,
-                            child: TextField(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                            Text(_l(context, 'الباتش', 'Batch'),
+                                style: TextStyle(
+                                    fontSize: 10.5,
+                                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                            const SizedBox(height: 2),
+                            TextField(
                               controller: r.ctl,
                               keyboardType: TextInputType.number,
                               textAlign: TextAlign.center,
@@ -8266,12 +10811,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                                 filled: match != null,
                                 fillColor: match == null
                                     ? null
-                                    : (match ? _tintBg(context, Colors.green, strong: true) : _tintBg(context, Colors.red, strong: true)),
+                                    : (match ? _tintBg(context, Colors.green, strong: true) : (soft ? _tintBg(context, Colors.amber, strong: true) : _tintBg(context, Colors.red, strong: true))),
                               ),
                               onChanged: (v) {
                                 saveMState(results);
                                 setState(() {});
                               },
+                            ),
+                              ],
                             ),
                           ),
                           PopupMenuButton<String>(
@@ -8314,6 +10861,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                         ],
                       ),
                     ),
+                    ],
+                    ),
+                    ),
+                    ),
+                  ),
                   ),
                 ),
               );
