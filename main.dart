@@ -1562,6 +1562,8 @@ const Map<String, String> _kEnExact = {
   'عد متوازي': 'Parallel count',
   'يدوي': 'Manual',
   'العد المزدوج (طريقتين للعد ومقارنتهم)': 'Dual count (two methods, compared)',
+  'عد متوازي (الأسرع)': 'Parallel count (fastest)',
+  'تدقيق مزدوج (قراءة تانية لآخر صفحة - أدق وأبطأ شوية)': 'Double check (re-read the last page - more accurate, a bit slower)',
   'اليوم': 'Today',
   'الكل': 'All',
   'تمام': 'OK',
@@ -3922,13 +3924,33 @@ bool fastCount = true; // السريعة ثابتة (الدقيقة بتشتغل
 
 bool _loadDual() {
   try {
-    return _readCfg()['dualCount'] != false;
+    return _readCfg()['dualCount'] == true; // الديفولت مقفول (الأسرع)
+  } catch (_) {
+    return false;
+  }
+}
+
+// ⚡ العد المتوازي: الديفولت شغال (الأسرع). مستقل تماماً عن التدقيق المزدوج.
+bool _loadPar() {
+  try {
+    return _readCfg()['parallelCount'] != false;
   } catch (_) {
     return true;
   }
 }
 
-// العد المزدوج: بيحسب بطريقتين من نفس القراءة، ولو اختلفوا بيعلّم الملف للمراجعة (أو بيختار اللي يطابق الباتش)
+bool parallelCount = _loadPar();
+
+void toggleParallelCount() {
+  parallelCount = !parallelCount;
+  try {
+    final m = _readCfg();
+    m['parallelCount'] = parallelCount;
+    _writeCfg(m);
+  } catch (_) {}
+}
+
+// التدقيق المزدوج (اختياري، أبطأ شوية): قراءة تانية بصورة محسّنة لآخر صفحة في كل ملف (والصفحات المشكوك فيها)
 bool dualCount = _loadDual();
 
 void toggleDualCount() {
@@ -9259,19 +9281,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
   }
 
-  // ⚡ عدّ متوازي (تجريبي): نفس العد بالظبط بس بيقرا صفحتين مع بعض. لو طلع مش دقيق نمسحه (دي + كتلة par في _countOneFast + الزرار)
-  bool _parCount = false;
-
-  Future<void> _startCountParallel() async {
-    if (busy) return;
-    _parCount = true;
-    try {
-      await _startCountAll();
-    } finally {
-      _parCount = false;
-    }
-  }
-
   // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
   List<MResult> _visibleResults() {
     var l = results.where((r) => !reviewOnly || !r.ok).toList();
@@ -10191,7 +10200,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pageSm2 = <int, int>{}; // نفس الشيء بالطريقة 2
     final pageSm3 = <int, int>{}; // نفس الشيء بالطريقة 3 (الأساسية)
     var total2 = 0;
-    final par = _parCount;
+    final par = parallelCount;
     // ⚡ المتوازي (تجريبي): بنقرا صفحتين مع بعض، وبعدين بنعالج النتايج بترتيب الصفحات (نفس منطق العد العادي)
     if (par) {
       final extra = <TextRecognizer>[
@@ -10303,18 +10312,80 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     var dualNote = '';
     // العدد الأساسي = الطريقة 3 (التسلسل الرأسي). الطريقتين التانيين (1 و2) للمقارنة والتحذير.
     if (total3 > 0) total = total3;
+    var chosenM = total3 > 0 ? 3 : 1; // الطريقة اللي اتختار منها العدد
     final bt = _batchOf(r);
     if (bt != null && bt != total) {
       // الباتش (من التقفيل أو اللي كتبته بإيدك) بيطابق طريقة تانية: نختارها
       if (bt == total1) {
+        chosenM = 1;
         total = total1;
         dualInfo = ' • اتختار $total1 (طابق الباتش) بدل $total3';
       } else if (bt == total2) {
+        chosenM = 2;
         total = total2;
         dualInfo = ' • اتختار $total2 (طابق الباتش) بدل $total3';
       }
     }
-    if (dualCount && (total1 != total3 || total2 != total3) && !(bt != null && bt == total)) {
+    // ───── تدقيق آخر صفحة: غالباً هي اللي بتقل أو بتزيد ─────
+    var lastInfo = '';
+    final lastKeys = pageSm3.keys.toList()..sort();
+    if (lastKeys.isNotEmpty) {
+      final lastK = lastKeys.last;
+      final n0 = r.orderNum;
+      final refs = <int>{
+        if (bt != null) bt,
+        if (n0 != null && batchTxnByNum[n0] != null) batchTxnByNum[n0]!,
+        if (n0 != null && sysTxnByNum[n0] != null) sysTxnByNum[n0]!,
+      };
+      final lm1 = pageSm[lastK] ?? 0, lm2 = pageSm2[lastK] ?? 0, lm3 = pageSm3[lastK] ?? 0;
+      final curLast = chosenM == 1 ? lm1 : (chosenM == 2 ? lm2 : lm3);
+      final lastDisagree = lm1 != lm3 || lm2 != lm3;
+      final refMiss = refs.isNotEmpty && !refs.contains(total);
+      final seqMiss = sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen;
+      lastInfo = ' • آخر صفحة ($lastK): $curLast إيصال';
+      // القراءة التانية بتتعمل لو التدقيق المزدوج شغال، أو لو في اختلاف/عدم تطابق (غير كده الفحص يفضل سريع)
+      if (dualCount || lastDisagree || refMiss || seqMiss) {
+        try {
+          final i = lastK - 1;
+          _ensureMTmp();
+          final p1 = '$mTmpDir/last_$i.jpg';
+          final p2 = '$mTmpDir/last_${i}_e.jpg';
+          await File(p1).writeAsBytes(Uint8List.sublistView(bytes, ranges[i][0], ranges[i][1]));
+          await enhanceImageAsync(p1, p2);
+          final res2 = await _ocr(rec, p2);
+          final sp2 = _structCount(res2);
+          try {
+            File(p1).deleteSync();
+          } catch (_) {}
+          try {
+            File(p2).deleteSync();
+          } catch (_) {}
+          _dbg('LASTPAGE ${r.pdfName} p$lastK: أصلي=$lm1/$lm2/$lm3 محسّن=${sp2.sm}/${sp2.sm2}/${sp2.sm3} مرجع=$refs');
+          final base = total - curLast;
+          int? pick;
+          if (refMiss) {
+            for (final c in <int>[sp2.sm3, sp2.sm, sp2.sm2, lm3, lm1, lm2]) {
+              if (c != curLast && refs.contains(base + c)) {
+                pick = c;
+                break;
+              }
+            }
+          }
+          if (pick != null) {
+            total = base + pick;
+            lastInfo = ' • آخر صفحة ($lastK): $pick إيصال (اتصحّحت من $curLast بقراءة تانية وطابقت الباتش/السيستم)';
+          } else if (sp2.sm3 != lm3) {
+            r.cntOk = false;
+            r.cntNotes.add('آخر صفحة ($lastK) اتقرت مرتين بنتيجتين مختلفتين: $lm3 / ${sp2.sm3} (راجعها)');
+          } else {
+            lastInfo += ' ✓ اتأكدت بقراءة تانية';
+          }
+        } catch (e) {
+          _dbg('LASTPAGE_FAIL ${r.pdfName}: ${e.toString().split('\n').first}');
+        }
+      }
+    }
+    if ((total1 != total3 || total2 != total3) && !(bt != null && bt == total)) {
       final pg = <String>[];
       for (final k in pageSm.keys) {
         if (pageSm[k] != pageSm3[k] || pageSm2[k] != pageSm3[k]) {
@@ -10326,10 +10397,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       dualNote = 'الطرق اختلفت: $total1 / $total2 / $total3 (اتختار $total)$pgTxt (راجع)';
     }
     r.count = total;
-    r.detail = 'عدّ سريع${par ? ' متوازي (تجريبي)' : ''} • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
+    r.detail = 'عدّ سريع${par ? ' متوازي' : ''} • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
         '${slips > 0 ? ' • أوراق تعريف مُتجاهلة $slips' : ''}'
         ' • ⏱ ${fmtElapsed(Duration(seconds: (sw.elapsedMilliseconds / 1000).round()))}';
     if (dualInfo.isNotEmpty) r.detail += dualInfo;
+    if (lastInfo.isNotEmpty) r.detail += lastInfo;
     if (dualNote.isNotEmpty) {
       r.cntOk = false;
       r.cntNotes.add(dualNote);
@@ -10620,7 +10692,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         children: [
           _settingsCard([
             _switchRow('فحص تلقائي (بيراقب الملفات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
-            _switchRow('العد المزدوج (طريقتين للعد ومقارنتهم)', dualCount, busy
+            _switchRow('عد متوازي (الأسرع)', parallelCount, busy
+                ? null
+                : (v) {
+                    toggleParallelCount();
+                    setState(() {});
+                  }),
+            _switchRow('تدقيق مزدوج (قراءة تانية لآخر صفحة - أدق وأبطأ شوية)', dualCount, busy
                 ? null
                 : (v) {
                     toggleDualCount();
@@ -10670,8 +10748,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 (busy && !namingDone) || named == 0 ? null : shareAll),
             _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
                 busy || named == 0 ? null : transferGood),
-            _quickBtnG(context, Icons.bolt, 'عد متوازي',
-                (busy || chainRunning) ? null : _startCountParallel),
             _quickBtnG(context, Icons.picture_as_pdf, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
