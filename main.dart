@@ -494,7 +494,6 @@ Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged})
           head('محرك العد (اختار واحد)'),
           radio('⚡ سريع متوازي (الأسرع - الافتراضي)', 'بيقرا صفحتين مع بعض من صور الـ PDF مباشرة', countEngine == 0, () => setCountEngine(0)),
           radio('سريع عادي', 'نفس السريع بس صفحة ورا صفحة (أخف على الذاكرة)', countEngine == 1, () => setCountEngine(1)),
-          radio('دقيق (الأبطأ)', 'بيحوّل كل صفحة لصورة PNG ويقطعها شرائح', countEngine == 2, () => setCountEngine(2)),
           head('العدد المعروض بيتحسب بـ (اختار واحدة)'),
           radio('طريقة 3: تسلسل رأسي (الأساسية)', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
           radio('طريقة 2: علامات الدفع بس', 'RRN / AMOUNT / Approved', countMethod == 2, () => setCountMethod(2)),
@@ -4148,7 +4147,7 @@ void _saveCfgKey(String k, Object v) {
 }
 
 // محرك العد: 0 = سريع متوازي (الأسرع - الافتراضي) • 1 = سريع عادي • 2 = دقيق (raster + شرائح، الأبطأ)
-int countEngine = _loadIntCfg('countEngine', 0, 0, 2);
+int countEngine = _loadIntCfg('countEngine', 0, 0, 1); // الدقيق (2) اتشال من الاختيارات: أبطأ ونتيجته غلط
 bool get fastCount => countEngine != 2;
 bool get parallelCount => countEngine == 0;
 void setCountEngine(int e) {
@@ -4368,13 +4367,34 @@ _StructPage _structCount(RecognizedText res) {
   final rrnRe = RegExp(r'(?<![A-Z])R{1,2}N\W{0,3}\d');
   final amtRe = RegExp(r'^\s*AMOUNT\b');
   final amtBad = RegExp(r'FROM|ACCOUNT|CONFIRM|DEBIT|\bMY\b');
+  // "AMOUNT" اللي في نص التوقيع (I AUTHORIZE TO DEBIT THE ABOVE AMOUNT...) لو OCR غلط في FROM/MY بتتعدّ إيصال وهمي.
+  // AMOUNT الحقيقي بييجي قبل Approved، فلو فوقه Approved في نفس العمود ومفيش بينهم شعار/Terminal/RRN يبقى ده ذيل الإيصال.
+  bool isTailAmount(OcrLine l) {
+    final lcx = (l.left + l.right) / 2;
+    OcrLine? ap;
+    for (final o in lines) {
+      if (identical(o, l)) continue;
+      if (o.cy >= l.cy || l.cy - o.cy > 0.25 * h) continue;
+      if (((o.left + o.right) / 2 - lcx).abs() > 0.1 * w) continue;
+      if (!o.text.toUpperCase().contains('APPROVED')) continue;
+      if (ap == null || o.cy > ap.cy) ap = o;
+    }
+    if (ap == null) return false;
+    for (final o in lines) {
+      if (o.cy <= ap.cy || o.cy >= l.cy) continue;
+      if (((o.left + o.right) / 2 - lcx).abs() > 0.1 * w) continue;
+      final t = o.text.toUpperCase();
+      if (nameRe.hasMatch(t) || t.contains('TERMINAL') || t.contains('MERCHANT ID') || rrnRe.hasMatch(t)) return false;
+    }
+    return true;
+  }
   for (final l in lines) {
     final u = l.text.toUpperCase();
     void add(String t, [double? v]) => all.add(_SA(t, (l.left + l.right) / 2, l.cy, l.left, l.right)..v = v);
     if (nameRe.hasMatch(u)) add('logo');
     if (u.contains('TERMINAL')) add('term');
     if (rrnRe.hasMatch(u)) add('rrn');
-    if (amtRe.hasMatch(u) && !amtBad.hasMatch(u)) {
+    if (amtRe.hasMatch(u) && !amtBad.hasMatch(u) && !isTailAmount(l)) {
       // المبلغ: في نفس السطر، أو في سطر جنبه على نفس الارتفاع جوه نفس الإيصال
       var av = _amtIn(l.text);
       if (av == null) {
