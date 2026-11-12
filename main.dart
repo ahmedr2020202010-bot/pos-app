@@ -7473,6 +7473,7 @@ List<int> _makeStrips(String src, String prefix) {
 class Anchor {
   String? rrn;
   String? day;
+  int pg = 0; // رقم الصفحة اللي اتقرا منها (للكشف عن الإيصال المكرر)
   final double l, r, cy;
   Anchor(this.rrn, this.day, this.l, this.r, this.cy);
 }
@@ -7482,8 +7483,11 @@ class MCollector {
   int slips = 0; // أوراق تعريف اتجاهلت
   final StringBuffer text = StringBuffer();
   double pageH = 3000;
+  int curPage = 0; // رقم صفحة الـ PDF الحالية (بيتحدد في العد السريع بس)
+  bool trackDups = false; // كشف الإيصال المكرر شغال في العد السريع بس (قراءة واحدة لكل صفحة)
 
   void add(Anchor n) {
+    n.pg = curPage > 0 ? curPage : pages.length;
     final list = pages.last;
     for (final a in list) {
       // نفس الإيصال اتقرا من شريحتين متداخلتين: نفس المكان على الصفحة
@@ -7499,10 +7503,17 @@ class MCollector {
   MScan finish() {
     final r = MScan();
     final seen = <String>{};
+    final firstPg = <String, int>{};
     final days = <String, int>{};
     final partialDays = <String>[];
     for (final a in pages.expand((p) => p)) {
       if (a.rrn != null) {
+        if (!seen.contains(a.rrn!)) {
+          firstPg[a.rrn!] = a.pg;
+        } else if (trackDups) {
+          // نفس رقم الإيصال (RRN) ظهر تاني: للمعرفة بس، مش بيتخصم من العدد
+          r.dups.putIfAbsent(a.rrn!, () => <int>[firstPg[a.rrn!] ?? 0]).add(a.pg);
+        }
         if (seen.add(a.rrn!)) {
           r.full++;
           r.rrnDay[a.rrn!] = a.day;
@@ -7580,6 +7591,7 @@ class MCollector {
 
 class MScan {
   int full = 0, partial = 0;
+  final Map<String, List<int>> dups = {}; // RRN -> الصفحات اللي ظهر فيها (أول مرة + التكرارات)
   final Map<String, String?> rrnDay = {};
   bool nonPayment = false;
   String? tid, day, month;
@@ -7929,6 +7941,16 @@ const List<_NoteKind> _kNoteKinds = [
       'راجع الصفحات المذكورة لو العدد مهم ليك.',
       'Check the listed pages if the exact count matters.'),
   _NoteKind(
+      'dup',
+      0,
+      Icons.content_copy,
+      'إيصال متكرر (للمعرفة)',
+      'Duplicate receipt (info)',
+      'نفس رقم الإيصال (RRN) ظهر أكتر من مرة في الملف، يعني غالباً اتصوّر مرتين أو اتحط مرتين. التطبيق ما خصمهوش من العدد. بيتكشف بس لو رقم الإيصال اتقرا في النسختين.',
+      'The same receipt number (RRN) appears more than once in the file, so it was probably photographed or inserted twice. It is NOT subtracted from the count. Only detected when the number was read on both copies.',
+      'افتح الصفحات المذكورة وشوف الإيصال. لو فعلاً مكرر احسب الفرق بنفسك أو امسح الصفحة.',
+      'Open the listed pages and look. If it really is a duplicate, adjust the count yourself or remove the page.'),
+  _NoteKind(
       'nonpay',
       0,
       Icons.info_outline,
@@ -7996,7 +8018,8 @@ final List<List<Object>> _noteRules = [
   [RegExp(r'العد لقى ماكينة'), 'machconf'],
   [RegExp(r'صفحة فشلت قراءتها|فشل العد|العد وقف'), 'readfail'],
   [RegExp(r'صفحات ما لقيتش فيها إيصالات'), 'emptypages'],
-  [RegExp(r'الطريقتين اختلفوا'), 'methoddiff'],
+  [RegExp(r'^إيصال متكرر'), 'dup'],
+  [RegExp(r'الطريقتين اختلفوا|طرق العد اختلفت'), 'methoddiff'],
   [RegExp(r'إقفال/ملخص'), 'nonpay'],
   [RegExp(r'الملف الأصلي مش موجود'), 'nofile'],
   [RegExp(r'مش قادر أعرف التاريخ'), 'datefail'],
@@ -8236,13 +8259,17 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
           _statBox(c, _l(c, 'السيستم', 'System'), v(sys), gap(sys)),
         ]),
       ),
-      if (r.verdict > 0 || r.notes.isNotEmpty)
+      if (r.verdict > 0 || r.notes.any((n) => _noteKindOf(n).sev > 0))
         Padding(
           padding: const EdgeInsets.only(top: 6),
           child: Wrap(spacing: 6, runSpacing: 4, children: [
             if (r.verdict > 0) _flagChip(c, _l(c, '✓ اتراجع: صح', '✓ Reviewed: OK'), Colors.green),
-            if (r.notes.isNotEmpty)
-              _flagChip(c, _l(c, '⚠️ ${r.notes.length} ملاحظة', '⚠️ ${r.notes.length} note(s)'), Colors.orange),
+            if (r.notes.any((n) => _noteKindOf(n).sev > 0))
+              _flagChip(
+                  c,
+                  _l(c, '⚠️ ${r.notes.where((n) => _noteKindOf(n).sev > 0).length} ملاحظة',
+                      '⚠️ ${r.notes.where((n) => _noteKindOf(n).sev > 0).length} note(s)'),
+                  Colors.orange),
           ]),
         ),
     ],
@@ -8558,6 +8585,8 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
     }
     final kinds = groups.keys.map((k) => _kNoteKinds.firstWhere((e) => e.key == k)).toList()
       ..sort((a, b) => b.sev.compareTo(a.sev));
+    final attention = kinds.where((k) => k.sev > 0).toList();
+    final infos = kinds.where((k) => k.sev == 0).toList();
 
     Widget section(String t, List<Widget> kids) => Card(
           margin: const EdgeInsets.only(bottom: 8),
@@ -8584,6 +8613,98 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
         );
     String pad6(int? n) => (n ?? 0).toString().padLeft(6, '0');
 
+    // مربع رقم كبير في الخلاصة
+    Widget big(String label, String value, MaterialColor c, {double size = 22}) => Expanded(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+            decoration: BoxDecoration(
+              color: _tintBg(context, c, soft: true),
+              border: Border.all(color: _tintBorder(context, c)),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Column(
+              children: [
+                w.Text(value,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: size, fontWeight: FontWeight.bold, color: _tintFg(context, c))),
+                const SizedBox(height: 2),
+                w.Text(label, style: TextStyle(fontSize: 11, color: _tintFg(context, c))),
+              ],
+            ),
+          ),
+        );
+
+    // جملة واحدة بسيطة تقول الوضع إيه
+    final String plain;
+    if (r.pending) {
+      plain = _l(context, 'الملف لسه ما اتعدّش.', 'This file has not been counted yet.');
+    } else if (r.verdict > 0) {
+      plain = _l(context, 'انت راجعته وعلّمته صح ✓.', 'You reviewed it and marked it OK ✓.');
+    } else if (bt == null || bd == null) {
+      plain = _l(context, 'مفيش باتش للمقارنة. اكتب الباتش تحت لو عايز تقارن.',
+          'No batch to compare with. Enter the batch below to compare.');
+    } else if (bd == 0) {
+      plain = _l(context, 'العدد مطابق للباتش، مفيش حاجة مطلوبة.', 'The count matches the batch. Nothing to do.');
+    } else if (attention.isEmpty) {
+      plain = _l(context, 'فيه فرق عن الباتش. افتح الملف وراجع.', 'There is a difference from the batch. Open the file and check.');
+    } else {
+      plain = _l(context, 'فيه فرق عن الباتش، وتحت ${attention.length} حاجة تستاهل تبص عليها.',
+          'There is a difference from the batch; see the ${attention.length} item(s) below.');
+    }
+    final MaterialColor diffCol = r.verdict > 0 ? Colors.green : (bd == null ? Colors.blueGrey : _diffColor(bd));
+
+    Widget noteCard(_NoteKind k) {
+      final MaterialColor col = k.sev == 2 ? Colors.red : (k.sev == 1 ? Colors.orange : Colors.blue);
+      return Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 4),
+        decoration: BoxDecoration(
+          color: _tintBg(context, col, soft: true),
+          border: Border.all(color: _tintBorder(context, col)),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(k.icon, size: 20, color: _tintFg(context, col)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: w.Text(_l(context, k.titleAr, k.titleEn),
+                      style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, col))),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            for (final n in groups[k.key]!)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Text('• $n', style: const TextStyle(fontSize: 13)),
+              ),
+            const SizedBox(height: 4),
+            w.Text('${_l(context, 'تعمل إيه؟', 'What to do')}: ${_l(context, k.fixAr, k.fixEn)}',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+            Theme(
+              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.only(bottom: 8),
+                dense: true,
+                title: w.Text(_l(context, 'ليه الملاحظة دي؟', 'Why this note?'), style: const TextStyle(fontSize: 12)),
+                children: [
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: w.Text(_l(context, k.whyAr, k.whyEn), style: const TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     final numbers = <Widget>[
       kv(_l(context, 'عدد المعاملات المعدودة', 'Counted transactions'), r.pending ? '—' : '${r.count}'),
       if (stats.pages != null) kv(_l(context, 'عدد الصفحات', 'Pages'), '${stats.pages}'),
@@ -8592,7 +8713,8 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
         kv(_l(context, 'إيصالات ناقصة القراءة', 'Partially read receipts'), '${stats.partial}',
             color: stats.partial! > 0 ? Colors.orange : null),
       if (stats.seqMin != null)
-        kv(_l(context, 'تسلسل الإيصالات', 'Receipt sequence'), '${pad6(stats.seqMin)} ... ${pad6(stats.seqMax)}', color: Colors.blueAccent),
+        kv(_l(context, 'تسلسل الإيصالات', 'Receipt sequence'), '${pad6(stats.seqMin)} ... ${pad6(stats.seqMax)}',
+            color: Colors.blueAccent),
       if (stats.seqLen != null)
         kv(_l(context, 'العدد المتوقع من التسلسل', 'Expected from sequence'), '${stats.seqLen}'),
       if (stats.seqLen != null && !r.pending)
@@ -8607,6 +8729,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
       body: ListView(
         padding: const EdgeInsets.all(8),
         children: [
+          // 1) مين الملف وحالته
           Card(
             margin: const EdgeInsets.only(bottom: 8),
             child: Padding(
@@ -8631,66 +8754,34 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
               ),
             ),
           ),
-          section(_l(context, 'الأرقام', 'Numbers'), [
-            ...numbers,
-            if (r.detail.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(r.detail, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+          // 2) الخلاصة: التلات أرقام + جملة واحدة
+          Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      big(_l(context, 'العدد الفعلي', 'Actual'), r.pending ? '—' : '${r.count}', Colors.blue),
+                      const SizedBox(width: 8),
+                      big(_l(context, 'الباتش', 'Batch'), bt == null ? '—' : '$bt', Colors.blueGrey),
+                      const SizedBox(width: 8),
+                      big(_l(context, 'الفرق', 'Difference'),
+                          r.pending || bd == null ? '—' : _diffText(context, bd), diffCol,
+                          size: 15),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  w.Text(plain, style: const TextStyle(fontSize: 14)),
+                ],
               ),
-          ]),
-          section(_l(context, 'ربط الباتش', 'Batch link'), [
-            TextField(
-              controller: r.ctl,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                isDense: true,
-                labelText: _l(context, 'عدد معاملات الباتش (بيتقري من التقفيل، اكتب رقم لو عايز تغيّره)',
-                    'Batch transaction count (read from closing; type a number to override)'),
-                hintText: _batchAutoOf(r)?.toString(),
-              ),
-              onChanged: (_) {
-                widget.onChanged();
-                setState(() {});
-              },
             ),
-            const SizedBox(height: 8),
-            if (bd == null || bt == null)
-              w.Text(
-                  _l(context, 'مفيش عدد باتش اتقرا من التقفيل لماكينة دي. اكتبه هنا علشان نقارنه بالعدد الفعلي.',
-                      'No batch count was read from closing for this machine. Enter it here to compare with the actual count.'),
-                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
-            else
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: _tintBg(context, r.verdict > 0 ? Colors.green : _diffColor(bd), soft: true),
-                  border: Border.all(color: _tintBorder(context, r.verdict > 0 ? Colors.green : _diffColor(bd))),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Column(
-                  children: [
-                    kv(_l(context, 'الباتش', 'Batch'),
-                        '$bt${_batchIsAuto(r) ? _l(context, ' (من التقفيل/السيستم)', ' (from closing/system)') : ''}'),
-                    kv(_l(context, 'الفعلي', 'Actual'), '${r.count}'),
-                    kv(
-                        _l(context, 'الفرق', 'Difference'),
-                        '${_diffText(context, bd)}${r.verdict > 0 && bd != 0 ? _l(context, ' • راجعته يدوي: صح ✓', ' • manually reviewed: OK ✓') : ''}',
-                        color: _tintFg(context, r.verdict > 0 ? Colors.green : _diffColor(bd))),
-                    if (r.softWarn)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: w.Text(
-                            _l(context, '⚠️ فرق بسيط (أقل من $kSoftGap إيصالات) - سليم ومش محتاج مراجعة',
-                                '⚠️ Small difference (under $kSoftGap receipts) - OK, no review needed'),
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                      ),
-                  ],
-                ),
-              ),
-          ]),
+          ),
+          // 3) القرار
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.only(bottom: 8),
             child: Column(
               children: [
                 Row(
@@ -8708,7 +8799,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 Wrap(
                   alignment: WrapAlignment.center,
                   spacing: 10,
@@ -8728,62 +8819,87 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
               ],
             ),
           ),
-          section(_l(context, 'الملاحظات', 'Notes'), [
-            if (kinds.isEmpty)
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: _tintBg(context, Colors.green, soft: true),
-                  border: Border.all(color: _tintBorder(context, Colors.green)),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: w.Text(_l(context, 'مفيش ملاحظات ✓', 'No notes ✓'),
-                    style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, Colors.green))),
+          // 4) اللي محتاج انتباه (لو فيه)
+          if (attention.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
+              child: w.Text(_l(context, 'محتاج انتباه', 'Needs attention'),
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            ),
+            for (final k in attention) noteCard(k),
+          ],
+          // 5) معلومات للمعرفة بس (زي الإيصال المكرر)
+          if (infos.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
+              child: w.Text(_l(context, 'للمعرفة بس', 'For information'),
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            ),
+            for (final k in infos) noteCard(k),
+          ],
+          if (kinds.isEmpty)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _tintBg(context, Colors.green, soft: true),
+                border: Border.all(color: _tintBorder(context, Colors.green)),
+                borderRadius: BorderRadius.circular(10),
               ),
-            for (final k in kinds)
-              Builder(builder: (context) {
-                final MaterialColor col = k.sev == 2 ? Colors.red : (k.sev == 1 ? Colors.orange : Colors.blue);
-                final sevLabel = k.sev == 2
-                    ? _l(context, 'لازم تراجع', 'Must review')
-                    : (k.sev == 1 ? _l(context, 'انتبه', 'Heads up') : _l(context, 'معلومة', 'Info'));
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 8),
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: _tintBg(context, col, soft: true),
-                    border: Border.all(color: _tintBorder(context, col)),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(k.icon, size: 20, color: _tintFg(context, col)),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: w.Text(_l(context, k.titleAr, k.titleEn),
-                                style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, col))),
-                          ),
-                          w.Text(sevLabel, style: TextStyle(fontSize: 11, color: _tintFg(context, col))),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      w.Text(_l(context, k.whyAr, k.whyEn), style: const TextStyle(fontSize: 13)),
-                      const SizedBox(height: 6),
-                      for (final n in groups[k.key]!)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 2),
-                          child: Text('• $n', style: const TextStyle(fontSize: 12)),
-                        ),
-                      const SizedBox(height: 6),
-                      w.Text('${_l(context, 'تعمل إيه؟', 'What to do')}: ${_l(context, k.fixAr, k.fixEn)}',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                );
-              }),
+              child: w.Text(_l(context, 'مفيش ملاحظات ✓', 'No notes ✓'),
+                  style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, Colors.green))),
+            ),
+          // 6) الباتش اليدوي
+          section(_l(context, 'تعديل الباتش', 'Edit batch'), [
+            TextField(
+              controller: r.ctl,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                isDense: true,
+                labelText: _l(context, 'عدد معاملات الباتش (بيتقري من التقفيل، اكتب رقم لو عايز تغيّره)',
+                    'Batch transaction count (read from closing; type a number to override)'),
+                hintText: _batchAutoOf(r)?.toString(),
+              ),
+              onChanged: (_) {
+                widget.onChanged();
+                setState(() {});
+              },
+            ),
+            if (bt != null && _batchIsAuto(r))
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: w.Text(_l(context, 'الباتش ده اتقرا تلقائي من التقفيل/السيستم.', 'This batch was read automatically from closing/system.'),
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+              ),
+            if (r.softWarn)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: w.Text(
+                    _l(context, '⚠️ فرق بسيط (أقل من $kSoftGap إيصالات) - سليم ومش محتاج مراجعة',
+                        '⚠️ Small difference (under $kSoftGap receipts) - OK, no review needed'),
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              ),
           ]),
+          // 7) تفاصيل فنية: مقفولة افتراضياً
+          Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: Theme(
+              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                title: w.Text(_l(context, 'تفاصيل فنية', 'Technical details'),
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                children: [
+                  ...numbers,
+                  if (r.detail.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(r.detail, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                    ),
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 16),
         ],
       ),
@@ -10203,7 +10319,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     // البحث في الـ bytes بيشتغل في isolate علشان الواجهة ما تهنجش مع الملفات الكبيرة
     final ranges = await Isolate.run(() => _pdfJpegRanges(bytes));
     if (ranges.isEmpty) return false;
-    final col = MCollector();
+    final col = MCollector()..trackDups = true;
     final sw = Stopwatch()..start();
     var total = 0, totalMx = 0, failed = 0, slips = 0, total3 = 0;
     final diff = <String>[];
@@ -10256,6 +10372,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
                 col.pageH = sp.h;
                 col.pages.add(<Anchor>[]);
+                col.curPage = i + 1;
                 _collect(res, 0, 1, col);
                 pageSm[i + 1] = sp.sm;
                 pageSm2[i + 1] = sp.sm2;
@@ -10303,6 +10420,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         if ((sp.sm - sp.mx).abs() >= 2) diff.add('${i + 1} (${sp.sm} أو ${sp.mx})');
         col.pageH = sp.h;
         col.pages.add(<Anchor>[]);
+        col.curPage = i + 1;
         _collect(res, 0, 1, col);
         pageSm[i + 1] = sp.sm;
         pageSm2[i + 1] = sp.sm2;
@@ -10325,38 +10443,18 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     // العدد الأساسي = الطريقة 3 (التسلسل الرأسي). الطريقتين التانيين (1 و2) للمقارنة والتحذير.
     if (total3 > 0) total = total3;
     var chosenM = total3 > 0 ? 3 : 1; // الطريقة اللي اتختار منها العدد
-    final bt = _batchOf(r);
-    if (bt != null && bt != total) {
-      // الباتش (من التقفيل أو اللي كتبته بإيدك) بيطابق طريقة تانية: نختارها
-      if (bt == total1) {
-        chosenM = 1;
-        total = total1;
-        dualInfo = ' • اتختار $total1 (طابق الباتش) بدل $total3';
-      } else if (bt == total2) {
-        chosenM = 2;
-        total = total2;
-        dualInfo = ' • اتختار $total2 (طابق الباتش) بدل $total3';
-      }
-    }
-    // ───── تدقيق آخر صفحة: غالباً هي اللي بتقل أو بتزيد ─────
+    // العدد بيتحدد من القراءة بس. الباتش والسيستم بيتقارنوا بيه في التقرير ومش بيأثروا عليه أبداً.
+    // ───── آخر صفحة: قراءة تانية بصورة محسّنة للمقارنة بس (من غير أي مرجع من الباتش أو السيستم) ─────
     var lastInfo = '';
     final lastKeys = pageSm3.keys.toList()..sort();
     if (lastKeys.isNotEmpty) {
       final lastK = lastKeys.last;
-      final n0 = r.orderNum;
-      final refs = <int>{
-        if (bt != null) bt,
-        if (n0 != null && batchTxnByNum[n0] != null) batchTxnByNum[n0]!,
-        if (n0 != null && sysTxnByNum[n0] != null) sysTxnByNum[n0]!,
-      };
       final lm1 = pageSm[lastK] ?? 0, lm2 = pageSm2[lastK] ?? 0, lm3 = pageSm3[lastK] ?? 0;
       final curLast = chosenM == 1 ? lm1 : (chosenM == 2 ? lm2 : lm3);
       final lastDisagree = lm1 != lm3 || lm2 != lm3;
-      final refMiss = refs.isNotEmpty && !refs.contains(total);
       final seqMiss = sc.rangeLen != null && sc.full >= total * 0.8 && total != sc.rangeLen;
       lastInfo = ' • آخر صفحة ($lastK): $curLast إيصال';
-      // القراءة التانية بتتعمل لو التدقيق المزدوج شغال، أو لو في اختلاف/عدم تطابق (غير كده الفحص يفضل سريع)
-      if (dualCount || lastDisagree || refMiss || seqMiss) {
+      if (dualCount || lastDisagree || seqMiss) {
         try {
           final i = lastK - 1;
           _ensureMTmp();
@@ -10372,21 +10470,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           try {
             File(p2).deleteSync();
           } catch (_) {}
-          _dbg('LASTPAGE ${r.pdfName} p$lastK: أصلي=$lm1/$lm2/$lm3 محسّن=${sp2.sm}/${sp2.sm2}/${sp2.sm3} مرجع=$refs');
-          final base = total - curLast;
-          int? pick;
-          if (refMiss) {
-            for (final c in <int>[sp2.sm3, sp2.sm, sp2.sm2, sp2.mx, lm3, lm1, lm2]) {
-              if (c != curLast && refs.contains(base + c)) {
-                pick = c;
-                break;
-              }
-            }
-          }
-          if (pick != null) {
-            total = base + pick;
-            lastInfo = ' • آخر صفحة ($lastK): $pick إيصال (اتصحّحت من $curLast بقراءة تانية وطابقت الباتش/السيستم)';
-          } else if (sp2.sm3 != lm3) {
+          _dbg('LASTPAGE ${r.pdfName} p$lastK: أصلي=$lm1/$lm2/$lm3 محسّن=${sp2.sm}/${sp2.sm2}/${sp2.sm3}');
+          if (sp2.sm3 != lm3) {
             r.cntOk = false;
             r.cntNotes.add('آخر صفحة ($lastK) اتقرت مرتين بنتيجتين مختلفتين: $lm3 / ${sp2.sm3} (راجعها)');
           } else {
@@ -10397,7 +10482,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         }
       }
     }
-    if ((total1 != total3 || total2 != total3) && !(bt != null && bt == total)) {
+    if (total1 != total3 || total2 != total3) {
       final pg = <String>[];
       for (final k in pageSm.keys) {
         if (pageSm[k] != pageSm3[k] || pageSm2[k] != pageSm3[k]) {
@@ -10405,8 +10490,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         }
       }
       final pgTxt = pg.isEmpty ? '' : ' • الصفحات: ${pg.join('، ')}';
-      // مفيش باتش يحسم: العدد الأساسي (طريقة 3) بيفضل، ونعلّم الملف للمراجعة
-      dualNote = 'الطرق اختلفت: $total1 / $total2 / $total3 (اتختار $total)$pgTxt (راجع)';
+      // العدد الأساسي (طريقة 3) بيفضل دايماً، ونعلّم الملف للمراجعة
+      dualNote = 'طرق العد اختلفت: $total1 / $total2 / $total3 (المعروض $total)$pgTxt (راجع)';
     }
     r.count = total;
     r.detail = 'عدّ سريع${par ? ' متوازي' : ''} • ${ranges.length} صفحة • RRN مقروء ${sc.full}${sc.rangeText}'
@@ -10463,6 +10548,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     if (sc.nonPayment) {
       r.cntNotes.add('فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)');
+    }
+    if (sc.dups.isNotEmpty) {
+      // للمعرفة بس: مش بيتخصم من العدد ومش بيدخل الملف في المراجعة
+      final es = sc.dups.entries.toList();
+      for (final e in es.take(8)) {
+        final byPg = <int, int>{};
+        for (final p in e.value) {
+          byPg[p] = (byPg[p] ?? 0) + 1;
+        }
+        final pgs = byPg.keys.toList()..sort();
+        final where = pgs.map((p) => byPg[p]! > 1 ? 'صفحة $p (${byPg[p]} مرات)' : 'صفحة $p').join(' و ');
+        r.cntNotes.add('إيصال متكرر رقم ${e.key.substring(6)}: $where');
+      }
+      if (es.length > 8) r.cntNotes.add('إيصال متكرر: و ${es.length - 8} تانيين كمان');
     }
     if (r.newName == null && sc.tid != null) {
       await _applyName(r, src, sc.tid, sc.day, sc.month);
