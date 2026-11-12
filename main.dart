@@ -4167,6 +4167,18 @@ _StructPage _structCount(RecognizedText res) {
     n2 += pay;
     n3 += _seqCountCol(c, h);
   }
+  // صفحة فيها إيصال أو اتنين كبار (غالباً آخر صفحة): علامات الإيصال الواحد (الشعار / Terminal / AMOUNT)
+  // بتتوزع على أعمدة غلط فالعدد بيزيد (إيصال واحد اتعدّ 4). لو 3 علامات أو أكتر اتفقوا على نفس العدد
+  // الكلي للصفحة، يبقى ده العدد الصح ومفيش طريقة تعدّي فوقه.
+  var strongTypes = 0;
+  for (final v in out.types.values) {
+    if (v == out.mx) strongTypes++;
+  }
+  if (strongTypes >= 3) {
+    if (n > out.mx) n = out.mx;
+    if (n2 > out.mx) n2 = out.mx;
+    if (n3 > out.mx) n3 = out.mx;
+  }
   out.sm = n;
   out.sm2 = n2;
   out.sm3 = n3;
@@ -10364,7 +10376,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           final base = total - curLast;
           int? pick;
           if (refMiss) {
-            for (final c in <int>[sp2.sm3, sp2.sm, sp2.sm2, lm3, lm1, lm2]) {
+            for (final c in <int>[sp2.sm3, sp2.sm, sp2.sm2, sp2.mx, lm3, lm1, lm2]) {
               if (c != curLast && refs.contains(base + c)) {
                 pick = c;
                 break;
