@@ -445,6 +445,86 @@ Widget _switchRow(String label, bool v, void Function(bool)? onChanged) => Switc
       onChanged: onChanged,
     );
 
+// قايمة طرق العد: مطوية، بتفتحها بالضغط وتختار اللي عايزه. الديفولت = الأسرع (سريع متوازي).
+Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged}) {
+  Widget radio(String label, String sub, bool sel, VoidCallback onTap) => ListTile(
+        dense: true,
+        visualDensity: VisualDensity.compact,
+        contentPadding: EdgeInsets.zero,
+        enabled: !busy,
+        leading: Icon(sel ? Icons.radio_button_checked : Icons.radio_button_unchecked, size: 20),
+        title: Text(label, style: const TextStyle(fontSize: 13)),
+        subtitle: sub.isEmpty ? null : Text(sub, style: const TextStyle(fontSize: 11)),
+        onTap: busy
+            ? null
+            : () {
+                onTap();
+                onChanged();
+              },
+      );
+  Widget chk(String label, String sub, bool v, void Function(bool) set) => CheckboxListTile(
+        dense: true,
+        visualDensity: VisualDensity.compact,
+        contentPadding: EdgeInsets.zero,
+        controlAffinity: ListTileControlAffinity.leading,
+        title: Text(label, style: const TextStyle(fontSize: 13)),
+        subtitle: sub.isEmpty ? null : Text(sub, style: const TextStyle(fontSize: 11)),
+        value: v,
+        onChanged: busy
+            ? null
+            : (x) {
+                set(x ?? false);
+                onChanged();
+              },
+      );
+  Widget head(String t) => Padding(
+        padding: const EdgeInsets.only(top: 8, bottom: 2),
+        child: Text(t, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+      );
+  const engines = <String>['سريع متوازي', 'سريع عادي', 'دقيق'];
+  return Builder(
+    builder: (context) => Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: 8),
+        dense: true,
+        title: Text('طرق العد • ${engines[countEngine]} • طريقة $countMethod', style: const TextStyle(fontSize: 13)),
+        children: [
+          head('محرك العد (اختار واحد)'),
+          radio('⚡ سريع متوازي (الأسرع - الافتراضي)', 'بيقرا صفحتين مع بعض من صور الـ PDF مباشرة', countEngine == 0, () => setCountEngine(0)),
+          radio('سريع عادي', 'نفس السريع بس صفحة ورا صفحة (أخف على الذاكرة)', countEngine == 1, () => setCountEngine(1)),
+          radio('دقيق (الأبطأ)', 'بيحوّل كل صفحة لصورة PNG ويقطعها شرائح', countEngine == 2, () => setCountEngine(2)),
+          head('العدد المعروض بيتحسب بـ (اختار واحدة)'),
+          radio('طريقة 3: تسلسل رأسي (الأساسية)', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
+          radio('طريقة 2: علامات الدفع بس', 'RRN / AMOUNT / Approved', countMethod == 2, () => setCountMethod(2)),
+          radio('طريقة 1: أكبر علامة', 'أكتر علامة متكررة في كل عمود', countMethod == 1, () => setCountMethod(1)),
+          head('إضافات (علّم على اللي عايزه)'),
+          chk('تدقيق مزدوج لآخر صفحة', 'قراءة تانية بصورة محسّنة - أدق وأبطأ شوية', dualCount, (v) {
+            dualCount = v;
+            _saveCfgKey('dualCount', v);
+          }),
+          chk('إعادة فحص الصفحات المشكوك فيها', 'إزالة الخط الأحمر + عدّ المستطيلات (بتشتغل بس لما الطرق تختلف)', redFixCount, setRedFixCount),
+          chk('حماية الزيادة (+1)', 'صفحة كاملة عددها أكتر بواحد والعلامات متفقة على الأقل = بتتصحح', consensusGuard, setConsensusGuard),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton.icon(
+              onPressed: busy
+                  ? null
+                  : () {
+                      resetCountDefaults();
+                      onChanged();
+                    },
+              icon: const Icon(Icons.restart_alt, size: 18),
+              label: const Text('رجوع للإعدادات الافتراضية (الأسرع)', style: TextStyle(fontSize: 12)),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 Widget _statusBox(String text) => Builder(
       builder: (c) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -4042,7 +4122,69 @@ bool _loadFast() {
 // ⚡ عدّ متوازي (تجريبي): عدد الصفحات اللي بتتقرا مع بعض (recognizer لكل صفحة)
 const int _kParWorkers = 2;
 
-bool fastCount = true; // السريعة ثابتة (الدقيقة بتشتغل لوحدها كاحتياطي لو السريعة فشلت)
+// ───────── طرق العد (بتتحكم فيها من قايمة "طرق العد" في الشاشة) ─────────
+int _loadIntCfg(String k, int d, int lo, int hi) {
+  try {
+    final v = _readCfg()[k];
+    if (v is int && v >= lo && v <= hi) return v;
+  } catch (_) {}
+  return d;
+}
+
+bool _loadBoolCfg(String k, bool d) {
+  try {
+    final v = _readCfg()[k];
+    if (v is bool) return v;
+  } catch (_) {}
+  return d;
+}
+
+void _saveCfgKey(String k, Object v) {
+  try {
+    final m = _readCfg();
+    m[k] = v;
+    _writeCfg(m);
+  } catch (_) {}
+}
+
+// محرك العد: 0 = سريع متوازي (الأسرع - الافتراضي) • 1 = سريع عادي • 2 = دقيق (raster + شرائح، الأبطأ)
+int countEngine = _loadIntCfg('countEngine', 0, 0, 2);
+bool get fastCount => countEngine != 2;
+bool get parallelCount => countEngine == 0;
+void setCountEngine(int e) {
+  countEngine = e;
+  _saveCfgKey('countEngine', e);
+}
+
+// الطريقة اللي منها العدد المعروض: 3 = تسلسل رأسي (الأساسية) • 2 = علامات الدفع بس • 1 = أكبر علامة
+int countMethod = _loadIntCfg('countMethod', 3, 1, 3);
+void setCountMethod(int m) {
+  countMethod = m;
+  _saveCfgKey('countMethod', m);
+}
+
+// إعادة فحص الصفحات المشكوك فيها (إزالة الخط الأحمر + عدّ المستطيلات)
+bool redFixCount = _loadBoolCfg('redFixCount', true);
+void setRedFixCount(bool v) {
+  redFixCount = v;
+  _saveCfgKey('redFixCount', v);
+}
+
+// حماية الزيادة: صفحة كاملة (مش آخر صفحة) عددها أكتر من باقي الصفحات بواحد والعلامات متفقة على العدد الأقل = الزيادة قراءة مكررة
+bool consensusGuard = _loadBoolCfg('consensusGuard', true);
+void setConsensusGuard(bool v) {
+  consensusGuard = v;
+  _saveCfgKey('consensusGuard', v);
+}
+
+void resetCountDefaults() {
+  setCountEngine(0);
+  setCountMethod(3);
+  setRedFixCount(true);
+  setConsensusGuard(true);
+  dualCount = false;
+  _saveCfgKey('dualCount', false);
+}
 
 bool _loadDual() {
   try {
@@ -4061,16 +4203,7 @@ bool _loadPar() {
   }
 }
 
-bool parallelCount = _loadPar();
 
-void toggleParallelCount() {
-  parallelCount = !parallelCount;
-  try {
-    final m = _readCfg();
-    m['parallelCount'] = parallelCount;
-    _writeCfg(m);
-  } catch (_) {}
-}
 
 // التدقيق المزدوج (اختياري، أبطأ شوية): قراءة تانية بصورة محسّنة لآخر صفحة في كل ملف (والصفحات المشكوك فيها)
 bool dualCount = _loadDual();
@@ -4084,14 +4217,10 @@ void toggleDualCount() {
   } catch (_) {}
 }
 
-void toggleFastCount() {
-  fastCount = !fastCount;
-  try {
-    final m = _readCfg();
-    m['fastCount'] = fastCount;
-    _writeCfg(m);
-  } catch (_) {}
-}
+
+// ⚠️ لازم تتنده من دالة top-level: لو Isolate.run اتكتبت جوه ميثود في الـ State، الـ closure بتشيل معاها
+// الـ context كله (MResult + TextEditingController...) فالإرسال بيفشل والعد السريع بيقع على الطريقة البطيئة.
+Future<List<List<int>>> _pdfJpegRangesAsync(Uint8List b) => Isolate.run(() => _pdfJpegRanges(b));
 
 // بيطلّع صور الصفحات (JPEG) جاهزة من PDF ممسوح (CamScanner وغيره): من غير raster ولا PNG
 List<List<int>> _pdfJpegRanges(Uint8List b) {
@@ -4155,6 +4284,7 @@ class _StructPage {
   int sm = 0, mx = 0;
   int sm2 = 0; // الطريقة التانية: علامات إيصال الدفع بس (من غير الشعار/Terminal)
   int sm3 = 0; // الطريقة 3 (الأساسية): عدّ بالتسلسل الرأسي للعلامات جوه كل عمود
+  int vote = 0, voteN = 0; // التصويت: العدد اللي أكتر أنواع علامات متفقة عليه (voteN = كام نوع اتفق)
   double h = 3000;
   final Map<String, int> types = {};
   final List<double> amts = []; // مبالغ الإيصالات اللي اتقرت بوضوح في الصفحة
@@ -4285,6 +4415,16 @@ _StructPage _structCount(RecognizedText res) {
   }
   if (ded.isEmpty) return out;
   out.mx = out.types.values.reduce((a, b) => a > b ? a : b);
+  final freqV = <int, int>{};
+  for (final v in out.types.values) {
+    if (v > 0) freqV[v] = (freqV[v] ?? 0) + 1;
+  }
+  freqV.forEach((v, c) {
+    if (c > out.voteN || (c == out.voteN && v < out.vote)) {
+      out.vote = v;
+      out.voteN = c;
+    }
+  });
   // أعمدة
   ded.sort((a, b) => a.cx.compareTo(b.cx));
   final cols = <List<_SA>>[];
@@ -10568,7 +10708,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   // العد السريع: بيقرا صورة كل صفحة مرة واحدة من غير تحويل PNG ولا شرائح. بيرجّع false لو الملف مش ممسوح
   Future<bool> _countOneFast(MResult r, TextRecognizer rec, Uint8List bytes, File src) async {
     // البحث في الـ bytes بيشتغل في isolate علشان الواجهة ما تهنجش مع الملفات الكبيرة
-    final ranges = await Isolate.run(() => _pdfJpegRanges(bytes));
+    final ranges = await _pdfJpegRangesAsync(bytes);
     if (ranges.isEmpty) return false;
     final col = MCollector()..trackDups = true;
     final sw = Stopwatch()..start();
@@ -10578,6 +10718,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pageSm = <int, int>{}; // رقم الصفحة -> عدد الإيصالات المعدودة فيها (الطريقة 1)
     final pageSm2 = <int, int>{}; // نفس الشيء بالطريقة 2
     final pageSm3 = <int, int>{}; // نفس الشيء بالطريقة 3 (الأساسية)
+    final pageVote = <int, int>{}; // رقم الصفحة -> العدد اللي 3 أنواع علامات أو أكتر متفقين عليه (0 = مفيش اتفاق)
     var total2 = 0;
     final pageAmt = <int, List<double>>{}; // رقم الصفحة -> المبالغ المقروءة
     final pageAmtN = <int, int>{}; // رقم الصفحة -> عدد علامات AMOUNT
@@ -10630,6 +10771,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 pageSm[i + 1] = sp.sm;
                 pageSm2[i + 1] = sp.sm2;
                 pageSm3[i + 1] = sp.sm3;
+                pageVote[i + 1] = sp.voteN >= 3 ? sp.vote : 0;
                 pageAmt[i + 1] = sp.amts;
                 pageAmtN[i + 1] = sp.types['amount'] ?? 0;
               }
@@ -10680,6 +10822,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         pageSm[i + 1] = sp.sm;
         pageSm2[i + 1] = sp.sm2;
         pageSm3[i + 1] = sp.sm3;
+        pageVote[i + 1] = sp.voteN >= 3 ? sp.vote : 0;
         pageAmt[i + 1] = sp.amts;
         pageAmtN[i + 1] = sp.types['amount'] ?? 0;
       } catch (e) {
@@ -10716,7 +10859,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         }
       }
     }
-    for (final k in sus.toList()..sort()) {
+    for (final k in (redFixCount ? (sus.toList()..sort()) : <int>[])) {
       try {
         _ensureMTmp();
         final p1 = '$mTmpDir/rr_${k - 1}.jpg';
@@ -10754,6 +10897,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           pageSm[k] = pick;
           pageSm2[k] = pick;
           pageSm3[k] = pick;
+          pageVote.remove(k);
           pageAmt[k] = cs.amts;
           pageAmtN[k] = cs.types['amount'] ?? 0;
         }
@@ -10762,6 +10906,31 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         _dbg('REDFIX_FAIL ${r.pdfName} p$k: ${e.toString().split('\n').first}');
       }
       await Future.delayed(const Duration(milliseconds: 2));
+    }
+    // حماية الزيادة: الورقة بتشيل عدد ثابت (مثلاً 15). صفحة كاملة (مش الأخيرة) عددها أكتر بواحد من الأغلبية
+    // وأغلب علامات الإيصال (3 أنواع أو أكتر) متفقة على عدد الأغلبية = الزيادة قراءة مكررة فنرجّعها للأغلبية.
+    if (consensusGuard && keysSorted.length >= 4) {
+      final lastG = keysSorted.last;
+      final bodyG = keysSorted.where((k) => k != lastG).toList();
+      final fq = <int, int>{};
+      for (final k in bodyG) {
+        fq[pageSm3[k]!] = (fq[pageSm3[k]!] ?? 0) + 1;
+      }
+      if (fq.isNotEmpty) {
+        final tp = fq.entries.reduce((a, b) => a.value >= b.value ? a : b);
+        if (tp.key > 0 && tp.value >= bodyG.length * 0.6) {
+          for (final k in bodyG) {
+            final cur = pageSm3[k]!;
+            if (cur == tp.key + 1 && pageVote[k] == tp.key) {
+              pageNote[k] = 'اتصحّحت من $cur لـ ${tp.key}: الصفحة الكاملة ${tp.key} إيصال والعلامات متفقة على ${tp.key} (راجع)';
+              _dbg('GUARD ${r.pdfName} p$k: $cur -> ${tp.key}');
+              pageSm[k] = tp.key;
+              pageSm2[k] = tp.key;
+              pageSm3[k] = tp.key;
+            }
+          }
+        }
+      }
     }
     if (pageNote.isNotEmpty) {
       total = pageSm.values.fold<int>(0, (a, b) => a + b);
@@ -10773,8 +10942,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     var dualInfo = '';
     var dualNote = '';
     // العدد الأساسي = الطريقة 3 (التسلسل الرأسي). الطريقتين التانيين (1 و2) للمقارنة والتحذير.
-    if (total3 > 0) total = total3;
-    var chosenM = total3 > 0 ? 3 : 1; // الطريقة اللي اتختار منها العدد
+    var chosenM = countMethod; // الطريقة اللي اتختار منها العدد (من قايمة طرق العد)
+    final pickedTotal = chosenM == 1 ? total1 : (chosenM == 2 ? total2 : total3);
+    if (pickedTotal <= 0) chosenM = total3 > 0 ? 3 : 1;
+    total = chosenM == 1 ? total1 : (chosenM == 2 ? total2 : total3);
     // العدد بيتحدد من القراءة بس. الباتش والسيستم بيتقارنوا بيه في التقرير ومش بيأثروا عليه أبداً.
     // ───── آخر صفحة: قراءة تانية بصورة محسّنة للمقارنة بس (من غير أي مرجع من الباتش أو السيستم) ─────
     var lastInfo = '';
@@ -11162,18 +11333,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         children: [
           _settingsCard([
             _switchRow('فحص تلقائي (بيراقب الملفات الجديدة ويفحصها لوحده)', autoScan, (v) => _setAuto(v)),
-            _switchRow('عد متوازي (الأسرع)', parallelCount, busy
-                ? null
-                : (v) {
-                    toggleParallelCount();
-                    setState(() {});
-                  }),
-            _switchRow('تدقيق مزدوج (قراءة تانية لآخر صفحة - أدق وأبطأ شوية)', dualCount, busy
-                ? null
-                : (v) {
-                    toggleDualCount();
-                    setState(() {});
-                  }),
+            _countMethodsPanel(busy: busy, onChanged: () => setState(() {})),
             const Divider(height: 4),
             _sourceChips(context,
                 busy: busy,
