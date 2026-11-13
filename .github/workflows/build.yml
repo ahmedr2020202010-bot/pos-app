@@ -89,12 +89,34 @@ jobs:
 
           class MainActivity : FlutterActivity() {
               private var pickResult: MethodChannel.Result? = null
+              private var nativeChan: MethodChannel? = null
+              private var pendingOpen: String? = null
+
+              override fun onCreate(savedInstanceState: android.os.Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  pendingOpen = intent?.getStringExtra("open")
+                  intent?.removeExtra("open")
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  val p = intent.getStringExtra("open")
+                  if (p != null) {
+                      intent.removeExtra("open")
+                      pendingOpen = p
+                      try {
+                          nativeChan?.invokeMethod("onOpen", p)
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   android.os.StrictMode.setVmPolicy(android.os.StrictMode.VmPolicy.Builder().build())
-                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "pos/native")
-                      .setMethodCallHandler { call, result ->
+                  nativeChan = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "pos/native")
+                  nativeChan!!.setMethodCallHandler { call, result ->
                           when (call.method) {
                               "openFolder" -> {
                                   val path = call.argument<String>("path") ?: ""
@@ -118,14 +140,23 @@ jobs:
                                   }
                                   result.success(true)
                               }
+                              "getInitialOpen" -> {
+                                  val p0 = pendingOpen
+                                  pendingOpen = null
+                                  result.success(p0)
+                              }
                               "notify" -> {
                                   try {
                                       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                                       var nid = call.argument<Number>("id")?.toInt() ?: (System.currentTimeMillis() % 2000000000L).toInt()
                                       if (nid == 7) nid = 8
-                                      nm.notify(nid, NotifHelper.build(this, "pos_done", "اكتمال المعالجة",
+                                      val alert = call.argument<Boolean>("alert") ?: false
+                                      val openP = call.argument<String>("open")
+                                      val cid = if (alert) "pos_alert2" else "pos_ok2"
+                                      val cname = if (alert) "تنبيه مشاكل الفحص" else "نتيجة الفحص (هادي)"
+                                      nm.notify(nid, NotifHelper.build(this, cid, cname,
                                           call.argument<String>("title") ?: "A2R POS",
-                                          call.argument<String>("text") ?: "", false))
+                                          call.argument<String>("text") ?: "", false, openP, nid))
                                       result.success(true)
                                   } catch (e: Exception) {
                                       result.success(false)
@@ -559,14 +590,33 @@ jobs:
           import android.os.IBinder
 
           object NotifHelper {
-              fun build(ctx: Context, channelId: String, channelName: String, title: String, text: String, ongoing: Boolean): Notification {
+              fun build(ctx: Context, channelId: String, channelName: String, title: String, text: String, ongoing: Boolean, openPayload: String? = null, reqCode: Int = 0): Notification {
                   val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                   if (Build.VERSION.SDK_INT >= 26) {
                       val imp = if (ongoing) NotificationManager.IMPORTANCE_LOW else NotificationManager.IMPORTANCE_HIGH
-                      nm.createNotificationChannel(NotificationChannel(channelId, channelName, imp))
+                      val ch = NotificationChannel(channelId, channelName, imp)
+                      if (channelId == "pos_alert2") {
+                          ch.enableVibration(true)
+                          ch.vibrationPattern = longArrayOf(0, 500, 200, 500, 200, 800)
+                          ch.setSound(android.provider.Settings.System.DEFAULT_NOTIFICATION_URI,
+                              android.media.AudioAttributes.Builder()
+                                  .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                                  .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+                      } else if (channelId == "pos_ok2") {
+                          ch.setSound(null, null)
+                          ch.enableVibration(false)
+                      }
+                      nm.createNotificationChannel(ch)
                   }
-                  val launch = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: Intent()
-                  val pi = PendingIntent.getActivity(ctx, 0, launch, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                  val launch: Intent = if (openPayload != null) {
+                      val li = Intent(ctx, MainActivity::class.java)
+                      li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                      li.putExtra("open", openPayload)
+                      li
+                  } else {
+                      ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: Intent()
+                  }
+                  val pi = PendingIntent.getActivity(ctx, reqCode, launch, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
                   val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, channelId) else Notification.Builder(ctx)
                   b.setSmallIcon(ctx.applicationInfo.icon)
                   b.setContentTitle(title)
@@ -575,6 +625,7 @@ jobs:
                   if (!ongoing) b.setStyle(Notification.BigTextStyle().bigText(text))
                   b.setOngoing(ongoing)
                   b.setAutoCancel(!ongoing)
+                  if (Build.VERSION.SDK_INT < 26 && channelId == "pos_alert2") b.setDefaults(Notification.DEFAULT_SOUND or Notification.DEFAULT_VIBRATE)
                   return b.build()
               }
           }
