@@ -4850,6 +4850,27 @@ Future<void> askBatteryExempt({bool force = false}) async {
   } catch (_) {}
 }
 
+// لو إذن الإشعارات مقفول: مفيش إشعار هيظهر وانت برا التطبيق. بنقولك وبنفتحلك الإعدادات
+Future<void> ensureNotifPerm(BuildContext context) async {
+  try {
+    var st = await Permission.notification.status;
+    if (!st.isGranted) st = await Permission.notification.request();
+    if (st.isGranted) return;
+  } catch (_) {
+    return;
+  }
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: w.Text(tr('الإشعارات مقفولة للتطبيق، فمش هيجيلك إشعار النتيجة وانت برا التطبيق. فعّلها من الإعدادات.')),
+    duration: const Duration(seconds: 12),
+    action: SnackBarAction(
+        label: tr('الإعدادات'),
+        onPressed: () {
+          openAppSettings();
+        }),
+  ));
+}
+
 String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : d == 2 ? '3 أيام' : 'الكل';
 
 // كارت إحصائية صغير (أيقونة + رقم + اسم) بيتوزع بالتساوي جوه Row
@@ -5102,6 +5123,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
+    // رجعت للتطبيق: نعرض هل المراقبة كانت شغالة وانت برا (تشخيص)
+    if (state == AppLifecycleState.resumed && autoScan && !busy && _lastTickAt != null && mounted) {
+      final ago = DateTime.now().difference(_lastTickAt!).inSeconds;
+      setState(() => status = ago <= 30
+          ? 'المراقبة شغالة ✓ (آخر مرور على المجلد من $ago ثانية).'
+          : '⚠️ المراقبة كانت واقفة وانت برا التطبيق (آخر مرور من ${ago ~/ 60} دقيقة). النظام وقّف التطبيق في الخلفية.');
+    }
   }
 
   @override
@@ -5186,7 +5214,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _autoTimer?.cancel();
     _quickPend = <String>{};
     _quickEnsureBaseline();
-    _autoTimer = Timer.periodic(const Duration(seconds: 15), (_) => _autoTick());
+    _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) => _autoTick());
     _watchService(true);
   }
 
@@ -5196,8 +5224,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _watchService(false);
   }
 
+  DateTime? _lastTickAt; // آخر مرة المراقبة اشتغلت (لتشخيص: هل كانت شغالة وانت برا التطبيق؟)
+  String _lastDirSig = '';
+  int _idleTicks = 0;
+
+  // توقيع خفيف للمجلدات (وقت تعديل المجلد نفسه): لو ما اتغيرش مفيش داعي نلف على آلاف الملفات
+  String _dirSig() {
+    try {
+      final dirs = customDir != null ? [Directory(customDir!)] : findWhatsAppImageDirs();
+      return dirs.map((d) => '${d.path}:${d.statSync().modified.millisecondsSinceEpoch}').join('|');
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> _autoTick() async {
+    _lastTickAt = DateTime.now();
     if (!mounted || !autoScan || busy || _fullRunning || chainRunning || machBusyG || quickBusyG) return;
+    final ds = _dirSig();
+    if (ds.isNotEmpty && ds == _lastDirSig && _quickPend.isEmpty && ++_idleTicks < 6) return; // فحص كامل كل 30 ثانية على الأقل
+    _idleTicks = 0;
+    _lastDirSig = ds;
     if (!quickHasBaseline()) {
       _quickEnsureBaseline();
       return;
@@ -5316,9 +5363,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     cfg['autoScan'] = v;
     _writeCfg(cfg);
     if (v) {
-      try {
-        await Permission.notification.request();
-      } catch (_) {}
+      await ensureNotifPerm(context);
       try {
         final st = await Permission.manageExternalStorage.status;
         if (!st.isGranted) await Permission.manageExternalStorage.request();
@@ -10146,7 +10191,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
   void _startAuto() {
     _autoTimer?.cancel();
-    _autoTimer = Timer.periodic(const Duration(seconds: 15), (_) => _autoTick());
+    _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) => _autoTick());
     _watchService(true);
   }
 
@@ -10156,8 +10201,24 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     _watchService(homeAutoG);
   }
 
+  String _lastDirSigM = '';
+  int _idleTicksM = 0;
+
+  String _dirSigM() {
+    try {
+      final dirs = pdfDir != null ? [Directory(pdfDir!)] : findWhatsAppDocDirs();
+      return dirs.map((d) => '${d.path}:${d.statSync().modified.millisecondsSinceEpoch}').join('|');
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> _autoTick() async {
     if (!mounted || !autoScan || busy || chainRunning || homeBusyG || quickBusyG) return;
+    final ds = _dirSigM();
+    if (ds.isNotEmpty && ds == _lastDirSigM && _pendSig.isEmpty && ++_idleTicksM < 6) return;
+    _idleTicksM = 0;
+    _lastDirSigM = ds;
     final sig = _scanSig();
     if (sig.isEmpty || sig == _doneSig) {
       _pendSig = '';
@@ -10178,9 +10239,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     cfg['autoScanM'] = v;
     _writeCfg(cfg);
     if (v) {
-      try {
-        await Permission.notification.request();
-      } catch (_) {}
+      await ensureNotifPerm(context);
       try {
         final st = await Permission.manageExternalStorage.status;
         if (!st.isGranted) await Permission.manageExternalStorage.request();
