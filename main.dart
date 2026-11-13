@@ -5290,6 +5290,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final l = _liteLine(it);
         if (l != null) lines.add(l);
       }
+      // صور السيستم الجديدة (A2R Operations Console): مش باتش فمش في processedItems، فبنعمل لها سطر إشعار لوحدها
+      final newNames = ready.map((e) => baseName(e.value.path)).toSet();
+      for (final sy in sysReads) {
+        if (!newNames.contains(sy.file)) continue;
+        final t = sy.tid != null ? terminals[sy.tid] : null;
+        final label = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
+        if (sy.amount == null) {
+          lines.add('⚠️ صورة سيستم ($label): مش قادر أقرا المبلغ - راجعها');
+          continue;
+        }
+        var tot = 0.0;
+        var has = false;
+        if (t != null) {
+          for (final x in processedItems) {
+            if (x.counts && x.amount > 0 && x.orderNum == t.orderNum) {
+              tot += x.amount;
+              has = true;
+            }
+          }
+        }
+        final amt = sy.amount!.toStringAsFixed(2);
+        if (!has) {
+          lines.add('🖥️ صورة سيستم $label: $amt ج.م (لسه مفيش باتش للمقارنة)');
+        } else {
+          final d = round2(tot - sy.amount!);
+          lines.add(d == 0
+              ? '✅ صورة سيستم $label: $amt ج.م - مطابق للباتشات'
+              : '⚠️ صورة سيستم $label: $amt ج.م - فرق ${d.toStringAsFixed(2)} عن مجموع الباتشات');
+        }
+      }
     } catch (e) {
       _dbg('LITE_FAIL $e');
     } finally {
@@ -5339,6 +5369,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (mounted && !busy) {
       setState(() => status = 'آخر فحص تلقائي ($hm):\n$text');
     }
+    // داخل التطبيق: SnackBar لو التطبيق ظاهر، وإشعار التليفون دايماً (ظاهر أو لأ)
     if (mounted && _life == AppLifecycleState.resumed) {
       try {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -5346,14 +5377,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           duration: Duration(seconds: bad ? 8 : 4),
         ));
       } catch (_) {}
-    } else {
-      try {
-        await _chan.invokeMethod('notify', {
-          'title': tr('${bad ? '⚠️' : '✅'} A2R POS - فحص تلقائي${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}'),
-          'text': tr(text),
-        });
-      } catch (_) {}
     }
+    try {
+      await _chan.invokeMethod('notify', {
+        'title': tr('${bad ? '⚠️' : '✅'} A2R POS - فحص تلقائي${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}'),
+        'text': tr(text),
+      });
+    } catch (_) {}
   }
 
   Future<void> _setAuto(bool v) async {
@@ -10299,6 +10329,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   Future<void> _liteNotify(List<String> lines) async {
     final text = lines.join('\n');
     final bad = lines.any((l) => l.startsWith('⚠️'));
+    // داخل التطبيق: SnackBar لو التطبيق ظاهر، وإشعار التليفون دايماً (ظاهر أو لأ)
     if (mounted && _life == AppLifecycleState.resumed) {
       try {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -10306,14 +10337,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           duration: Duration(seconds: bad ? 8 : 4),
         ));
       } catch (_) {}
-    } else {
-      try {
-        await _chan.invokeMethod('notify', {
-          'title': tr('${bad ? '⚠️' : '✅'} A2R POS - فحص إيصالات الدفع${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}'),
-          'text': tr(text),
-        });
-      } catch (_) {}
     }
+    try {
+      await _chan.invokeMethod('notify', {
+        'title': tr('${bad ? '⚠️' : '✅'} A2R POS - فحص إيصالات الدفع${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}'),
+        'text': tr(text),
+      });
+    } catch (_) {}
   }
 
   // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
