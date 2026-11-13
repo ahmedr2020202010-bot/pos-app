@@ -734,6 +734,8 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
         resetDefaultHandlers(context);
       } else if (v == 'log') {
         onLog();
+      } else if (v == 'autolog') {
+        showAutoLog(context);
       } else if (v == 'wipe') {
         wipeEverything(context);
       }
@@ -745,6 +747,7 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
           value: 'battery', child: w.Text(ar ? 'السماح بالعمل في الخلفية' : 'Allow background running')),
       PopupMenuItem(
           value: 'resetApps', child: w.Text(ar ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
+      PopupMenuItem(value: 'autolog', child: w.Text(ar ? 'سجل الفحص التلقائي' : 'Auto-scan log')),
       PopupMenuItem(value: 'log', child: w.Text(ar ? 'مشاركة اللوج' : 'Share log')),
       const PopupMenuDivider(),
       PopupMenuItem(
@@ -857,16 +860,49 @@ class RootPage extends StatefulWidget {
 class _RootPageState extends State<RootPage> {
   int tab = 0;
 
+  AppLifecycleListener? _lcl;
+
   @override
   void initState() {
     super.initState();
     chainStep.addListener(_onChain);
+    openReqG.addListener(_onOpenReq);
+    _chan.setMethodCallHandler(_onNative);
+    _lcl = AppLifecycleListener(onResume: _pullOpen);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _pullOpen());
   }
 
   @override
   void dispose() {
     chainStep.removeListener(_onChain);
+    openReqG.removeListener(_onOpenReq);
+    _lcl?.dispose();
     super.dispose();
+  }
+
+  Future<dynamic> _onNative(MethodCall call) async {
+    if (call.method == 'onOpen') {
+      final p = call.arguments;
+      if (p is String && p.isNotEmpty) requestOpenG(p);
+      try {
+        await _chan.invokeMethod('getInitialOpen'); // نمسح الطلب من ناحية أندرويد
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<void> _pullOpen() async {
+    try {
+      final p = await _chan.invokeMethod<String>('getInitialOpen');
+      if (p != null && p.isNotEmpty) requestOpenG(p);
+    } catch (_) {}
+  }
+
+  void _onOpenReq() {
+    final v = openReqG.value;
+    if (v == null || !mounted) return;
+    final t = v.startsWith('mach|') ? 1 : 0;
+    if (t != tab) setState(() => tab = t);
   }
 
   // أثناء الفحص الشامل: نفتح التاب اللي شغال دلوقتي
@@ -3198,6 +3234,17 @@ void saveOutDir(String? f) {
 // بتصلّح اتجاه الـ EXIF وبتدوّر الصورة لو deg != 0. بترجع true لو كتبت ملف جديد.
 bool _fixImage(String src, String dst, int deg) {
   final bytes = File(src).readAsBytesSync();
+  // تسريع: لو مفيش تدوير مطلوب والـ EXIF طبيعي، بننسخ الملف من غير ما نفك الصورة كلها (أسرع بكتير)
+  if (deg == 0) {
+    try {
+      final ex = img.decodeJpgExif(bytes);
+      final o = ex?.imageIfd.orientation ?? 1;
+      if (o == 1) {
+        if (src != dst) File(src).copySync(dst);
+        return false;
+      }
+    } catch (_) {}
+  }
   var im = img.decodeImage(bytes);
   if (im == null) {
     if (src != dst) File(src).copySync(dst);
@@ -3999,6 +4046,196 @@ List<int> fillTemplate(List<int> bytes, Map<int, double> totals, Map<int, int> c
 
 // ───────────────── قنوات النظام (واتساب مباشر / فتح فولدر) ─────────────────
 const MethodChannel _chan = MethodChannel('pos/native');
+
+// ───────── سجل الفحص التلقائي + فتح الإيصال من الإشعار ─────────
+final ValueNotifier<String?> openReqG = ValueNotifier<String?>(null);
+String _lastOpenP = '';
+DateTime _lastOpenAt = DateTime(2000);
+
+// طلب فتح إيصال معين (من الإشعار أو من السجل): "home|مفتاح" أو "mach|مفتاح"
+void requestOpenG(String payload) {
+  final now = DateTime.now();
+  if (payload == _lastOpenP && now.difference(_lastOpenAt).inSeconds < 3) return; // منع التكرار
+  _lastOpenP = payload;
+  _lastOpenAt = now;
+  openReqG.value = '$payload#${now.microsecondsSinceEpoch}';
+}
+
+String? openKeyOf(String? v, String prefix) {
+  if (v == null || !v.startsWith(prefix)) return null;
+  final h = v.lastIndexOf('#');
+  return v.substring(prefix.length, h > prefix.length ? h : v.length);
+}
+
+class AutoLogEntry {
+  final DateTime t;
+  final String tab; // home | mach
+  final String title;
+  final String text;
+  final bool bad;
+  final String? payload;
+  AutoLogEntry(this.t, this.tab, this.title, this.text, this.bad, this.payload);
+  Map<String, dynamic> toJson() =>
+      {'t': t.millisecondsSinceEpoch, 'tab': tab, 'title': title, 'text': text, 'bad': bad, 'p': payload};
+  static AutoLogEntry fromJson(Map<String, dynamic> j) => AutoLogEntry(
+      DateTime.fromMillisecondsSinceEpoch((j['t'] as num).toInt()),
+      (j['tab'] ?? 'home') as String,
+      (j['title'] ?? '') as String,
+      (j['text'] ?? '') as String,
+      j['bad'] == true,
+      j['p'] as String?);
+}
+
+final List<AutoLogEntry> autoLogG = <AutoLogEntry>[];
+bool _autoLogLoaded = false;
+String get _autoLogPath => '$baseDir/auto_log.json';
+
+void loadAutoLog() {
+  if (_autoLogLoaded) return;
+  _autoLogLoaded = true;
+  try {
+    final f = File(_autoLogPath);
+    if (!f.existsSync()) return;
+    final l = jsonDecode(f.readAsStringSync());
+    if (l is List) {
+      for (final e in l) {
+        if (e is Map) autoLogG.add(AutoLogEntry.fromJson(Map<String, dynamic>.from(e)));
+      }
+    }
+  } catch (_) {}
+}
+
+void _saveAutoLog() {
+  try {
+    Directory(baseDir).createSync(recursive: true);
+    File(_autoLogPath).writeAsStringSync(jsonEncode(autoLogG.map((e) => e.toJson()).toList()));
+  } catch (_) {}
+}
+
+// بيسجّل الإشعار في السجل وبيبعته لشريط التليفون (بصوت واهتزاز لو فيه مشكلة، وهادي لو تمام)
+Future<void> postAutoNotify(
+    {required String tab, required String title, required String text, required bool bad, String? openKey}) async {
+  loadAutoLog();
+  final payload = openKey == null ? null : '$tab|$openKey';
+  autoLogG.insert(0, AutoLogEntry(DateTime.now(), tab, title, text, bad, payload));
+  while (autoLogG.length > 300) {
+    autoLogG.removeLast();
+  }
+  _saveAutoLog();
+  try {
+    await _chan.invokeMethod('notify', {
+      'title': tr(title),
+      'text': tr(text),
+      'alert': bad,
+      if (payload != null) 'open': payload,
+    });
+  } catch (_) {}
+}
+
+void showAutoLog(BuildContext context) {
+  Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AutoLogPage()));
+}
+
+class AutoLogPage extends StatefulWidget {
+  const AutoLogPage({super.key});
+
+  @override
+  State<AutoLogPage> createState() => _AutoLogPageState();
+}
+
+class _AutoLogPageState extends State<AutoLogPage> {
+  bool onlyBad = false;
+
+  @override
+  void initState() {
+    super.initState();
+    loadAutoLog();
+  }
+
+  static String _hm(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    bool today(DateTime a) => a.year == now.year && a.month == now.month && a.day == now.day;
+    final list = autoLogG.where((e) => !onlyBad || e.bad).toList();
+    final todayAll = autoLogG.where((e) => today(e.t)).toList();
+    final todayBad = todayAll.where((e) => e.bad).length;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('سجل الفحص التلقائي'),
+        actions: [
+          IconButton(
+            tooltip: tr('مسح السجل'),
+            icon: const Icon(Icons.delete_outline),
+            onPressed: autoLogG.isEmpty
+                ? null
+                : () async {
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (c) => AlertDialog(
+                        title: const Text('مسح السجل؟'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('لأ')),
+                          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('مسح')),
+                        ],
+                      ),
+                    );
+                    if (ok == true) {
+                      autoLogG.clear();
+                      _saveAutoLog();
+                      if (mounted) setState(() {});
+                    }
+                  },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: Row(
+              children: [
+                Expanded(child: w.Text(tr('النهارده: ${todayAll.length} إشعار • $todayBad فيهم مشاكل'))),
+                FilterChip(
+                  label: const Text('مشاكل بس'),
+                  selected: onlyBad,
+                  onSelected: (v) => setState(() => onlyBad = v),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: list.isEmpty
+                ? const Center(child: Text('مفيش إشعارات لسه.'))
+                : ListView.separated(
+                    itemCount: list.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (c, i) {
+                      final e = list[i];
+                      final d = today(e.t) ? '' : '${e.t.day}/${e.t.month}  ';
+                      return ListTile(
+                        leading: Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
+                            color: e.bad ? Colors.orange : Colors.green),
+                        title: w.Text(tr(e.title), maxLines: 2, overflow: TextOverflow.ellipsis),
+                        subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')}\n${tr(e.text)}'),
+                        isThreeLine: true,
+                        trailing: e.payload != null ? const Icon(Icons.chevron_left) : null,
+                        onTap: e.payload == null
+                            ? null
+                            : () {
+                                Navigator.of(context).pop();
+                                requestOpenG(e.payload!);
+                              },
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 String todayToken() {
   final n = DateTime.now();
@@ -4996,6 +5233,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     homeRunG = () => runFullPipeline();
     homeSumG = _countLine;
+    openReqG.addListener(_onOpenReqHome);
     stopKeepAliveSafe();
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
@@ -5138,10 +5376,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     homeRunG = null;
     homeSumG = null;
     homeAutoG = false;
+    openReqG.removeListener(_onOpenReqHome);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onOpenReqHome() {
+    final key = openKeyOf(openReqG.value, 'home|');
+    if (key != null) _openByKeyHome(key, 0);
+  }
+
+  // بيفتح شاشة تعديل الإيصال اللي جه عنه الإشعار (لو الفحص لسه شغال بيستنى يخلص)
+  Future<void> _openByKeyHome(String key, int tries) async {
+    if (!mounted) return;
+    ReceiptItem? it;
+    for (final e in processedItems) {
+      if (e.key == key) {
+        it = e;
+        break;
+      }
+    }
+    if (it == null || busy) {
+      if (tries < 15) {
+        await Future.delayed(const Duration(milliseconds: 600));
+        return _openByKeyHome(key, tries + 1);
+      }
+      return;
+    }
+    await editReceipt(it);
   }
 
   // ───── فحص تلقائي خفيف: بيفحص الملف الجديد بس وبيبعتلك إشعار بالنتيجة (من غير ما تفتح التطبيق) ─────
@@ -5274,6 +5538,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (quickBusyG) return;
     quickBusyG = true;
     final lines = <String>[];
+    String? openKey;
+    var openBad = false;
     try {
       final keys = ready.map((e) => e.key).toSet();
       await runFullPipeline(auto: true, lite: true);
@@ -5288,7 +5554,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (final it in processedItems) {
         if (!keys.contains(it.key)) continue;
         final l = _liteLine(it);
-        if (l != null) lines.add(l);
+        if (l != null) {
+          lines.add(l);
+          final isBad = l.startsWith('⚠️');
+          if (openKey == null || (isBad && !openBad)) {
+            openKey = it.key;
+            openBad = isBad;
+          }
+        }
       }
       // صور السيستم الجديدة (A2R Operations Console): مش باتش فمش في processedItems، فبنعمل لها سطر إشعار لوحدها
       final newNames = ready.map((e) => baseName(e.value.path)).toSet();
@@ -5325,7 +5598,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } finally {
       quickBusyG = false;
     }
-    if (lines.isNotEmpty) await _quickNotify(lines);
+    if (lines.isNotEmpty) await _quickNotify(lines, openKey: openKey);
   }
 
   // سطر النتيجة لكل إيصال جديد (من نتيجة فحص التقفيل نفسها)
@@ -5361,7 +5634,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   // لو التطبيق على الشاشة: SnackBar. غير كده: إشعار. ودايماً آخر نتيجة في مربع الحالة.
-  Future<void> _quickNotify(List<String> lines) async {
+  Future<void> _quickNotify(List<String> lines, {String? openKey}) async {
     final text = lines.join('\n');
     final bad = lines.any((l) => l.startsWith('⚠️'));
     final now = DateTime.now();
@@ -5378,12 +5651,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ));
       } catch (_) {}
     }
-    try {
-      await _chan.invokeMethod('notify', {
-        'title': tr('${bad ? '⚠️' : '✅'} A2R POS - فحص تلقائي${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}'),
-        'text': tr(text),
-      });
-    } catch (_) {}
+    await postAutoNotify(
+      tab: 'home',
+      title: '${bad ? '⚠️' : '✅'} A2R POS - فحص تلقائي${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}',
+      text: text,
+      bad: bad,
+      openKey: openKey,
+    );
   }
 
   Future<void> _setAuto(bool v) async {
@@ -10346,11 +10620,20 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     if (!mounted || !autoScan) return;
     final lines = <String>[];
+    String? openKey;
+    var openBad = false;
     for (final r in _liteNew) {
       final l = _liteLine(r);
-      if (l != null) lines.add(l);
+      if (l != null) {
+        lines.add(l);
+        final isBad = l.startsWith('⚠️');
+        if (openKey == null || (isBad && !openBad)) {
+          openKey = r.key;
+          openBad = isBad;
+        }
+      }
     }
-    if (lines.isNotEmpty) await _liteNotify(lines);
+    if (lines.isNotEmpty) await _liteNotify(lines, openKey: openKey);
   }
 
   String? _liteLine(MResult r) {
@@ -10370,7 +10653,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     return '⚠️ $nm${cnt.isEmpty ? '' : ' ($cnt)'}: ${why.join('، ')}';
   }
 
-  Future<void> _liteNotify(List<String> lines) async {
+  Future<void> _liteNotify(List<String> lines, {String? openKey}) async {
     final text = lines.join('\n');
     final bad = lines.any((l) => l.startsWith('⚠️'));
     // داخل التطبيق: SnackBar لو التطبيق ظاهر، وإشعار التليفون دايماً (ظاهر أو لأ)
@@ -10382,12 +10665,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         ));
       } catch (_) {}
     }
-    try {
-      await _chan.invokeMethod('notify', {
-        'title': tr('${bad ? '⚠️' : '✅'} A2R POS - فحص إيصالات الدفع${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}'),
-        'text': tr(text),
-      });
-    } catch (_) {}
+    await postAutoNotify(
+      tab: 'mach',
+      title: '${bad ? '⚠️' : '✅'} A2R POS - فحص إيصالات الدفع${lines.length > 1 ? ' (${lines.length} ملفات)' : ''}',
+      text: text,
+      bad: bad,
+      openKey: openKey,
+    );
   }
 
   // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
@@ -10450,6 +10734,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     }
     machRunG = () => _startCountAll();
     machSumG = _countLine;
+    openReqG.addListener(_onOpenReqM);
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
@@ -10470,6 +10755,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     machRunG = null;
     machSumG = null;
     machAutoG = false;
+    openReqG.removeListener(_onOpenReqM);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
     closingTxn.removeListener(_onClosing);
@@ -10507,6 +10793,30 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
   void _onClosing() {
     if (mounted) setState(() {});
+  }
+
+  void _onOpenReqM() {
+    final key = openKeyOf(openReqG.value, 'mach|');
+    if (key != null) _openByKeyM(key, 0);
+  }
+
+  Future<void> _openByKeyM(String key, int tries) async {
+    if (!mounted) return;
+    MResult? it;
+    for (final r in results) {
+      if (r.key == key) {
+        it = r;
+        break;
+      }
+    }
+    if (it == null || busy) {
+      if (tries < 15) {
+        await Future.delayed(const Duration(milliseconds: 600));
+        return _openByKeyM(key, tries + 1);
+      }
+      return;
+    }
+    await openPdf(it.openPath);
   }
 
   Future<void> openPdf(String? path) async {
