@@ -41,7 +41,7 @@ jobs:
           cp main.dart app/lib/main.dart
           cd app
           flutter pub add google_mlkit_text_recognition permission_handler pdf "archive:^3.6.1" share_plus image printing shared_preferences
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>\n    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent><intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent></queries>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|<application|<application android:largeHeap=\"true\"|' android/app/src/main/AndroidManifest.xml
           sed -i -E 's/^( *)compileSdk *=.*/\1compileSdk = 37/' android/app/build.gradle.kts
           grep -n "compileSdk" android/app/build.gradle.kts
@@ -64,7 +64,7 @@ jobs:
               <external-path name="all_ext" path="." />
           </paths>
           EOX
-          sed -i 's|</application>|    <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.pos_fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/pos_file_paths"/></provider>\n    <service android:name=".KeepAliveService" android:exported="false" android:foregroundServiceType="dataSync"/>\n    </application>|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|</application>|    <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.pos_fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/pos_file_paths"/></provider>\n    <service android:name=".KeepAliveService" android:exported="false" android:foregroundServiceType="dataSync\|specialUse"><property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="receipt_ocr_monitoring"/></service>\n    </application>|' android/app/src/main/AndroidManifest.xml
           grep -n "pos_fileprovider" android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="[^"]*"|android:label="A2R POS"|' android/app/src/main/AndroidManifest.xml
           grep -n "android:label" android/app/src/main/AndroidManifest.xml
@@ -121,7 +121,9 @@ jobs:
                               "notify" -> {
                                   try {
                                       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                                      nm.notify(8, NotifHelper.build(this, "pos_done", "اكتمال المعالجة",
+                                      var nid = call.argument<Number>("id")?.toInt() ?: (System.currentTimeMillis() % 2000000000L).toInt()
+                                      if (nid == 7) nid = 8
+                                      nm.notify(nid, NotifHelper.build(this, "pos_done", "اكتمال المعالجة",
                                           call.argument<String>("title") ?: "A2R POS",
                                           call.argument<String>("text") ?: "", false))
                                       result.success(true)
@@ -570,6 +572,7 @@ jobs:
                   b.setContentTitle(title)
                   b.setContentText(text)
                   b.setContentIntent(pi)
+                  if (!ongoing) b.setStyle(Notification.BigTextStyle().bigText(text))
                   b.setOngoing(ongoing)
                   b.setAutoCancel(!ongoing)
                   return b.build()
@@ -591,23 +594,43 @@ jobs:
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  if (wl == null) {
-                      try {
+                  try {
+                      if (wl == null) {
                           val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
                           wl = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "pos:keepalive")
                           wl?.setReferenceCounted(false)
-                          wl?.acquire()
-                      } catch (e: Exception) {
                       }
+                      if (wl?.isHeld != true) wl?.acquire()
+                  } catch (e: Exception) {
                   }
                   val title = intent?.getStringExtra("title") ?: "A2R POS"
                   val text = intent?.getStringExtra("text") ?: ""
                   val n = NotifHelper.build(this, "pos_progress", "جاري المعالجة", title, text, true)
-                  if (Build.VERSION.SDK_INT >= 29) {
-                      startForeground(7, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-                  } else {
-                      startForeground(7, n)
+                  var started = false
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      // أندرويد 14+: specialUse (مفيهوش حد زمني زي dataSync)
+                      try {
+                          startForeground(7, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                          started = true
+                      } catch (e: Exception) {
+                      }
                   }
+                  if (!started && Build.VERSION.SDK_INT >= 29) {
+                      // 29 لـ 33: dataSync. وعلى 34+ لو specialUse فشل نرجع له بدل ما التطبيق يقفل
+                      try {
+                          startForeground(7, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                          started = true
+                      } catch (e: Exception) {
+                      }
+                  }
+                  if (!started && Build.VERSION.SDK_INT < 29) {
+                      try {
+                          startForeground(7, n)
+                          started = true
+                      } catch (e: Exception) {
+                      }
+                  }
+                  if (!started) stopSelf()
                   return START_NOT_STICKY
               }
           }
