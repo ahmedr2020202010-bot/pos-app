@@ -5214,7 +5214,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _autoTimer?.cancel();
     _quickPend = <String>{};
     _quickEnsureBaseline();
-    _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) => _autoTick());
+    _autoTimer = Timer.periodic(const Duration(seconds: 2), (_) => _autoTick());
     _watchService(true);
   }
 
@@ -5242,7 +5242,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _lastTickAt = DateTime.now();
     if (!mounted || !autoScan || busy || _fullRunning || chainRunning || machBusyG || quickBusyG) return;
     final ds = _dirSig();
-    if (ds.isNotEmpty && ds == _lastDirSig && _quickPend.isEmpty && ++_idleTicks < 6) return; // فحص كامل كل 30 ثانية على الأقل
+    if (ds.isNotEmpty && ds == _lastDirSig && _quickPend.isEmpty && ++_idleTicks < 15) return; // فحص كامل كل 30 ثانية على الأقل
     _idleTicks = 0;
     _lastDirSig = ds;
     if (!quickHasBaseline()) {
@@ -6536,6 +6536,48 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
 
+    // تسريع: نسخ/تصحيح صور الإيصالات المحفوظة في الكاش بيتجهز بالتوازي (3 مع بعض) قبل ما اللفة توصل لها
+    final preFix = <String, Future<bool>>{};
+    {
+      var running = 0;
+      final waiters = <Completer<void>>[];
+      Future<bool> limited(Future<bool> Function() job) async {
+        while (running >= 3) {
+          final c = Completer<void>();
+          waiters.add(c);
+          await c.future;
+        }
+        running++;
+        try {
+          return await job();
+        } catch (_) {
+          return false;
+        } finally {
+          running--;
+          if (waiters.isNotEmpty) waiters.removeAt(0).complete();
+        }
+      }
+
+      final usedDst = <String>{};
+      for (final f in todo) {
+        try {
+          final ck = '${baseName(f.path)}:${f.lengthSync()}';
+          final c = _scanCache[ck];
+          if (c is! Map || c['v'] != _kScanVer || c['k'] != 'receipt' || c['rot'] is! int) continue;
+          final ct = c['tid'];
+          if (ct is String && !terminals.containsKey(ct)) continue;
+          final inRaw = f.path.startsWith('$rawImagesDir/');
+          final dst = inRaw ? f.path : '$rawImagesDir/wa_${baseName(f.path)}';
+          final noExt = dst.contains('.') ? dst.substring(0, dst.lastIndexOf('.')) : dst;
+          final jd = '$noExt.jpg';
+          if (!usedDst.add(jd)) continue; // نفس الاسم من مصدرين: يتعمل بالترتيب زي الأول
+          final rot = c['rot'] as int;
+          final src = f.path;
+          preFix[src] = limited(() => fixImageAsync(src, jd, rot));
+        } catch (_) {}
+      }
+    }
+
     // ═════════ المرحلة 1: قراءة الصور ═════════
     for (var i = 0; i < todo.length; i++) {
       if (stopReq) break;
@@ -6576,7 +6618,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               if (rot is int) {
                 final noExtC = dstC.contains('.') ? dstC.substring(0, dstC.lastIndexOf('.')) : dstC;
                 final jdC = '$noExtC.jpg';
-                await fixImageAsync(f.path, jdC, rot);
+                await (preFix[f.path] ?? fixImageAsync(f.path, jdC, rot));
                 if (jdC != dstC && inRawC) {
                   try {
                     File(dstC).deleteSync();
@@ -6595,10 +6637,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               processedItems.add(cItem);
             }
             if (!mounted) return;
-            setState(() {
-              progress = ((i + 1) / todo.length) * 0.5;
-              status = 'فحص OCR: ${i + 1} من ${todo.length} (محفوظ)';
-            });
+            if (i % 10 == 0 || i == todo.length - 1) {
+              setState(() {
+                progress = ((i + 1) / todo.length) * 0.5;
+                status = 'فحص OCR: ${i + 1} من ${todo.length} (محفوظ)';
+              });
+            }
             continue;
           }
         }
@@ -10221,7 +10265,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
 
   void _startAuto() {
     _autoTimer?.cancel();
-    _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) => _autoTick());
+    _autoTimer = Timer.periodic(const Duration(seconds: 2), (_) => _autoTick());
     _watchService(true);
   }
 
@@ -10246,7 +10290,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   Future<void> _autoTick() async {
     if (!mounted || !autoScan || busy || chainRunning || homeBusyG || quickBusyG) return;
     final ds = _dirSigM();
-    if (ds.isNotEmpty && ds == _lastDirSigM && _pendSig.isEmpty && ++_idleTicksM < 6) return;
+    if (ds.isNotEmpty && ds == _lastDirSigM && _pendSig.isEmpty && ++_idleTicksM < 15) return;
     _idleTicksM = 0;
     _lastDirSigM = ds;
     final sig = _scanSig();
