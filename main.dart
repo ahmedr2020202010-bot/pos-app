@@ -104,112 +104,6 @@ Widget _mini(IconData icon, String label, VoidCallback? onPressed, {bool filled 
       : OutlinedButton.icon(onPressed: onPressed, icon: ic, label: Text(label), style: st);
 }
 
-Widget _periodRow(int days, bool busy, void Function(int) onPick) => Row(
-      children: [
-        const Text('الفترة', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Wrap(
-            spacing: 6,
-            children: [
-              for (final o in const [
-                [0, 'اليوم'],
-                [1, 'يومين'],
-                [2, '3 أيام'],
-                [-1, 'الكل'],
-              ])
-                ChoiceChip(
-                  label: Text(o[1] as String, style: const TextStyle(fontSize: 13)),
-                  visualDensity: VisualDensity.compact,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  selected: days == o[0],
-                  onSelected: busy ? null : (_) => onPick(o[0] as int),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-
-Widget _filterRow(bool reviewOnly, int all, int review, void Function(bool) onPick) => Row(
-      children: [
-        const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Wrap(
-            spacing: 6,
-            children: [
-              ChoiceChip(
-                label: Text('الكل ($all)', style: const TextStyle(fontSize: 13)),
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                selected: !reviewOnly,
-                onSelected: (_) => onPick(false),
-              ),
-              ChoiceChip(
-                label: Text('مراجعة ($review)', style: const TextStyle(fontSize: 13)),
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                selected: reviewOnly,
-                onSelected: (_) => onPick(true),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-
-// أيقونة صغيرة جنب صف المسار (فتح / نقل)
-Widget _pathAct(IconData icon, String ar, String en, VoidCallback? onTap) => Builder(
-      builder: (c) => IconButton(
-        tooltip: _l(c, ar, en),
-        icon: Icon(icon, size: 18),
-        visualDensity: VisualDensity.compact,
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints.tightFor(width: 32, height: 32),
-        onPressed: onTap,
-      ),
-    );
-
-Widget _pathRow(IconData icon, String label, String path, VoidCallback? onPick,
-    {VoidCallback? onReset, List<Widget> actions = const []}) {
-  final bs = TextButton.styleFrom(
-    visualDensity: VisualDensity.compact,
-    padding: const EdgeInsets.symmetric(horizontal: 8),
-    minimumSize: const Size(0, 32),
-    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-  );
-  return GestureDetector(
-    behavior: HitTestBehavior.opaque,
-    onLongPress: onReset, // ضغطة مطوّلة = رجوع للافتراضي
-    child: Row(
-      children: [
-        Icon(icon, size: 18),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Builder(
-                builder: (c) => Text(label,
-                    style: TextStyle(fontSize: 11, color: Theme.of(c).colorScheme.onSurfaceVariant)),
-              ),
-              Text(path,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textDirection: TextDirection.ltr,
-                  style: const TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
-        ...actions,
-        if (onReset != null) _pathAct(Icons.settings_backup_restore, 'رجوع للافتراضي', 'Back to default', onReset),
-        TextButton(onPressed: onPick, style: bs, child: const Text('تغيير')),
-      ],
-    ),
-  );
-}
-
 // ───────── شرائح المصدر / الفترة / الإخراج (بدل القسم القابل للفتح) ─────────
 // كل شريحة بتفتح قايمة سفلية. مستخدمة في تاب التقفيل وتاب إيصالات الدفع.
 Future<void> _sheet(BuildContext context, String title, List<Widget> children) {
@@ -427,14 +321,6 @@ Widget _outputCard(
     ),
   );
 }
-
-Widget _settingsCard(List<Widget> children) => Card(
-      margin: const EdgeInsets.only(bottom: 6),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
-      ),
-    );
 
 // كارت الإعدادات مطوي في سطر ملخّص واحد (المصدر • الفترة • المخرجات) وبالضغط عليه يفتح بكل الإعدادات
 Widget _settingsCollapsed(BuildContext context, String summary, List<Widget> children) => Card(
@@ -739,7 +625,7 @@ Widget _scanBar({
     );
 
 // قايمة ⋮ الموحّدة (المظهر، الخلفية، الصيانة، الإصدار)
-Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallback onLog}) {
+Widget _moreMenu(BuildContext context, {required bool busy}) {
   final ar = AppSettings.of(context).isAr;
   return PopupMenuButton<String>(
     tooltip: tr('المزيد'),
@@ -752,8 +638,6 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
         resetDefaultHandlers(context);
       } else if (v == 'resetSettings') {
         resetAllSettings(context);
-      } else if (v == 'log') {
-        onLog();
       } else if (v == 'autolog') {
         showAutoLog(context);
       } else if (v == 'wipe') {
@@ -1017,22 +901,6 @@ class AppSettings extends ChangeNotifier with WidgetsBindingObserver {
     seedIndex = i;
     try {
       _prefs?.setInt('seed', i);
-    } catch (_) {}
-    notifyListeners();
-  }
-
-  void toggleLang() {
-    langCode = isAr ? 'en' : 'ar';
-    try {
-      _prefs?.setString('lang', langCode!);
-    } catch (_) {}
-    notifyListeners();
-  }
-
-  void setDark(bool dark) {
-    themeMode = dark ? ThemeMode.dark : ThemeMode.light;
-    try {
-      _prefs?.setString('theme_mode', dark ? 'dark' : 'light');
     } catch (_) {}
     notifyListeners();
   }
@@ -1680,16 +1548,6 @@ void _syncBadge(ValueNotifier<int> n, int v) {
   WidgetsBinding.instance.addPostFrameCallback((_) => n.value = v);
 }
 
-Future<void> shareDebugLog(BuildContext context) async {
-  final m = ScaffoldMessenger.of(context);
-  final f = File('$baseDir/id_debug.txt');
-  if (!f.existsSync()) {
-    m.showSnackBar(const SnackBar(content: Text('مفيش لوج لسه. شغّل الفحص الأول.')));
-    return;
-  }
-  await Share.shareXFiles([XFile(f.path, mimeType: 'text/plain')], text: 'لوج التطبيق');
-}
-
 ThemeData _buildTheme(Brightness b) {
   final cs = ColorScheme.fromSeed(seedColor: kSeeds[appSettings.seedIndex], brightness: b);
   return ThemeData(
@@ -1717,6 +1575,49 @@ ThemeData _buildTheme(Brightness b) {
     inputDecorationTheme: InputDecorationTheme(
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
     ),
+    // أزرار بنفس الشكل والارتفاع في كل التطبيق
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(0, 44),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(0, 44),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        side: BorderSide(color: cs.outline),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    ),
+    dialogTheme: DialogThemeData(
+      backgroundColor: cs.surfaceContainerHigh,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    ),
+    bottomSheetTheme: BottomSheetThemeData(
+      backgroundColor: cs.surfaceContainerLow,
+      surfaceTintColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+    ),
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: cs.surfaceContainerHigh,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ),
+    chipTheme: ChipThemeData(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      side: BorderSide(color: cs.outlineVariant),
+    ),
+    dividerTheme: DividerThemeData(color: cs.outlineVariant, space: 1, thickness: 1),
   );
 }
 
@@ -4014,7 +3915,6 @@ Future<List<String>> scanReceiptAsync(String src) async {
   }
 }
 
-
 // ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
 Future<List<int>?> loadTemplateBytes() async {
   try {
@@ -4692,16 +4592,6 @@ void checkUnusual(List<ReceiptItem> items, String reportDate) {
   } catch (_) {}
 }
 
-
-// ───────── العد السريع: صور الصفحات الأصلية (JPEG) من الـ PDF الممسوح + عدّ بالهيكل ─────────
-bool _loadFast() {
-  try {
-    return _readCfg()['fastCount'] != false;
-  } catch (_) {
-    return true;
-  }
-}
-
 // ⚡ عدّ متوازي (تجريبي): عدد الصفحات اللي بتتقرا مع بعض (recognizer لكل صفحة)
 const int _kParWorkers = 2;
 
@@ -4777,29 +4667,8 @@ bool _loadDual() {
   }
 }
 
-// ⚡ العد المتوازي: الديفولت شغال (الأسرع). مستقل تماماً عن التدقيق المزدوج.
-bool _loadPar() {
-  try {
-    return _readCfg()['parallelCount'] != false;
-  } catch (_) {
-    return true;
-  }
-}
-
-
-
 // التدقيق المزدوج (اختياري، أبطأ شوية): قراءة تانية بصورة محسّنة لآخر صفحة في كل ملف (والصفحات المشكوك فيها)
 bool dualCount = _loadDual();
-
-void toggleDualCount() {
-  dualCount = !dualCount;
-  try {
-    final m = _readCfg();
-    m['dualCount'] = dualCount;
-    _writeCfg(m);
-  } catch (_) {}
-}
-
 
 // ⚠️ لازم تتنده من دالة top-level: لو Isolate.run اتكتبت جوه ميثود في الـ State، الـ closure بتشيل معاها
 // الـ context كله (MResult + TextEditingController...) فالإرسال بيفشل والعد السريع بيقع على الطريقة البطيئة.
@@ -6225,110 +6094,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> shareStandardFiles() async {
-    final files = <XFile>[];
-    if (standardXlsxPath != null && File(standardXlsxPath!).existsSync()) {
-      files.add(XFile(standardXlsxPath!));
-    }
-    if (generatedPdfPath != null && File(generatedPdfPath!).existsSync()) {
-      files.add(XFile(generatedPdfPath!));
-    }
-    for (final p in extraPdfPaths) {
-      if (File(p).existsSync()) files.add(XFile(p));
-    }
-    if (files.isNotEmpty) {
-      if (!await confirmSend(context,
-          review: processedItems.where((e) => e.needsReview).length, missing: missingTerminals.length)) {
-        return;
-      }
-      await Share.shareXFiles(files, text: 'تقرير إيصالات الإسكندرية (الرسمي)');
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
-      );
-    }
-  }
-
-  Future<void> shareAdvancedFile() async {
-    final files = <XFile>[];
-    for (final p in ['$outputDir/review_report.txt', '$outputDir/ocr_debug.txt']) {
-      if (File(p).existsSync()) files.add(XFile(p));
-    }
-    if (files.isNotEmpty) {
-      await Share.shareXFiles(files, text: 'لوج التقفيل (تقرير المراجعة + OCR)');
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ملفات المراجعة غير متاحة حالياً.')),
-      );
-    }
-  }
-
-  Future<void> editReceiptDialog(ReceiptItem item) async {
-    final amtController = TextEditingController(text: item.amount.toStringAsFixed(2));
-    int? selectedOrder = item.orderNum;
-
-    await showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlgState) => AlertDialog(
-          title: const Text('تعديل بيانات الإيصال'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Image.file(File(item.path), height: 160, fit: BoxFit.contain),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: amtController,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: InputDecoration(labelText: tr('المبلغ الإجمالي')),
-                ),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<int>(
-                  value: selectedOrder,
-                  hint: const Text('اختر الماكينة (1..25)'),
-                  items: [
-                    for (var i = 1; i <= machineCount; i++)
-                      DropdownMenuItem(
-                        value: i,
-                        child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
-                      ),
-                  ],
-                  onChanged: (v) => setDlgState(() => selectedOrder = v),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
-            FilledButton(
-              onPressed: () {
-                final newAmt = double.tryParse(amtController.text) ?? item.amount;
-                setState(() {
-                  item.amount = round2(newAmt);
-                  item.batches = [item.amount];
-                  item.ok = true;
-                  item.alt = null;
-                  item.how = 'manual';
-                  if (selectedOrder != null) {
-                    item.orderNum = selectedOrder;
-                    item.tid = numToTid[selectedOrder];
-                    item.row = terminals[item.tid]!.excelRow;
-                    item.unitName = terminals[item.tid]!.unitName;
-                  }
-                });
-                saveFix(item);
-                Navigator.pop(ctx);
-                rebuildFiles();
-              },
-              child: const Text('حفظ وتحديث الملفات'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   // ملخص العد (زي رسالة "اكتمل العد" في إيصالات الدفع): صور، اتسمّى، إجمالي
   String _countLine() {
     final counted = processedItems
@@ -6595,42 +6360,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (mounted) setState(() {});
   }
 
-  Widget _sysCard(BuildContext context) {
-    final best = <String, SysTotal>{};
-    for (final s in sysReads) {
-      if (s.tid == null || s.amount == null) continue;
-      final k = '${s.tid}|${s.date ?? ''}';
-      final p = best[k];
-      if (p == null || s.printed.compareTo(p.printed) > 0) best[k] = s;
-    }
-    if (best.isEmpty) return const SizedBox.shrink();
-    final list = best.values.toList()
-      ..sort((a, b) => (terminals[a.tid]?.orderNum ?? 999).compareTo(terminals[b.tid]?.orderNum ?? 999));
-    final lines = <String>[];
-    for (final s in list) {
-      final t = terminals[s.tid];
-      final nm = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : 'ترمنل ${s.tid}';
-      lines.add('$nm: ${_fmtMoney(s.amount!)} ج.م${s.date != null ? ' (${s.date})' : ''}');
-    }
-    return Container(
-      margin: const EdgeInsets.only(top: 6),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: _tintBg(context, Colors.blue, soft: true),
-        border: Border.all(color: _tintBorder(context, Colors.blue)),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('🖥️ مبالغ السيستم (${list.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 4),
-          Text(lines.join('\n'), style: const TextStyle(fontSize: 12)),
-        ],
-      ),
-    );
-  }
-
   // فرق مبلغ السيستم عن مجموع باتشات نفس الماكينة (null = مفيش صورة سيستم). مقياس بس
   double? _sysDiffOf(ReceiptItem item) {
     if (item.ignoredDoc || item.userExcluded) return null;
@@ -6751,12 +6480,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  String _subtitleSmall(ReceiptItem item) {
-    final full = subtitleOf(item, flags: false);
-    if (item.ignoredDoc || item.amount <= 0) return full;
-    return full.replaceFirst(' | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م', '');
-  }
-
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
     final sfx = item.suffix != null ? ' (باتش ${item.suffix})' : '';
     final bt = item.batches.length > 1
@@ -6802,14 +6525,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ? '\n🚫 مستبعد (مكرر)'
             : '';
     return 'TID: ${item.tid ?? 'غير محدد'}$sfx | المبلغ: ${item.amount.toStringAsFixed(2)} ج.م$txnStr$bt$sysStr${flags ? '$alt$dup$unu$extra' : ''}';
-  }
-
-  String warningsText() {
-    final sb = StringBuffer('ملاحظات للمراجعة (${warnings.length}):');
-    for (final w in warnings) {
-      sb.write('\n• $w');
-    }
-    return sb.toString();
   }
 
   void writeReport(String date) {
@@ -7120,7 +6835,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             if (fx['nobc'] == true || fx['nobc'] == false) item.missingBatchClosed = fx['nobc'];
           }
     }
-
 
     // تسريع: نسخ/تصحيح صور الإيصالات المحفوظة في الكاش بيتجهز بالتوازي (3 مع بعض) قبل ما اللفة توصل لها
     final preFix = <String, Future<bool>>{};
@@ -7609,21 +7323,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  Widget _card(String title, List<Widget> children) => Card(
-        margin: const EdgeInsets.only(bottom: 10),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-              const SizedBox(height: 8),
-              ...children,
-            ],
-          ),
-        ),
-      );
-
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -7657,7 +7356,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         title: const AppTitle(),
         actions: [
           const HeaderButtons(),
-          _moreMenu(context, busy: busy, onLog: () => shareDebugLog(context)),
+          _moreMenu(context, busy: busy),
         ],
       ),
       bottomNavigationBar: _scanBar(
@@ -8152,7 +7851,6 @@ class _FolderPickerState extends State<FolderPicker> {
     );
   }
 }
-
 
 // ───────────────────── شاشة المراجعة ─────────────────────
 // ───────── صورة بتتكبّر (قرصة بصباعين + دبل تاب) علشان تشوف تفاصيل الباتش ─────────
@@ -8757,7 +8455,6 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 }
 
-
 // ───────────────────── ملفات الماكينات (PDF لكل ماكينة) ─────────────────────
 String? loadPdfDir() => _readCfg()['pdfDir'] as String?;
 
@@ -8775,18 +8472,6 @@ List<Directory> findWhatsAppDocDirs() {
     }
   }
   return out;
-}
-
-Set<String> loadDoneM() {
-  final l = _readCfg()['doneM'];
-  return l is List ? l.map((e) => e.toString()).toSet() : <String>{};
-}
-
-void saveDoneM(Set<String> s) {
-  final m = _readCfg();
-  final l = s.toList();
-  m['doneM'] = l.length > 500 ? l.sublist(l.length - 500) : l;
-  _writeCfg(m);
 }
 
 void savePdfDir(String? f) {
@@ -12047,7 +11732,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     _curLabel = '';
   }
 
-
   // العد السريع: بيقرا صورة كل صفحة مرة واحدة من غير تحويل PNG ولا شرائح. بيرجّع false لو الملف مش ممسوح
   Future<bool> _countOneFast(MResult r, TextRecognizer rec, Uint8List bytes, File src) async {
     // البحث في الـ bytes بيشتغل في isolate علشان الواجهة ما تهنجش مع الملفات الكبيرة
@@ -12619,17 +12303,6 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (mounted) setState(() {});
   }
 
-  Future<void> shareLog() async {
-    final f = File('$baseDir/id_debug.txt');
-    if (!f.existsSync()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('مفيش لوج لسه. شغّل الفحص الأول.')),
-      );
-      return;
-    }
-    await Share.shareXFiles([XFile(f.path, mimeType: 'text/plain')], text: 'لوج إيصالات الدفع');
-  }
-
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -12664,7 +12337,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         title: const AppTitle(),
         actions: [
           const HeaderButtons(),
-          _moreMenu(context, busy: busy, onLog: shareLog),
+          _moreMenu(context, busy: busy),
         ],
       ),
       bottomNavigationBar: _scanBar(
