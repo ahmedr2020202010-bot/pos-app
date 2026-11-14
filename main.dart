@@ -9328,10 +9328,10 @@ Widget _mTitle(BuildContext c, MResult r) {
         child: Icon(Icons.warning_amber, size: 16, color: _tintBorder(c, Colors.amber)),
       ),
     Flexible(
-      child: Text.rich(
+      child: w.Text.rich(
         TextSpan(children: [
           TextSpan(
-              text: main,
+              text: tr(main),
               style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 15,
