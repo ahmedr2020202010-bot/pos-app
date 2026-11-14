@@ -399,9 +399,9 @@ Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged})
           radio('⚡ سريع متوازي (الأسرع - الافتراضي)', 'بيقرا صفحتين مع بعض من صور الـ PDF مباشرة', countEngine == 0, () => setCountEngine(0)),
           radio('سريع عادي', 'نفس السريع بس صفحة ورا صفحة (أخف على الذاكرة)', countEngine == 1, () => setCountEngine(1)),
           head('العدد المعروض بيتحسب بـ (اختار واحدة)'),
-          radio('طريقة 3: تسلسل رأسي (الأساسية)', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
+          radio('طريقة 3: تسلسل رأسي', 'شعار ← Terminal ← RRN ← AMOUNT ← Approved', countMethod == 3, () => setCountMethod(3)),
           radio('طريقة 2: علامات الدفع بس', 'RRN / AMOUNT / Approved', countMethod == 2, () => setCountMethod(2)),
-          radio('طريقة 1: أكبر علامة', 'أكتر علامة متكررة في كل عمود', countMethod == 1, () => setCountMethod(1)),
+          radio('طريقة 1: أكبر علامة (الافتراضية)', 'أكتر علامة متكررة في كل عمود', countMethod == 1, () => setCountMethod(1)),
           head('إضافات (علّم على اللي عايزه)'),
           chk('تدقيق مزدوج لآخر صفحة', 'قراءة تانية بصورة محسّنة - أدق وأبطأ شوية', dualCount, (v) {
             dualCount = v;
@@ -419,7 +419,7 @@ Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged})
                       onChanged();
                     },
               icon: const Icon(Icons.restart_alt, size: 18),
-              label: const Text('رجوع للإعدادات الافتراضية (الأسرع)', style: TextStyle(fontSize: 12)),
+              label: const Text('رجوع للإعدادات الافتراضية', style: TextStyle(fontSize: 12)),
             ),
           ),
         ],
@@ -4644,21 +4644,21 @@ void setCountEngine(int e) {
 }
 
 // الطريقة اللي منها العدد المعروض: 3 = تسلسل رأسي (الأساسية) • 2 = علامات الدفع بس • 1 = أكبر علامة
-int countMethod = _loadIntCfg('countMethod', 3, 1, 3);
+int countMethod = _loadIntCfg('countMethod', 1, 1, 3);
 void setCountMethod(int m) {
   countMethod = m;
   _saveCfgKey('countMethod', m);
 }
 
 // إعادة فحص الصفحات المشكوك فيها (إزالة الخط الأحمر + عدّ المستطيلات)
-bool redFixCount = _loadBoolCfg('redFixCount', true);
+bool redFixCount = _loadBoolCfg('redFixCount', false);
 void setRedFixCount(bool v) {
   redFixCount = v;
   _saveCfgKey('redFixCount', v);
 }
 
 // حماية الزيادة: صفحة كاملة (مش آخر صفحة) عددها أكتر من باقي الصفحات بواحد والعلامات متفقة على العدد الأقل = الزيادة قراءة مكررة
-bool consensusGuard = _loadBoolCfg('consensusGuard', true);
+bool consensusGuard = _loadBoolCfg('consensusGuard', false);
 void setConsensusGuard(bool v) {
   consensusGuard = v;
   _saveCfgKey('consensusGuard', v);
@@ -4666,9 +4666,9 @@ void setConsensusGuard(bool v) {
 
 void resetCountDefaults() {
   setCountEngine(0);
-  setCountMethod(3);
-  setRedFixCount(true);
-  setConsensusGuard(true);
+  setCountMethod(1);
+  setRedFixCount(false);
+  setConsensusGuard(false);
   dualCount = false;
   _saveCfgKey('dualCount', false);
 }
