@@ -451,6 +451,11 @@ Widget _statusBox(String text) => Builder(
 
 // ───────── نقل/نسخ ملفات لفولدر بيختاره المستخدم من متصفح ملفات التليفون ─────────
 // بيرجّع خريطة (المسار القديم ← الجديد) للملفات اللي اتنقلت/اتنسخت، أو null لو اتلغى
+String _todayFolderName() {
+  final n = DateTime.now();
+  return '${n.day}.${n.month}';
+}
+
 Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<String> paths) async {
   final existing = paths.where((p) => File(p).existsSync()).toList();
   if (existing.isEmpty) {
@@ -463,7 +468,7 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
     context: context,
     builder: (c) => AlertDialog(
       title: const Text('نقل الملفات'),
-      content: Text('${existing.length} ملف. اختار فولدر من التليفون، وبعدين الملفات تتنقل أو تتنسخ ليه.'),
+      content: Text('${existing.length} ملف. اختار مكان من التليفون، وهيتعمل فيه فولدر بتاريخ النهارده (${_todayFolderName()}) والملفات تتحط جواه.'),
       actions: [
         TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
         TextButton(onPressed: () => Navigator.pop(c, 'copy'), child: const Text('نسخ')),
@@ -513,6 +518,13 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
     );
   }
   if (dir == null) return null;
+  // فولدر بتاريخ النهارده (مثلاً 14.11) جوا المكان اللي اخترته، والملفات بتتحط جواه
+  final folderName = _todayFolderName();
+  try {
+    final sub = Directory('$dir/$folderName');
+    if (!sub.existsSync()) sub.createSync(recursive: true);
+    dir = sub.path;
+  } catch (_) {}
   final done = <String, String>{};
   var failed = 0;
   for (final p in existing) {
@@ -542,7 +554,7 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(
-          '${mode == 'move' ? 'اتنقل' : 'اتنسخ'} ${done.length} ملف${failed > 0 ? ' • فشل $failed' : ''}'),
+          '${mode == 'move' ? 'اتنقل' : 'اتنسخ'} ${done.length} ملف لفولدر $folderName${failed > 0 ? ' • فشل $failed' : ''}'),
     ));
   }
   return done;
@@ -4455,7 +4467,7 @@ class ReceiptItem {
 
   // الماكينة/الوحدة متحددة بطريقة مش مؤكدة (تلقائي / بالاسم فقط)
   bool get weakId =>
-      !(how == 'terminal' || how == 'fuzzy' || how == 'manual' || how == 'extra-batch');
+      !(how == 'terminal' || how == 'new-terminal' || how == 'fuzzy' || how == 'manual' || how == 'extra-batch');
 
   bool get needsReview =>
       ignoredDoc ||
@@ -6063,7 +6075,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final changed = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
-        builder: (_) => ReviewPage(items: list, allItems: processedItems, single: true, initialIndex: at),
+        builder: (_) => ReviewPage(
+            items: list, allItems: processedItems, single: true, initialIndex: at, sysLineOf: _sysLineOf),
       ),
     );
     if (changed == true) {
@@ -6071,6 +6084,84 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } else if (mounted) {
       setState(() {});
     }
+  }
+
+  // إعادة قراءة الترمنل يدوي (من قايمة التلات نقط): بيجرّب الصورة زي ما هي، محسّنة، ومدوّرة
+  // الاتجاهات الأربعة. لو لقى ترمنل معروف بيثبّته للباتش ويدوّر الصورة لو لزم.
+  Future<void> reReadTerminal(ReceiptItem item) async {
+    if (busy) return;
+    final msg = ScaffoldMessenger.of(context);
+    msg.hideCurrentSnackBar();
+    msg.showSnackBar(SnackBar(
+        duration: const Duration(seconds: 30),
+        content: w.Text(_l(context, 'بعيد قراءة الترمنل...', 'Re-reading terminal...'))));
+    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    Analysis? found;
+    var foundDeg = 0;
+    try {
+      Directory(tmpDir).createSync(recursive: true);
+      for (final deg in const [0, 90, 270, 180]) {
+        for (final enhance in const [false, true]) {
+          final tp = '$tmpDir/retid_$deg.jpg';
+          try {
+            if (!await fixImageAsync(item.path, tp, deg)) continue;
+            var rp = tp;
+            if (enhance) {
+              rp = '$tmpDir/retid_${deg}_enh.jpg';
+              await enhanceImageAsync(tp, rp);
+            }
+            final res = await recognizer.processImage(InputImage.fromFilePath(rp));
+            final a = analyzeLines(toLines(res));
+            if (a.tid == null || a.how == 'name/merchant' || terminals[a.tid] == null) continue;
+            // لازم نفس الوحدة اللي التطبيق حدّدها قبل كده (لو كانت متحددة)
+            if (item.row != null && terminals[a.tid]!.excelRow != item.row) continue;
+            found = a;
+            foundDeg = deg;
+            break;
+          } catch (_) {}
+        }
+        if (found != null) break;
+      }
+    } finally {
+      await recognizer.close();
+    }
+    if (!mounted) return;
+    msg.hideCurrentSnackBar();
+    final f = found;
+    if (f == null) {
+      msg.showSnackBar(SnackBar(
+          content: w.Text(_l(context, 'مقدرتش أقرا الترمنل. افتح الباتش واختار الماكينة يدوي.',
+              'Could not read the terminal. Open the batch and pick the machine manually.'))));
+      return;
+    }
+    final info = terminals[f.tid]!;
+    final clash = processedItems.any((x) =>
+        x != item && x.counts && x.suffix == null && x.tid == f.tid && x.orderNum == info.orderNum);
+    if (clash) {
+      msg.showSnackBar(SnackBar(
+          content: w.Text(_l(
+              context,
+              'الترمنل ${f.tid} (ماكينة ${info.orderNum}) اتقرا، بس ماكينة ${info.orderNum} موجودة في إيصال تاني. افتح الباتش وراجعه.',
+              'Terminal ${f.tid} (machine ${info.orderNum}) was read, but that machine is already used by another receipt. Open the batch to review.'))));
+      return;
+    }
+    if (foundDeg != 0) {
+      try {
+        await fixImageAsync(item.path, item.path, foundDeg);
+        await FileImage(File(item.path)).evict();
+        imageCache.clear();
+      } catch (_) {}
+    }
+    item.tid = f.tid;
+    item.orderNum = info.orderNum;
+    item.row = info.excelRow;
+    item.unitName = info.unitName;
+    item.how = 'terminal';
+    saveFix(item);
+    msg.showSnackBar(SnackBar(
+        content: w.Text(_l(context, '✅ الترمنل ${f.tid} - ماكينة ${info.orderNum} (${info.unitName})',
+            '✅ Terminal ${f.tid} - machine ${info.orderNum} (${info.unitName})'))));
+    await _refresh();
   }
 
   void useWhatsApp() {
@@ -6460,7 +6551,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         spacing: 6,
         runSpacing: 4,
         children: [
-          if (nm > 0) chip(_l(context, '⚠️ ناقص $nm', '⚠️ Missing $nm'), Colors.amber),
+          if (nm > 0)
+            InkWell(
+              onTap: openClosingReport,
+              borderRadius: BorderRadius.circular(12),
+              child: _flagChip(
+                  context,
+                  '⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} ($nm): '
+                  '${missingTerminals.map((n) {
+                    final t = numToTid[n] != null ? terminals[numToTid[n]] : null;
+                    return t != null ? '$n ${t.unitName}' : '$n';
+                  }).join(' ، ')}',
+                  Colors.amber),
+            ),
           if (nw > 0) chip(_l(context, '📝 ملاحظات $nw', '📝 Notes $nw'), kReviewTone),
         ],
       ),
@@ -6501,8 +6604,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final sfx = item.suffix != null ? ' (باتش ${item.suffix})' : '';
     final parts = <String>['TID: ${item.tid ?? 'غير محدد'}$sfx'];
     if (item.txn != null) parts.add('${_l(context, 'المعاملات', 'Txns')}: ${item.txn}');
-    final diff = _sysDiffOf(item);
-    if (diff != null && diff == 0) parts.add('🖥️ ${_l(context, 'مطابق للسيستم ✓', 'Matches system ✓')}');
+    final sl = _sysLineOf(item);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -6512,19 +6614,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         w.Text(parts.join(' | '), maxLines: 1, overflow: TextOverflow.ellipsis, style: small),
         if (item.batches.length > 1)
           w.Text('= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}', style: small),
-        if (diff != null && diff != 0)
+        // سطر السيستم كامل (المبلغ + مطابق/الفرق) من غير قطع
+        if (sl != null)
           Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: _flagChip(
-                context,
-                '🖥️ ${_l(context, 'فرق السيستم', 'System gap')}: '
-                '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
-                '${diff.abs().toStringAsFixed(2)} ج.م',
-                Colors.red),
+            child: _flagChip(context, sl.text, sl.ok ? Colors.green : Colors.red),
           ),
         _warnChips(item),
       ],
     );
+  }
+
+  // سطر السيستم للماكينة: المبلغ + مطابق أو الفرق (null = مفيش صورة سيستم)
+  SysLine? _sysLineOf(ReceiptItem item) {
+    if (item.ignoredDoc || item.userExcluded) return null;
+    final sys = _sysOf(item);
+    final diff = _sysDiffOf(item);
+    if (sys == null || sys.amount == null || diff == null) return null;
+    final head = '🖥️ ${_l(context, 'السيستم', 'System')}: ${_fmtMoney(sys.amount!)} ج.م';
+    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true);
+    return SysLine(
+        '$head | ${_l(context, 'فرق', 'Gap')}: '
+        '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
+        '${diff.abs().toStringAsFixed(2)} ج.م',
+        false);
   }
 
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
@@ -7304,7 +7417,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           warnings.add('$nm: الماكينة ${r.orderNum} ظهرت في صورة تانية بمبلغ مختلف - اتحسبت كباتش إضافي ${r.suffix}');
         } else if (r.how == 'auto-number' || r.how == 'conflict') {
           warnings.add('$nm: رقم الماكينة اتحدد تلقائياً (${r.orderNum}) - اتأكد منه');
-        } else if (!(r.how == 'terminal' || r.how == 'fuzzy' || r.how == 'manual')) {
+        } else if (!(r.how == 'terminal' || r.how == 'new-terminal' || r.how == 'fuzzy' || r.how == 'manual')) {
           warnings.add('$nm: الوحدة اتحددت بالاسم/الميرشانت فقط');
         }
       } else {
@@ -7600,12 +7713,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           openFile(item.path, 'image/*');
                         } else if (v == 'share') {
                           shareOneReceipt(item);
+                        } else if (v == 'retid') {
+                          reReadTerminal(item);
                         }
                       },
                       itemBuilder: (_) => [
                         PopupMenuItem(value: 'edit', child: w.Text(_l(context, 'تعديل', 'Edit'))),
                         PopupMenuItem(value: 'open', child: w.Text(_l(context, 'فتح الصورة', 'Open image'))),
                         PopupMenuItem(value: 'share', child: w.Text(_l(context, 'إرسال الصورة', 'Send image'))),
+                        PopupMenuItem(
+                            value: 'retid',
+                            enabled: !busy,
+                            child: w.Text(_l(context, 'إعادة قراءة الترمنل', 'Re-read terminal'))),
                       ],
                     ),
                   ],
@@ -7987,13 +8106,25 @@ class ReceiptZoomPage extends StatelessWidget {
   }
 }
 
+class SysLine {
+  final String text;
+  final bool ok;
+  const SysLine(this.text, this.ok);
+}
+
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
   final List<ReceiptItem>? allItems; // كل الإيصالات (لحساب رقم الباتش الإضافي)
   final bool single; // فتحناها من القلم: الحفظ بيقفل الشاشة (والسحب يمين/شمال بيتنقل بين الباتشات)
   final int initialIndex;
+  final SysLine? Function(ReceiptItem)? sysLineOf; // سطر مطابقة السيستم (من التقفيل)
   const ReviewPage(
-      {super.key, required this.items, this.allItems, this.single = false, this.initialIndex = 0});
+      {super.key,
+      required this.items,
+      this.allItems,
+      this.single = false,
+      this.initialIndex = 0,
+      this.sysLineOf});
 
   @override
   State<ReviewPage> createState() => _ReviewPageState();
@@ -8162,6 +8293,54 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // ملخص المشاكل في أول الشاشة: اللي ملهوش بلوك قرار تحته + مطابقة السيستم، أو "مفيش مشاكل"
+  Widget _problemsBox(ReceiptItem it) {
+    final bad = <String>[];
+    if (it.reprintSummary) {
+      bad.add(_l(context, '🚨 الإيصال REPRINT أو SUMMARY (ممكن يكون مكرر)', '🚨 Receipt is REPRINT or SUMMARY (may be a duplicate)'));
+    } else if (it.missingBatchClosed && !it.ignoredDoc) {
+      bad.add(_l(context, '⚠️ مش مكتوب BATCH CLOSED SUCCESSFULLY - اتأكد منه', '⚠️ BATCH CLOSED SUCCESSFULLY is missing - verify'));
+    }
+    if (!it.userExcluded && !it.ignoredDoc) {
+      if (it.amount <= 0) {
+        bad.add(_l(context, '⚠️ المبلغ غير مقروء', '⚠️ Amount not readable'));
+      } else if (!it.ok) {
+        bad.add(_l(context, '⚠️ المبلغ المقروء محتاج تأكيد', '⚠️ Read amount needs confirmation'));
+      }
+      if (it.row == null) bad.add(_l(context, '⚠️ الوحدة غير معروفة', '⚠️ Unit unknown'));
+    }
+    final sl = (it.ignoredDoc || it.userExcluded) ? null : widget.sysLineOf?.call(it);
+    final good = !it.needsReview && bad.isEmpty && (sl == null || sl.ok);
+    final lines = <Widget>[
+      for (final b in bad)
+        Text(b, style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13)),
+      if (sl != null)
+        Text(sl.text,
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: _tintFg(context, sl.ok ? Colors.green : Colors.red))),
+      if (good && sl == null)
+        Text(_l(context, '✅ مفيش مشاكل', '✅ No problems'),
+            style: TextStyle(color: _tintFg(context, Colors.green), fontSize: 13)),
+    ];
+    if (lines.isEmpty) return const SizedBox.shrink();
+    final tone = good ? Colors.green : (bad.isEmpty && sl != null && !sl.ok ? Colors.red : kReviewTone);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: _tintBg(context, tone, soft: true),
+        border: Border.all(color: _tintBorder(context, tone)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        for (var k = 0; k < lines.length; k++)
+          Padding(padding: EdgeInsets.only(top: k == 0 ? 0 : 3), child: lines[k]),
+      ]),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     AppSettings.of(context);
@@ -8221,6 +8400,7 @@ class _ReviewPageState extends State<ReviewPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _problemsBox(it),
           if (it.dupSuspect || it.userExcluded)
             Container(
               margin: const EdgeInsets.only(bottom: 8),
@@ -9430,31 +9610,6 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
   }
   final hasNotes = r.notes.any((n) => _noteKindOf(n).sev > 0);
 
-  // الملف سليم ومفيش أي فرق: سطر واحد صغير بدل المربعات
-  if (gaps.isEmpty && !hasNotes && r.ok) {
-    final txt = '${r.count} ${_l(c, 'إيصال', 'receipts')}'
-        '${batch != null ? ' • ${_l(c, 'باتش', 'batch')} $batch' : ''}'
-        '${sys != null ? ' • ${_l(c, 'سيستم', 'system')} $sys' : ''}';
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
-      child: Row(children: [
-        Icon(Icons.check_circle, size: 14, color: _tintBorder(c, Colors.green)),
-        const SizedBox(width: 4),
-        Flexible(
-            child: Text(txt,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))),
-        if (r.verdict > 0)
-          Padding(
-            padding: const EdgeInsetsDirectional.only(start: 6),
-            child: Text(_l(c, '✓ اتراجع', '✓ Reviewed'),
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _tintFg(c, Colors.green))),
-          ),
-      ]),
-    );
-  }
-
   final MaterialColor? cTone = r.verdict > 0
       ? Colors.green
       : (match == null ? null : (match ? Colors.green : (soft ? Colors.amber : Colors.red)));
@@ -9471,12 +9626,15 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
           _statBox(c, _l(c, 'السيستم', 'System'), v(sys), gap(sys)),
         ]),
       ),
-      if (gaps.isNotEmpty || r.verdict > 0 || hasNotes)
-        Padding(
-          padding: const EdgeInsets.only(top: 4),
+      // نفس الشكل لكل الكروت: المربعات التلاتة + صف شارات دايماً (شارة "سليم" لو مفيش حاجة)
+      Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 22),
           child: Wrap(spacing: 6, runSpacing: 4, children: [
             ...gaps,
             if (r.verdict > 0) _flagChip(c, _l(c, '✓ اتراجع: صح', '✓ Reviewed: OK'), Colors.green),
+            if (gaps.isEmpty && !hasNotes && r.ok && r.verdict <= 0) _flagChip(c, _l(c, '✓ سليم', '✓ OK'), Colors.green),
             if (hasNotes)
               _flagChip(
                   c,
@@ -9485,6 +9643,7 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
                   kReviewTone),
           ]),
         ),
+      ),
     ],
   );
 }
@@ -11034,17 +11193,30 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
-  // نقل PDF الإيصالات اللي اتسمّت ومش مستبعدة (سواء محتاجة مراجعة أو لأ) لفولدر أختاره من التليفون
+  // مسار الملف الفعلي للنقل: الملف المسمّى لو موجود، وإلا الأصلي (ملفات فيها مشكلة وما اتسمّتش)
+  String? _transferPathOf(MResult r) {
+    final op = r.openPath;
+    if (op != null && File(op).existsSync()) return op;
+    if (r.srcPath.isNotEmpty && File(r.srcPath).existsSync()) return r.srcPath;
+    return null;
+  }
+
+  // نقل كل ملفات الدفع (حتى اللي فيها مشكلة أو لسه متسمّتش) ما عدا المستبعد، لفولدر بتاريخ اليوم
   Future<void> transferGood() async {
-    final good = results
-        .where((r) => !r.excluded && r.newName != null && r.openPath != null && File(r.openPath!).existsSync())
-        .toList();
-    final moved = await transferFilesViaPicker(context, good.map((r) => r.openPath!).toList());
-    if (moved == null || moved.isEmpty || !mounted) return;
-    for (final r in good) {
-      final np = moved[r.openPath];
-      if (np != null) r.openPath = np;
+    final items = <MResult, String>{};
+    for (final r in results) {
+      if (r.excluded) continue;
+      final p = _transferPathOf(r);
+      if (p != null) items[r] = p;
     }
+    final moved = await transferFilesViaPicker(context, items.values.toSet().toList());
+    if (moved == null || moved.isEmpty || !mounted) return;
+    items.forEach((r, p) {
+      final np = moved[p];
+      if (np == null) return;
+      if (r.srcPath == p) r.srcPath = np;
+      r.openPath = np;
+    });
     saveMState(results);
     setState(() {});
   }
@@ -12452,7 +12624,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             _quickBtnG(context, Icons.chat, 'إرسال الكل ($named)',
                 (busy && !namingDone) || named == 0 ? null : shareAll),
             _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
-                busy || named == 0 ? null : transferGood),
+                busy || results.every((r) => r.excluded) ? null : transferGood),
             _quickBtnG(context, Icons.note_add, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
