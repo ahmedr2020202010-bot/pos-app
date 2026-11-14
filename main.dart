@@ -1872,7 +1872,7 @@ const List<List<String>> _kEnPhrases = [
   ['إجمالي بعيد عن المعتاد', 'Total far from usual'],
   ['القراءة التانية للمبلغ', 'The second amount reading'],
   ['صورة من الصور المرتبة', 'image(s) from the sorted images'],
-  ['اختر الماكينة (1..19)', 'Select machine (1..19)'],
+  ['اختر الماكينة (1..25)', 'Select machine (1..25)'],
   ['جاري فحص الإيصالات...', 'Scanning receipts...'],
   ['ولا يوجد ملف PDF باسم', 'and there is no PDF file named'],
   ['لو المبلغ صح اضغط حفظ', 'if the amount is correct, tap Save'],
@@ -2066,6 +2066,20 @@ Color _tintBg(BuildContext c, MaterialColor m, {bool soft = false, bool strong =
   return strong ? m.shade300 : (soft ? m.shade50 : m.shade100);
 }
 
+// "محتاج مراجعة": برتقالي هادي/مطفي بدل البرتقالي الصافي الفاقع (بيتستخدم في كل التطبيق)
+const MaterialColor kReviewTone = MaterialColor(0xFFDE8E43, <int, Color>{
+  50: Color(0xFFFFF5EC),
+  100: Color(0xFFFCE6D0),
+  200: Color(0xFFF7CFA6),
+  300: Color(0xFFF0B67C),
+  400: Color(0xFFE8A15C),
+  500: Color(0xFFDE8E43),
+  600: Color(0xFFC97A34),
+  700: Color(0xFFAC6429),
+  800: Color(0xFF8C5121),
+  900: Color(0xFF6E3F1A),
+});
+
 Color _tintBorder(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade300 : m.shade800;
 Color _tintFg(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade200 : m.shade900;
 
@@ -2216,7 +2230,8 @@ class TerminalInfo {
   final int orderNum;
   final int excelRow;
   final String unitName;
-  const TerminalInfo(this.orderNum, this.excelRow, this.unitName);
+  final bool spare; // ماكينة احتياطي: بتتحسب في إجمالي الوحدة ومبتتعدّش ناقصة لو مظهرتش
+  const TerminalInfo(this.orderNum, this.excelRow, this.unitName, {this.spare = false});
 }
 
 final Map<String, TerminalInfo> terminals = {
@@ -2239,6 +2254,13 @@ final Map<String, TerminalInfo> terminals = {
   "50382312": const TerminalInfo(17, 9, "مديرية الأمن"),
   "50383699": const TerminalInfo(18, 10, "ميناء الإسكندرية"),
   "50383700": const TerminalInfo(19, 11, "خدمات مصر"),
+  // ───── ماكينات احتياطي (أرقامها بعد 19 عشان مبتتحسبش ناقصة) ─────
+  "50325765": const TerminalInfo(20, 2, "أبيس", spare: true), // أبيس (احتياطي)
+  "50322364": const TerminalInfo(21, 3, "برج العرب", spare: true), // برج العرب (احتياطي 1)
+  "50322361": const TerminalInfo(22, 3, "برج العرب", spare: true), // برج العرب (احتياطي 2)
+  "50382150": const TerminalInfo(23, 4, "المنتزه", spare: true), // المنتزه (احتياطي)
+  "50381092": const TerminalInfo(24, 5, "محرم بك", spare: true), // محرم بك (احتياطي)
+  "50381077": const TerminalInfo(25, 6, "العجمي", spare: true), // العجمي (احتياطي)
 };
 
 final Map<int, String> numToTid = {
@@ -2249,6 +2271,8 @@ final Map<int, String> numToTid = {
   13: "50382308", 14: "50383706",
   15: "50382300", 16: "50383702", 17: "50382312",
   18: "50383699", 19: "50383700",
+  20: "50325765", 21: "50322364", 22: "50322361",
+  23: "50382150", 24: "50381092", 25: "50381077",
 };
 
 final Map<String, String> tidFix = {
@@ -2289,7 +2313,8 @@ final Map<int, String> rowNames = {
 };
 
 // ───────── ماكينات جديدة (TID مختلف) لوحدة موجودة: بتتعرف من الـ Merchant ID أو اسم الوحدة وبتتحفظ ─────────
-const int kBaseMachines = 19; // ماكينات الأساس المكتوبة في الكود (فحص الماكينات الناقصة عليها بس)
+const int kMainMachines = 19; // الماكينات الأساسية: فحص الماكينات الناقصة عليها بس
+const int kBaseMachines = 25; // الأساسي + الاحتياطي المكتوبين في الكود (الماكينات الجديدة بتاخد رقم بعدهم)
 final Set<String> _extraTids = {};
 String get _extraTermPath => '$baseDir/extra_terminals.json';
 
@@ -4216,7 +4241,7 @@ class _AutoLogPageState extends State<AutoLogPage> {
                       final d = today(e.t) ? '' : '${e.t.day}/${e.t.month}  ';
                       return ListTile(
                         leading: Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
-                            color: e.bad ? Colors.orange : Colors.green),
+                            color: e.bad ? kReviewTone : Colors.green),
                         title: w.Text(tr(e.title), maxLines: 2, overflow: TextOverflow.ellipsis),
                         subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')}\n${tr(e.text)}'),
                         isThreeLine: true,
@@ -5697,7 +5722,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green, compact: true),
         _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber,
             compact: true, onTap: missingTerminals.isEmpty ? null : openClosingReport),
-        _statCard(Icons.fact_check, 'مراجعة', '$rv', Colors.orange,
+        _statCard(Icons.fact_check, 'مراجعة', '$rv', kReviewTone,
             compact: true, onTap: rv == 0 ? null : openReview),
       ],
     );
@@ -6057,12 +6082,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const SizedBox(height: 8),
                 DropdownButtonFormField<int>(
                   value: selectedOrder,
-                  hint: const Text('اختر الماكينة (1..19)'),
+                  hint: const Text('اختر الماكينة (1..25)'),
                   items: [
                     for (var i = 1; i <= machineCount; i++)
                       DropdownMenuItem(
                         value: i,
-                        child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
+                        child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
                       ),
                   ],
                   onChanged: (v) => setDlgState(() => selectedOrder = v),
@@ -6208,7 +6233,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } catch (_) {}
       final foundL = mainItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
       missingTerminals = [
-        for (var i = 1; i <= 19; i++)
+        for (var i = 1; i <= kMainMachines; i++)
           if (!foundL.contains(i) && !ignoreL.contains(i)) i
       ];
       writeReport(reportDate);
@@ -6320,7 +6345,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final foundOrders =
         mainItems.where((e) => e.amount > 0).map((e) => e.orderNum).whereType<int>().toSet();
     missingTerminals = [
-      for (var i = 1; i <= 19; i++)
+      for (var i = 1; i <= kMainMachines; i++)
         if (!foundOrders.contains(i) && !ignore.contains(i)) i
     ];
     writeReport(reportDate);
@@ -6456,7 +6481,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         runSpacing: 4,
         children: [
           if (nm > 0) chip(_l(context, '⚠️ ناقص $nm', '⚠️ Missing $nm'), Colors.amber),
-          if (nw > 0) chip(_l(context, '📝 ملاحظات $nw', '📝 Notes $nw'), Colors.orange),
+          if (nw > 0) chip(_l(context, '📝 ملاحظات $nw', '📝 Notes $nw'), kReviewTone),
         ],
       ),
     );
@@ -6468,10 +6493,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final chips = <Widget>[];
     void add(String t, MaterialColor c) => chips.add(_flagChip(context, t, c));
     if (item.reprintSummary) add('🚨 REPRINT / SUMMARY', Colors.red);
-    if (item.missingBatchClosed && !item.reprintSummary && !item.ignoredDoc) add('⚠️ BATCH CLOSED ناقص', Colors.orange);
+    if (item.missingBatchClosed && !item.reprintSummary && !item.ignoredDoc) add('⚠️ BATCH CLOSED ناقص', kReviewTone);
     if (item.ignoredDoc) add('📄 مستند متجاهل - راجعه', Colors.grey);
     if (item.dupSuspect) {
-      add('⚠️ مشكوك مكرر${item.dupOf != null ? ' (ماكينة ${item.dupOf})' : ''}', Colors.orange);
+      add('⚠️ مشكوك مكرر${item.dupOf != null ? ' (ماكينة ${item.dupOf})' : ''}', kReviewTone);
     } else if (item.userExcluded) {
       add('🚫 مستبعد (مكرر)', Colors.grey);
     }
@@ -6485,6 +6510,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Wrap(spacing: 6, runSpacing: 4, children: chips),
+    );
+  }
+
+  // سطر المبلغ + سطر صغير (TID / المعاملات / مطابقة السيستم) + شارات للمشاكل بس.
+  // الفرق مع السيستم بيتكتب بالمبلغ (زيادة / ناقص) بدل علامة تحذير من غير شرح.
+  Widget _receiptSubtitle(ReceiptItem item) {
+    final cs = Theme.of(context).colorScheme;
+    final small = TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant);
+    final sfx = item.suffix != null ? ' (باتش ${item.suffix})' : '';
+    final parts = <String>['TID: ${item.tid ?? 'غير محدد'}$sfx'];
+    if (item.txn != null) parts.add('${_l(context, 'المعاملات', 'Txns')}: ${item.txn}');
+    final diff = _sysDiffOf(item);
+    if (diff != null && diff == 0) parts.add('🖥️ ${_l(context, 'مطابق للسيستم ✓', 'Matches system ✓')}');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!item.ignoredDoc && item.amount > 0)
+          w.Text('${item.amount.toStringAsFixed(2)} ج.م',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+        w.Text(parts.join(' | '), maxLines: 1, overflow: TextOverflow.ellipsis, style: small),
+        if (item.batches.length > 1)
+          w.Text('= ${item.batches.map((b) => b.toStringAsFixed(2)).join(' + ')}', style: small),
+        if (diff != null && diff != 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: _flagChip(
+                context,
+                '🖥️ ${_l(context, 'فرق السيستم', 'System gap')}: '
+                '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
+                '${diff.abs().toStringAsFixed(2)} ج.م',
+                Colors.red),
+          ),
+        _warnChips(item),
+      ],
     );
   }
 
@@ -7434,14 +7493,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           for (final item in visItems)
             _swipeWrap(item, Card(
-              margin: const EdgeInsets.symmetric(vertical: 4),
+              margin: const EdgeInsets.symmetric(vertical: 2),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
                 side: BorderSide(
                   color: item.reprintSummary
                       ? Colors.red
-                      : (item.missingBatchClosed ? Colors.orange : Theme.of(context).colorScheme.outlineVariant),
-                  width: item.reprintSummary ? 3.0 : (item.missingBatchClosed ? 2.5 : 1.0),
+                      : (item.missingBatchClosed ? kReviewTone : Theme.of(context).colorScheme.outlineVariant),
+                  width: item.reprintSummary ? 2.0 : (item.missingBatchClosed ? 1.5 : 1.0),
                 ),
               ),
               clipBehavior: Clip.antiAlias,
@@ -7449,14 +7508,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               child: AnimatedContainer(
                duration: const Duration(milliseconds: 350),
                decoration: BoxDecoration(
-                 border: BorderDirectional(start: BorderSide(color: _itemStatusColor(item), width: 5)),
+                 border: BorderDirectional(start: BorderSide(color: _itemStatusColor(item), width: 4)),
                ),
                child: ListTile(
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                contentPadding: const EdgeInsetsDirectional.fromSTEB(10, 0, 2, 0),
                 onTap: () => editReceipt(item),
                 leading: Image.file(
                   File(item.path),
-                  width: 48,
-                  height: 48,
+                  width: 40,
+                  height: 40,
                   fit: BoxFit.cover,
                 ),
                 title: Row(
@@ -7480,24 +7542,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         padding: const EdgeInsetsDirectional.only(start: 6),
                         child: Icon(Icons.swipe, size: 14, color: Theme.of(context).colorScheme.onSurfaceVariant),
                       ),
-                    if ((_sysDiffOf(item) ?? 0) != 0)
-                      Padding(
-                        padding: const EdgeInsetsDirectional.only(start: 4),
-                        child: Icon(Icons.warning_amber, size: 16, color: _tintBorder(context, Colors.amber)),
-                      ),
                   ],
                 ),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (!item.ignoredDoc && item.amount > 0)
-                      w.Text('${item.amount.toStringAsFixed(2)} ج.م',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
-                    w.Text(_subtitleSmall(item),
-                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
-                    _warnChips(item),
-                  ],
-                ),
+                subtitle: _receiptSubtitle(item),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -7518,7 +7565,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               },
                       ),
                     if (item.needsReview)
-                      Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange))
+                      Icon(Icons.warning_amber, color: _tintBorder(context, kReviewTone))
                     else if (item.ignoredDoc || item.ign == 'drop' || item.userExcluded)
                       const Icon(Icons.remove_circle_outline, color: Colors.grey)
                     else if (item.tid != null && item.amount > 0)
@@ -8160,8 +8207,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _tintBg(context, Colors.orange, soft: true),
-                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                color: _tintBg(context, kReviewTone, soft: true),
+                border: Border.all(color: _tintBorder(context, kReviewTone)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -8172,7 +8219,7 @@ class _ReviewPageState extends State<ReviewPage> {
                         ? '🚫 الإيصال ده مستبعد (مكرر).'
                         : '⚠️ مشكوك إنه مكرر: نفس الماكينة ${it.orderNum ?? ''} ونفس المبلغ. '
                             'مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن.',
-                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -8204,8 +8251,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _tintBg(context, Colors.orange, soft: true),
-                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                color: _tintBg(context, kReviewTone, soft: true),
+                border: Border.all(color: _tintBorder(context, kReviewTone)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -8214,7 +8261,7 @@ class _ReviewPageState extends State<ReviewPage> {
                   Text(
                     '📄 التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش. '
                     'زوّم وشوف: لو باتش حقيقي ادخله وكمّل المبلغ والماكينة.',
-                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -8244,8 +8291,8 @@ class _ReviewPageState extends State<ReviewPage> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _tintBg(context, Colors.orange, soft: true),
-                border: Border.all(color: _tintBorder(context, Colors.orange)),
+                color: _tintBg(context, kReviewTone, soft: true),
+                border: Border.all(color: _tintBorder(context, kReviewTone)),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -8253,7 +8300,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 children: [
                   Text(
                     '📅 تاريخ الإيصال ${it.date} بينما أغلب الإيصالات ${it.dateMain}.',
-                    style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                    style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -8285,14 +8332,14 @@ class _ReviewPageState extends State<ReviewPage> {
                 it.how == 'auto-number' || it.how == 'conflict'
                     ? '❓ رقم الماكينة اتحدد تلقائياً (${it.orderNum}) - اتأكد منه واضغط حفظ.'
                     : '❓ الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ.',
-                style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13),
+                style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13),
               ),
             ),
           if (it.unusual != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text('⚠️ ${it.unusual}  (لو المبلغ صح اضغط حفظ)',
-                  style: TextStyle(color: _tintFg(context, Colors.orange), fontSize: 13)),
+                  style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13)),
             ),
           Text(
             'المقروء: ${it.amount > 0 ? it.amount.toStringAsFixed(2) : 'غير مقروء'} ج.م'
@@ -8306,7 +8353,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 children: [
                   Expanded(
                     child: Text('⚠️ القراءة التانية: ${it.alt!.toStringAsFixed(2)}',
-                        style: TextStyle(color: _tintFg(context, Colors.orange))),
+                        style: TextStyle(color: _tintFg(context, kReviewTone))),
                   ),
                   TextButton(
                     onPressed: () => setState(() => amt.text = it.alt!.toStringAsFixed(2)),
@@ -8352,12 +8399,12 @@ class _ReviewPageState extends State<ReviewPage> {
           DropdownButtonFormField<int>(
             value: order,
             isExpanded: true,
-            hint: const Text('اختر الماكينة (1..19)'),
+            hint: const Text('اختر الماكينة (1..25)'),
             items: [
               for (var i = 1; i <= machineCount; i++)
                 DropdownMenuItem(
                   value: i,
-                  child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}'),
+                  child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
                 ),
             ],
             onChanged: (v) => setState(() => order = v),
@@ -9186,7 +9233,7 @@ _St _statusOf(MResult r) {
   if (r.verdict > 0) return const _St('اتراجع: صح', 'Reviewed: OK', Colors.green);
   if (r.ok && r.softWarn) return const _St('سليم ⚠️ فرق بسيط', 'OK ⚠️ small difference', Colors.amber);
   if (r.ok) return const _St('سليم', 'OK', Colors.green);
-  return const _St('محتاج مراجعة', 'Needs review', Colors.orange);
+  return const _St('محتاج مراجعة', 'Needs review', kReviewTone);
 }
 
 // الباتش = العدد اللي مكتوب في خانة "الصح" (من إيصال الباتش)، والفعلي = العدد اللي التطبيق عدّه
@@ -9215,7 +9262,7 @@ String _diffText(BuildContext c, int d) => d == 0
     : (d > 0 ? _l(c, 'ناقص $d', 'Missing $d') : _l(c, 'زيادة ${-d}', 'Extra ${-d}'));
 
 MaterialColor _diffColor(int d) =>
-    d == 0 ? Colors.green : (d.abs() < kSoftGap ? Colors.amber : (d > 0 ? Colors.red : Colors.orange));
+    d == 0 ? Colors.green : (d.abs() < kSoftGap ? Colors.amber : (d > 0 ? Colors.red : kReviewTone));
 
 // فرق الباتش بسيط (أقل من kSoftGap): تحذير أصفر بدل الأحمر
 bool _batchSoft(MResult r) {
@@ -9273,42 +9320,44 @@ Widget _mTitle(BuildContext c, MResult r) {
   final n = _splitMName(r.newName);
   final cs = Theme.of(c).colorScheme;
   final main = n == null ? (r.newName ?? '؟ ${r.pdfName}') : '${n.unit}${n.idx != null ? ' ${n.idx}' : ''}';
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Row(children: [
-        if (r.softWarn)
-          Padding(
-            padding: const EdgeInsetsDirectional.only(end: 4),
-            child: Icon(Icons.warning_amber, size: 18, color: _tintBorder(c, Colors.amber)),
-          ),
-        Flexible(
-          child: Text(main,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+  // سطر واحد: الاسم + (ماكينة • التاريخ) بخط صغير جنبه
+  return Row(children: [
+    if (r.softWarn)
+      Padding(
+        padding: const EdgeInsetsDirectional.only(end: 4),
+        child: Icon(Icons.warning_amber, size: 16, color: _tintBorder(c, Colors.amber)),
+      ),
+    Flexible(
+      child: Text.rich(
+        TextSpan(children: [
+          TextSpan(
+              text: main,
               style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 15,
                   decoration: r.excluded ? TextDecoration.lineThrough : null)),
-        ),
-        if (!r.ok && !r.excluded)
-          Padding(
-            padding: const EdgeInsetsDirectional.only(start: 6),
-            child: Icon(Icons.swipe, size: 14, color: cs.onSurfaceVariant),
-          ),
-      ]),
-      if (n != null)
-        Text('${_l(c, 'ماكينة', 'Machine')} ${n.order} • ${n.date}',
-            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-    ],
-  );
+          if (n != null)
+            TextSpan(
+                text: '   ${_l(c, 'ماكينة', 'Machine')} ${n.order} • ${n.date}',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+        ]),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    ),
+    if (!r.ok && !r.excluded)
+      Padding(
+        padding: const EdgeInsetsDirectional.only(start: 6),
+        child: Icon(Icons.swipe, size: 14, color: cs.onSurfaceVariant),
+      ),
+  ]);
 }
 
 Widget _statBox(BuildContext c, String label, String value, MaterialColor? tone) {
   final cs = Theme.of(c).colorScheme;
   return Expanded(
     child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4),
+      padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
       decoration: BoxDecoration(
         color: tone == null ? cs.surfaceContainerHighest.withAlpha(120) : _tintBg(c, tone),
         borderRadius: BorderRadius.circular(8),
@@ -9319,8 +9368,8 @@ Widget _statBox(BuildContext c, String label, String value, MaterialColor? tone)
         children: [
           Text(value,
               style: TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.bold, color: tone == null ? null : _tintFg(c, tone))),
-          Text(label, style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+                  fontSize: 14.5, fontWeight: FontWeight.bold, color: tone == null ? null : _tintFg(c, tone))),
+          Text(label, style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
         ],
       ),
     ),
@@ -9340,21 +9389,64 @@ Widget _flagChip(BuildContext c, String text, MaterialColor col) => Container(
     );
 
 Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
+  final cs = Theme.of(c).colorScheme;
   if (r.excluded || r.pending) {
     return Text(
         r.pending && busy
             ? _l(c, 'بيتعدّ...', 'Counting...')
             : (r.pending ? _l(c, 'لسه ما اتعدّش', 'Not counted yet') : _mSummary(c, r)),
-        style: TextStyle(fontSize: 12, color: Theme.of(c).colorScheme.onSurfaceVariant));
+        style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant));
   }
   final match = _batchMatch(r);
   final soft = _batchSoft(r);
   final batch = _mBatchShown(r);
   final sys = _mSysShown(r);
+  final seqLen = _statsOf(r).seqLen;
   String v(int? x) => x == null ? '—' : '$x';
   MaterialColor? gap(int? x) {
     if (r.verdict > 0 || x == null || x == r.count) return null;
     return (x - r.count).abs() < kSoftGap ? Colors.amber : Colors.red;
+  }
+
+  // الزيادة والنقص بالرقم: المتوقع - الفعلي (موجب = ناقص، سالب = زيادة)
+  final gaps = <Widget>[];
+  if (r.verdict <= 0) {
+    void addGap(String src, int? expected) {
+      if (expected == null) return;
+      final d = expected - r.count;
+      if (d == 0) return;
+      gaps.add(_flagChip(c, '$src: ${_diffText(c, d)}', d.abs() < kSoftGap ? Colors.amber : Colors.red));
+    }
+
+    addGap(_l(c, 'عن الباتش', 'vs batch'), batch);
+    addGap(_l(c, 'عن السيستم', 'vs system'), sys);
+    addGap(_l(c, 'عن التسلسل', 'vs sequence'), seqLen);
+  }
+  final hasNotes = r.notes.any((n) => _noteKindOf(n).sev > 0);
+
+  // الملف سليم ومفيش أي فرق: سطر واحد صغير بدل المربعات
+  if (gaps.isEmpty && !hasNotes && r.ok) {
+    final txt = '${r.count} ${_l(c, 'إيصال', 'receipts')}'
+        '${batch != null ? ' • ${_l(c, 'باتش', 'batch')} $batch' : ''}'
+        '${sys != null ? ' • ${_l(c, 'سيستم', 'system')} $sys' : ''}';
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(children: [
+        Icon(Icons.check_circle, size: 14, color: _tintBorder(c, Colors.green)),
+        const SizedBox(width: 4),
+        Flexible(
+            child: Text(txt,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))),
+        if (r.verdict > 0)
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 6),
+            child: Text(_l(c, '✓ اتراجع', '✓ Reviewed'),
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _tintFg(c, Colors.green))),
+          ),
+      ]),
+    );
   }
 
   final MaterialColor? cTone = r.verdict > 0
@@ -9364,7 +9456,7 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Padding(
-        padding: const EdgeInsets.only(top: 4),
+        padding: const EdgeInsets.only(top: 3),
         child: Row(children: [
           _statBox(c, _l(c, 'الإيصالات', 'Receipts'), '${r.count}', cTone),
           const SizedBox(width: 6),
@@ -9373,17 +9465,18 @@ Widget _mSubtitle(BuildContext c, MResult r, bool busy) {
           _statBox(c, _l(c, 'السيستم', 'System'), v(sys), gap(sys)),
         ]),
       ),
-      if (r.verdict > 0 || r.notes.any((n) => _noteKindOf(n).sev > 0))
+      if (gaps.isNotEmpty || r.verdict > 0 || hasNotes)
         Padding(
-          padding: const EdgeInsets.only(top: 6),
+          padding: const EdgeInsets.only(top: 4),
           child: Wrap(spacing: 6, runSpacing: 4, children: [
+            ...gaps,
             if (r.verdict > 0) _flagChip(c, _l(c, '✓ اتراجع: صح', '✓ Reviewed: OK'), Colors.green),
-            if (r.notes.any((n) => _noteKindOf(n).sev > 0))
+            if (hasNotes)
               _flagChip(
                   c,
                   _l(c, '⚠️ ${r.notes.where((n) => _noteKindOf(n).sev > 0).length} ملاحظة',
                       '⚠️ ${r.notes.where((n) => _noteKindOf(n).sev > 0).length} note(s)'),
-                  Colors.orange),
+                  kReviewTone),
           ]),
         ),
     ],
@@ -9396,12 +9489,12 @@ Color _mStripColor(MResult r) {
   final m = _batchMatch(r);
   if (r.verdict > 0 || m == true) return Colors.green;
   if (m == false) return _batchSoft(r) ? Colors.amber : Colors.red;
-  return r.ok ? Colors.green : Colors.orange;
+  return r.ok ? Colors.green : kReviewTone;
 }
 
 Color _itemStatusColor(ReceiptItem i) {
   if (i.reprintSummary) return Colors.red;
-  if (i.needsReview) return Colors.orange;
+  if (i.needsReview) return kReviewTone;
   if (i.ignoredDoc || i.ign == 'drop' || i.userExcluded) return Colors.grey;
   if (i.tid != null && i.amount > 0) return Colors.green;
   return Colors.red;
@@ -9479,7 +9572,7 @@ Widget _listTools(
                       style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
-                          color: allOk ? _tintFg(context, Colors.green) : _tintFg(context, Colors.orange))),
+                          color: allOk ? _tintFg(context, Colors.green) : _tintFg(context, kReviewTone))),
                 ),
                 w.Text('${(done * 100 / total).round()}%',
                     style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
@@ -9490,7 +9583,7 @@ Widget _listTools(
                 child: LinearProgressIndicator(
                   value: done / total,
                   minHeight: 6,
-                  color: allOk ? Colors.green : Colors.orange,
+                  color: allOk ? Colors.green : kReviewTone,
                 ),
               ),
             ],
@@ -9768,7 +9861,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
     final MaterialColor diffCol = r.verdict > 0 ? Colors.green : (bd == null ? Colors.blueGrey : _diffColor(bd));
 
     Widget noteCard(_NoteKind k) {
-      final MaterialColor col = k.sev == 2 ? Colors.red : (k.sev == 1 ? Colors.orange : Colors.blue);
+      final MaterialColor col = k.sev == 2 ? Colors.red : (k.sev == 1 ? kReviewTone : Colors.blue);
       return Container(
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.fromLTRB(10, 10, 10, 4),
@@ -9825,7 +9918,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
       if (stats.full != null) kv(_l(context, 'إيصالات مقروءة كاملة', 'Fully read receipts'), '${stats.full}'),
       if (stats.partial != null)
         kv(_l(context, 'إيصالات ناقصة القراءة', 'Partially read receipts'), '${stats.partial}',
-            color: stats.partial! > 0 ? Colors.orange : null),
+            color: stats.partial! > 0 ? kReviewTone : null),
       if (stats.seqMin != null)
         kv(_l(context, 'تسلسل الإيصالات', 'Receipt sequence'), '${pad6(stats.seqMin)} ... ${pad6(stats.seqMax)}',
             color: Colors.blueAccent),
@@ -9835,7 +9928,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
         kv(
             _l(context, 'الفرق عن التسلسل', 'Difference from sequence'),
             r.count == stats.seqLen ? _l(context, 'مطابق ✓', 'Match ✓') : '${r.count - stats.seqLen!}  (الفعلي - المتوقع)',
-            color: r.count == stats.seqLen ? Colors.green : Colors.orange),
+            color: r.count == stats.seqLen ? Colors.green : kReviewTone),
     ];
 
     return Scaffold(
@@ -10008,7 +10101,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 if (diff != null)
                   kv(_l(context, 'الفرق', 'Difference'),
                       okAmt ? _l(context, 'مطابق ✓', 'Match ✓') : diff.toStringAsFixed(2),
-                      color: okAmt ? Colors.green : (all ? Colors.red : Colors.orange)),
+                      color: okAmt ? Colors.green : (all ? Colors.red : kReviewTone)),
                 w.Text(
                     ba == null
                         ? _l(context, 'مفيش مبلغ باتش مؤكد للماكينة دي للمقارنة.', 'No confirmed batch amount for this machine to compare.')
@@ -10036,7 +10129,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                           style: TextStyle(
                               fontSize: 14,
                               fontWeight: r.pageWarn.contains(e.key) ? FontWeight.bold : FontWeight.normal,
-                              color: r.pageWarn.contains(e.key) ? Colors.orange : null)),
+                              color: r.pageWarn.contains(e.key) ? kReviewTone : null)),
                       if (r.pageNote[e.key] != null)
                         w.Text(r.pageNote[e.key]!, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
                     ],
@@ -10154,7 +10247,7 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
               stat(_l(context, 'إجمالي المعاملات', 'Total transactions'), '$totalTx', Colors.blue),
               stat(_l(context, 'ملفات', 'Files'), '${all.length}', Colors.blueGrey),
               stat(_l(context, 'اتعدّت', 'Counted'), '${counted.length}', Colors.green),
-              stat(_l(context, 'محتاج مراجعة', 'Need review'), '$reviewN', reviewN > 0 ? Colors.orange : Colors.green),
+              stat(_l(context, 'محتاج مراجعة', 'Need review'), '$reviewN', reviewN > 0 ? kReviewTone : Colors.green),
               stat(_l(context, 'مستبعد', 'Excluded'), '$excl', Colors.grey),
               stat(_l(context, 'لسه ما اتعدّتش', 'Not counted'), '$pend', pend > 0 ? Colors.amber : Colors.green),
             ],
@@ -10323,7 +10416,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
                 style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.bold,
-                    color: _tintFg(context, okMatch ? Colors.green : Colors.orange))),
+                    color: _tintFg(context, okMatch ? Colors.green : kReviewTone))),
           ],
         ),
       ));
@@ -10380,7 +10473,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
               stat(_l(context, 'ناقص', 'Missing'), '${widget.missing.length}',
                   widget.missing.isNotEmpty ? Colors.amber : Colors.green),
               stat(_l(context, 'مراجعة', 'Review'), '${review.length}',
-                  review.isNotEmpty ? Colors.orange : Colors.green),
+                  review.isNotEmpty ? kReviewTone : Colors.green),
               stat(_l(context, 'مبالغ السيستم', 'System amounts'), '${sysList.length}', Colors.blueGrey),
               stat(_l(context, 'فروق السيستم', 'System differences'), '$sysDiffs',
                   sysDiffs > 0 ? Colors.red : Colors.green),
@@ -10395,7 +10488,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
             ], soft: true),
           if (widget.missing.isNotEmpty)
             box(Colors.amber, [
-              w.Text('⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} (${widget.missing.length} ${_l(context, 'من', 'of')} ${terminals.length}):',
+              w.Text('⚠️ ${_l(context, 'ماكينات ناقصة', 'Missing machines')} (${widget.missing.length} ${_l(context, 'من', 'of')} $kMainMachines):',
                   style: TextStyle(fontWeight: FontWeight.bold, color: _tintFg(context, Colors.amber))),
               const SizedBox(height: 4),
               w.Text(
@@ -10414,7 +10507,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
         padding: const EdgeInsets.all(8),
         children: [
           if (widget.warnings.isNotEmpty)
-            box(Colors.orange, [
+            box(kReviewTone, [
               w.Text('${_l(context, 'ملاحظات للمراجعة', 'Notes for review')} (${widget.warnings.length}):',
                   style: const TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 4),
@@ -10443,7 +10536,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
                   await widget.onOpen(it);
                   if (mounted) setState(() {});
                 },
-                leading: Icon(Icons.warning_amber, color: _tintBorder(context, Colors.orange)),
+                leading: Icon(Icons.warning_amber, color: _tintBorder(context, kReviewTone)),
                 title: w.Text(
                     it.ignoredDoc || it.ign == 'drop'
                         ? 'مستند متجاهل - ${baseName(it.path)}'
@@ -10998,7 +11091,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               for (var i = 1; i <= machineCount; i++)
                 DropdownMenuItem(
                   value: i,
-                  child: Text('ماكينة $i - ${terminals[numToTid[i]]?.unitName ?? ''}'),
+                  child: Text('ماكينة $i - ${terminals[numToTid[i]]?.unitName ?? ''}${terminals[numToTid[i]]?.spare == true ? ' (احتياطي)' : ''}'),
                 ),
             ],
             onChanged: (v) => setS(() => sel = v),
@@ -12140,7 +12233,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   List<String> missingMachines() {
     final got = results.where((r) => !r.excluded).map((r) => r.orderNum).whereType<int>().toSet();
     final out = <String>[];
-    for (var n = 1; n <= 19; n++) {
+    for (var n = 1; n <= kMainMachines; n++) {
       if (!got.contains(n)) out.add('$n ${terminals[numToTid[n]]!.unitName}');
     }
     return out;
@@ -12278,7 +12371,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
               _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.green),
               _statCard(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.purple),
               _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber),
-              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', Colors.orange),
+              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', kReviewTone),
             ],
           ),
           const SizedBox(height: 6),
@@ -12379,12 +12472,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 350),
                     decoration: BoxDecoration(
-                      border: BorderDirectional(start: BorderSide(color: stripColor, width: 5)),
+                      border: BorderDirectional(start: BorderSide(color: stripColor, width: 4)),
                     ),
                     child: InkWell(
                     onTap: () => openReport(r),
                     child: Padding(
-                    padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 4, 6),
+                    padding: const EdgeInsetsDirectional.fromSTEB(12, 5, 4, 5),
                     child: Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
@@ -12400,44 +12493,10 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                       ),
                     ),
                     SizedBox(
-                      width: 118,
+                      width: 52,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          SizedBox(
-                            width: 66,
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                            Text(_l(context, 'الباتش', 'Batch'),
-                                style: TextStyle(
-                                    fontSize: 10.5,
-                                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
-                            const SizedBox(height: 2),
-                            TextField(
-                              controller: r.ctl,
-                              keyboardType: TextInputType.number,
-                              textAlign: TextAlign.center,
-                              decoration: InputDecoration(
-                                isDense: true,
-                                contentPadding:
-                                    const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-                                hintText: _batchAutoOf(r)?.toString() ?? tr('الصح'),
-                                hintStyle: const TextStyle(fontSize: 13),
-                                border: const OutlineInputBorder(),
-                                filled: match != null,
-                                fillColor: match == null
-                                    ? null
-                                    : (match ? _tintBg(context, Colors.green, strong: true) : (soft ? _tintBg(context, Colors.amber, strong: true) : _tintBg(context, Colors.red, strong: true))),
-                              ),
-                              onChanged: (v) {
-                                saveMState(results);
-                                setState(() {});
-                              },
-                            ),
-                              ],
-                            ),
-                          ),
                           PopupMenuButton<String>(
                             tooltip: tr('المزيد'),
                             padding: EdgeInsets.zero,
