@@ -697,15 +697,15 @@ Widget _scanBar({
         final Widget child;
         if (busy) {
           final stepTxt = step == 1
-              ? ' • الباتشات (1 من 2)'
+              ? ' • التقفيل (1 من 2)'
               : step == 2
-                  ? ' • الملفات (2 من 2)'
+                  ? ' • إيصالات الدفع (2 من 2)'
                   : '';
           final pct = (progress != null && progress > 0) ? ' • ${(progress * 100).round()}%' : '';
           child = FilledButton.icon(
             onPressed: stopReq ? null : onStop,
             style: FilledButton.styleFrom(
-                backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
+                backgroundColor: Theme.of(c).colorScheme.error, foregroundColor: Theme.of(c).colorScheme.onError),
             icon: const Icon(Icons.stop),
             label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف$stepTxt$pct'),
           );
@@ -1142,7 +1142,7 @@ Future<void> runAllScans() async {
   } catch (_) {}
   await askBatteryExempt();
   try {
-    await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'جاري الفحص الشامل (باتشات + ملفات)...'});
+    await _chan.invokeMethod('startKeepAlive', {'title': 'A2R POS', 'text': 'جاري الفحص الشامل (التقفيل + إيصالات الدفع)...'});
   } catch (_) {}
   try {
     await _chan.invokeMethod('keepScreenOn', {'on': true});
@@ -1174,8 +1174,8 @@ Future<void> runAllScans() async {
     final hs = homeSumG?.call() ?? '';
     final ms = machSumG?.call() ?? '';
     chainSummary.value = '${aborted ? 'اتوقف الفحص الشامل.' : 'اكتمل الفحص الشامل ✓'}\n'
-        '• الباتشات: $hs\n'
-        '• الملفات: $ms\n'
+        '• التقفيل: $hs\n'
+        '• إيصالات الدفع: $ms\n'
         '⏱ الوقت المستغرق: ${fmtElapsed(chainSw.elapsed)}';
     if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
       try {
@@ -1556,7 +1556,8 @@ Future<void> wipeEverything(BuildContext context) async {
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx, false), child: w.Text(ar ? 'إلغاء' : 'Cancel')),
         FilledButton(
-          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error, foregroundColor: Theme.of(ctx).colorScheme.onError),
           onPressed: () => Navigator.pop(ctx, true),
           child: w.Text(ar ? 'امسح كل حاجة' : 'Wipe everything'),
         ),
@@ -1861,15 +1862,26 @@ const List<List<String>> _kEnRules = [
 
 // مرتبة من الأطول للأقصر علشان العبارات الطويلة تتبدّل الأول
 const List<List<String>> _kEnPhrases = [
+  ['بدأ فحص التقفيل', 'Closing scan started'],
+  ['بدأ فحص إيصالات الدفع', 'Payment receipts scan started'],
+  ['انتهى فحص التقفيل', 'Closing scan finished'],
+  ['انتهى فحص إيصالات الدفع', 'Payment receipts scan finished'],
+  ['اتوقف فحص التقفيل', 'Closing scan stopped'],
+  ['اتوقف فحص إيصالات الدفع', 'Payment receipts scan stopped'],
+  ['فحص التقفيل وقف بخطأ', 'Closing scan failed with an error'],
+  ['ضمن الفحص الشامل', 'part of the full scan'],
+  ['صور محددة يدوياً', 'manually selected images'],
+  ['ملفات محددة يدوياً', 'manually selected files'],
+
   ['متوازي (تجريبي)', 'parallel (experimental)'],
   ['متوازي', 'parallel'],
   ['الوقت المستغرق:', 'Time taken:'],
   ['Terminal ID مش واضح، الوحدة اتحددت من Merchant ID/الاسم جوه الـ PDF، راجع', 'Terminal ID unclear; unit determined from Merchant ID/name inside the PDF, review'],
   ['الملف ده مش واضح إنه إيصال ماكينة (قراءة ضعيفة للـ Terminal ID)، راجعه', 'This file does not look like a machine receipt (weak Terminal ID reading), review it'],
   ['الوحدة اتحددت بالاسم/الميرشانت فقط - اتأكد من الماكينة واضغط حفظ', 'Unit was determined by name/merchant only - verify the machine and tap Save'],
-  ['اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.', 'Tap "Run full processing" to collect the images and generate the Excel and PDF.'],
+  ['اضغط "فحص التقفيل" لسحب الصور وتوليد الإكسيل والـ PDF.', 'Tap "Scan closing" to collect the images and generate the Excel and PDF.'],
   ['التطبيق اتجاهل الصورة دي لأن شكلها إيصال دفع أو مستند مش باتش', 'The app ignored this image because it looks like a payment receipt or a document, not a batch'],
-  ['اضغط "فحص وإعادة تسمية" لفحص إيصالات الدفع من مستندات واتساب.', 'Tap "Scan & rename" to scan payment receipts from WhatsApp documents.'],
+  ['اضغط "فحص إيصالات الدفع" لفحص إيصالات الدفع من مستندات واتساب.', 'Tap "Scan payment receipts" to scan payment receipts from WhatsApp documents.'],
   ['مفيش صور (في الفترة المحددة) ولا ملفات PDF في المجلد المختار', 'No images (in the selected period) and no PDF files in the selected folder'],
   ['العد وقف أكتر من مرة (التطبيق اتقفل). من ⋮ اختار إعادة العد', 'Counting stopped more than once (the app closed). From ⋮ choose Recount'],
   ['مش محسوب في الإجمالي لحد ما تقرر. زوّم على الباتش وقارن', 'Not counted in the total until you decide. Zoom in on the batch and compare'],
@@ -1880,16 +1892,16 @@ const List<List<String>> _kEnPhrases = [
   ['ظهرت في صورة تانية بمبلغ مختلف - اتحسبت كباتش إضافي', 'appeared in another image with a different amount - counted as an extra batch'],
   ['فيه إيصال إقفال/ملخص/إعادة طباعة (اتجاهل ومش معدود)', 'Contains a closing/summary/reprint receipt (ignored, not counted)'],
   ['فولدر الإخراج ده عام، فهيتمسح بس ملفات التطبيق منه', 'this output folder is shared, so only the app files will be deleted from it'],
-  ['عدد إيصالات الدفع: لسه ما اتعدّش (اضغط بدء العد)', 'Payment receipts count: not counted yet (tap Start counting)'],
+  ['عدد إيصالات الدفع: لسه ما اتعدّش (اضغط فحص إيصالات الدفع)', 'Payment receipts count: not counted yet (tap Scan payment receipts)'],
   ['مش لاقي فولدر مستندات واتساب. اختار فولدر بإيدك', 'Could not find the WhatsApp documents folder. Pick a folder manually'],
   ['اتجاهلته: شكله إيصال دفع/مستند مش باتش - راجعه', 'Ignored: looks like a payment receipt/document, not a batch - review it'],
-  ['ملف لسه ما اتعدّش، اضغط "فحص" وهيكمّل من مكانه', 'file(s) not counted yet, tap "Scan" and it will continue where it left off'],
+  ['ملف لسه ما اتعدّش، اضغط "فحص إيصالات الدفع" وهيكمّل من مكانه', 'file(s) not counted yet, tap "Scan" and it will continue where it left off'],
   ['يجب منح إذن الوصول إلى جميع الملفات للمتابعة', 'You must grant all-files access to continue'],
   ['لا توجد صور في مجلد الواتساب بالفترة المحددة', 'No images in the WhatsApp folder for the selected period'],
   ['تعذر العثور على مجلد صور الواتساب تلقائياً', 'Could not find the WhatsApp images folder automatically'],
   ['مش قادر أقرا المبلغ أو الوحدة - اضغط تعديل', 'Cannot read the amount or the unit - tap Edit'],
   ['ممكن إيصالات ناقصة أو مش اتقرت، راجع الملف', 'possibly missing receipts or unread ones, check the file'],
-  ['ملف لسه ما اتعدّش. اضغط "بدء العد" لما تحب', 'file(s) not counted yet. Tap "Start counting" when you want'],
+  ['ملف لسه ما اتعدّش. اضغط "فحص إيصالات الدفع" لما تحب', 'file(s) not counted yet. Tap "Scan payment receipts" when you want'],
   ['الماكينة/الوحدة اتحددت تلقائياً - اتأكد', 'Machine/unit was determined automatically - verify'],
   ['مشكوك إنه مكرر - مش محسوب لحد ما تراجعه', 'Possible duplicate - not counted until reviewed'],
   ['صورة، ولم يتم العثور على إيصالات مطابقة', 'image(s), and no matching receipts were found'],
@@ -1915,11 +1927,11 @@ const List<List<String>> _kEnPhrases = [
   ['مفيش لوج لسه. شغّل الفحص الأول', 'No log yet. Run the scan first'],
   ['جاري البحث عن مجلدات الصور...', 'Searching for image folders...'],
   ['إعادة تسمية الصور وترتيبها...', 'Renaming and sorting images...'],
-  ['اضغط "بدء العد" لعدّ إيصالاته', 'Tap "Start counting" to count its receipts'],
+  ['اضغط "فحص إيصالات الدفع" لعدّ إيصالاته', 'Tap "Scan payment receipts" to count its receipts'],
   ['صفحات الطريقتين اختلفوا فيها:', 'Pages where the two methods differ:'],
-  ['اتعلّم للعد. اضغط "بدء العد".', 'Marked for counting. Tap "Start counting".'],
+  ['اتعلّم للعد. اضغط "فحص إيصالات الدفع".', 'Marked for counting. Tap "Scan payment receipts".'],
   ['مشكوك إنه مكرر: نفس الماكينة', 'Possible duplicate: same machine'],
-  ['اضغط "بدء العد" لعدّ إيصالات', 'Tap "Start counting" to count receipts of'],
+  ['اضغط "فحص إيصالات الدفع" لعدّ إيصالات', 'Tap "Scan payment receipts" to count receipts of'],
   ['صفحات ما لقيتش فيها إيصالات:', 'Pages with no receipts found:'],
   ['العد: سريع ← الدقيق (القديم)', 'Counting: fast, then precise (old)'],
   ['عدد إيصالات الدفع: بيتعدّ...', 'Payment receipts count: counting...'],
@@ -2047,13 +2059,17 @@ const List<List<String>> _kEnPhrases = [
   ['حفظ والتالي', 'Save & next'],
   ['اتوقف. فاضل', 'Stopped. Remaining'],
   ['اكتمل العد:', 'Counting complete:'],
-  ['فحص الباتشات والملفات مرة واحدة', 'Scan patches & files in one go'],
-  ['جاري فحص الباتشات', 'Scanning patches'],
-  ['جاري فحص الملفات', 'Scanning files'],
+  ['فحص التقفيل وإيصالات الدفع مرة واحدة', 'Scan closing & payment receipts in one go'],
+  ['جاري فحص التقفيل', 'Scanning closing'],
+  ['جاري فحص إيصالات الدفع', 'Scanning payment receipts'],
   ['اكتمل الفحص الشامل', 'Full scan complete'],
   ['اتوقف الفحص الشامل', 'Full scan stopped'],
   ['سجل الفحص', 'Scan log'],
   ['مشاركة السجل', 'Share log'],
+  ['مشاكل بس', 'Problems only'],
+  ['جاري الإيقاف...', 'Stopping...'],
+  ['مفيش سجلات لسه.', 'No log entries yet.'],
+  ['مسح السجل؟', 'Clear the log?'],
   ['فحص شامل', 'Full scan'],
   ['يدوي', 'Manual'],
   ['تلقائي', 'Auto'],
@@ -2137,6 +2153,13 @@ const List<List<String>> _kEnPhrases = [
   ['لسه', 'yet'],
   ['أو', 'or'],
   ['و', 'and']
+  // عامة: في الآخر علشان العبارات الأطول اللي فوق تتطبق الأول
+  ['إيصال/صورة', 'receipts/images'],
+  ['للمراجعة', 'to review'],
+  ['ناقص', 'missing'],
+  ['ماكينة', 'machine'],
+  ['ملاحظة تانية', 'more notes'],
+  ['إيصال', 'receipt'],
 ];
 
 // ───────────────────── ألوان تتأقلم مع الدارك مود ─────────────────────
@@ -2163,6 +2186,8 @@ const MaterialColor kReviewTone = MaterialColor(0xFFDE8E43, <int, Color>{
 
 Color _tintBorder(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade300 : m.shade800;
 Color _tintFg(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade200 : m.shade900;
+// لون أيقونة/نص/خط حالة (أخضر/أحمر/...) مقروء في الفاتح والدارك
+Color _tone(BuildContext c, MaterialColor m) => _isDark(c) ? m.shade300 : m.shade700;
 
 // ───────────────────── الهيدر: اسم التطبيق + زراير اللغة والدارك ─────────────────────
 class AppTitle extends StatelessWidget {
@@ -4220,6 +4245,8 @@ void _saveAutoLog() {
   } catch (_) {}
 }
 
+final ValueNotifier<int> autoLogTick = ValueNotifier<int>(0);
+
 void _addLog(String tab, String title, String text, bool bad, String? payload, String kind) {
   loadAutoLog();
   autoLogG.insert(0, AutoLogEntry(DateTime.now(), tab, title, text, bad, payload, kind: kind));
@@ -4227,6 +4254,7 @@ void _addLog(String tab, String title, String text, bool bad, String? payload, S
     autoLogG.removeLast();
   }
   _saveAutoLog();
+  autoLogTick.value++;
 }
 
 // بيسجّل في سجل الفحص من غير إشعار (الفحص اليدوي والشامل: بداية ونتيجة وإيقاف وأخطاء وكل ملف)
@@ -4279,9 +4307,20 @@ class _AutoLogPageState extends State<AutoLogPage> {
   void initState() {
     super.initState();
     loadAutoLog();
+    autoLogTick.addListener(_onTick);
   }
 
   static String _hm(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  void _onTick() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    autoLogTick.removeListener(_onTick);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -4292,8 +4331,10 @@ class _AutoLogPageState extends State<AutoLogPage> {
     final todayBad = todayAll.where((e) => e.bad).length;
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: 54,
         title: w.Text(tr('سجل الفحص')),
         actions: [
+          const HeaderButtons(),
           IconButton(
             tooltip: tr('مشاركة السجل'),
             icon: const Icon(Icons.ios_share),
@@ -4327,8 +4368,8 @@ class _AutoLogPageState extends State<AutoLogPage> {
                       builder: (c) => AlertDialog(
                         title: const Text('مسح السجل؟'),
                         actions: [
-                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('لأ')),
-                          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('مسح')),
+                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('إلغاء')),
+                          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('مسح')),
                         ],
                       ),
                     );
@@ -4384,11 +4425,11 @@ class _AutoLogPageState extends State<AutoLogPage> {
                       final d = today(e.t) ? '' : '${e.t.day}/${e.t.month}  ';
                       return ListTile(
                         leading: e.title.startsWith('▶')
-                            ? const Icon(Icons.play_circle_outline, color: Colors.blueGrey)
+                            ? Icon(Icons.play_circle_outline, color: Theme.of(context).colorScheme.onSurfaceVariant)
                             : (e.title.startsWith('⏹')
-                                ? const Icon(Icons.stop_circle_outlined, color: Colors.blueGrey)
+                                ? Icon(Icons.stop_circle_outlined, color: Theme.of(context).colorScheme.onSurfaceVariant)
                                 : Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
-                                    color: e.bad ? kReviewTone : Colors.green)),
+                                    color: e.bad ? _tone(context, kReviewTone) : _tone(context, Colors.green))),
                         title: w.Text(tr(e.title), maxLines: 2, overflow: TextOverflow.ellipsis),
                         subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')} • ${tr(_kindLabel(e.kind))}'
                             '${e.text.isEmpty ? '' : '\n${tr(e.text)}'}'),
@@ -5370,7 +5411,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? customOut;
   bool busy = false;
   double progress = 0;
-  String status = 'اضغط "بدء المعالجة الشاملة" لسحب الصور وتوليد الإكسيل والـ PDF.';
+  String status = 'اضغط "فحص التقفيل" لسحب الصور وتوليد الإكسيل والـ PDF.';
   final List<ReceiptItem> processedItems = [];
   final List<SysTotal> sysReads = []; // صور السيستم اللي اتقرت
   String? standardXlsxPath;
@@ -5448,7 +5489,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       extraPdfPaths = [];
       reviewOnly = false;
       sourceNote = '';
-      status = 'تم مسح كل حاجة. اضغط "بدء المعالجة الشاملة" لبدء يوم جديد.';
+      status = 'تم مسح كل حاجة. اضغط "فحص التقفيل" لبدء يوم جديد.';
     });
   }
 
@@ -6863,7 +6904,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ];
           if (runErr != null) {
             logScan(tab: 'home', title: '⚠️ فحص التقفيل وقف بخطأ', text: runErr.toString().split('\n').first, bad: true, kind: logKind);
-          } else if (stopReq) {
+          } else if (status.startsWith('اتوقف')) {
             logScan(
                 tab: 'home',
                 title: '⏹ اتوقف فحص التقفيل',
@@ -7384,7 +7425,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) {
         setState(() {
           busy = false;
-          status = 'اتوقف الفحص. اضغط "بدء" لو عايز تبدأ من جديد.';
+          status = 'اتوقف الفحص. اضغط "فحص التقفيل" لو عايز تبدأ من جديد.';
         });
       }
       return;
@@ -7515,7 +7556,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) {
         setState(() {
           busy = false;
-          status = 'اتوقف الفحص. اضغط "بدء" لو عايز تبدأ من جديد.';
+          status = 'اتوقف الفحص. اضغط "فحص التقفيل" لو عايز تبدأ من جديد.';
         });
       }
       return;
@@ -7679,8 +7720,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
             _quickBtn(Icons.picture_as_pdf, 'PDF',
                 pdf == null ? null : () => openFile(pdf, 'application/pdf')),
+            _quickBtn(Icons.chat, 'إرسال الكل', busy ? null : sendToWhatsApp),
             _quickBtn(Icons.drive_file_move, _l(context, 'نقل', 'Move'), busy ? null : transferOutputs),
-            _quickBtn(Icons.chat, 'واتساب', busy ? null : sendToWhatsApp),
             _quickBtn(Icons.add_photo_alternate, 'يدوي', busy ? null : pickManualImages),
           ]),
           if (processedItems.isNotEmpty) ...[
@@ -7729,7 +7770,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 borderRadius: BorderRadius.circular(12),
                 side: BorderSide(
                   color: item.reprintSummary
-                      ? Colors.red
+                      ? _tone(context, Colors.red)
                       : (item.missingBatchClosed ? kReviewTone : Theme.of(context).colorScheme.outlineVariant),
                   width: item.reprintSummary ? 2.0 : (item.missingBatchClosed ? 1.5 : 1.0),
                 ),
@@ -7782,7 +7823,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     if (item.userExcluded)
                       IconButton(
                         tooltip: tr('رجّعه (احتسبه)'),
-                        icon: const Icon(Icons.undo, color: Colors.red),
+                        icon: Icon(Icons.undo, color: _tone(context, Colors.red)),
                         onPressed: busy
                             ? null
                             : () async {
@@ -7798,11 +7839,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     if (item.needsReview)
                       Icon(Icons.warning_amber, color: _tintBorder(context, kReviewTone))
                     else if (item.ignoredDoc || item.ign == 'drop' || item.userExcluded)
-                      const Icon(Icons.remove_circle_outline, color: Colors.grey)
+                      Icon(Icons.remove_circle_outline, color: Theme.of(context).colorScheme.outline)
                     else if (item.tid != null && item.amount > 0)
-                      const Icon(Icons.check_circle, color: Colors.green)
+                      Icon(Icons.check_circle, color: _tone(context, Colors.green))
                     else
-                      const Icon(Icons.cancel, color: Colors.red),
+                      Icon(Icons.cancel, color: _tone(context, Colors.red)),
                     PopupMenuButton<String>(
                       tooltip: tr('المزيد'),
                       padding: EdgeInsets.zero,
@@ -7979,8 +8020,10 @@ class _FolderPickerState extends State<FolderPicker> {
     });
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: 54,
         title: const Text('اختيار فولدر'),
         actions: [
+          const HeaderButtons(),
           IconButton(
             tooltip: 'فولدر جديد',
             icon: const Icon(Icons.create_new_folder_outlined),
@@ -9310,8 +9353,8 @@ const List<_NoteKind> _kNoteKinds = [
       'Pages failed to read',
       'التطبيق ما قدرش يقرا صفحة أو أكتر (أو اتقفل أثناء العد)، فالعدد ممكن يكون ناقص.',
       'The app could not read one or more pages (or it closed during counting), so the count may be incomplete.',
-      'اضغط "إعادة العد" وبعدين "بدء العد". لو اتكرر راجع الملف بنفسك.',
-      'Tap "Recount" then "Start counting". If it repeats, check the file yourself.'),
+      'اضغط "إعادة العد" وبعدين "فحص إيصالات الدفع". لو اتكرر راجع الملف بنفسك.',
+      'Tap "Recount" then "Scan payment receipts". If it repeats, check the file yourself.'),
   _NoteKind(
       'emptypages',
       1,
@@ -9504,7 +9547,7 @@ bool _batchSoft(MResult r) {
 
 String _mSummary(BuildContext c, MResult r) {
   if (r.excluded) return _l(c, 'مستبعد (علامة غلط)', 'Excluded (marked wrong)');
-  if (r.pending) return _l(c, 'لسه ما اتعدّش (اضغط بدء العد)', 'Not counted yet (tap Start counting)');
+  if (r.pending) return _l(c, 'لسه ما اتعدّش (اضغط فحص إيصالات الدفع)', 'Not counted yet (tap Scan payment receipts)');
   // الأرقام دايماً إنجليزي (Dart بيكتب الأرقام ASCII حتى لو الواجهة عربي)
   final manual = _batchManual(r);
   final n = r.orderNum;
@@ -9814,7 +9857,7 @@ Widget _listTools(
                 child: LinearProgressIndicator(
                   value: done / total,
                   minHeight: 6,
-                  color: allOk ? Colors.green : kReviewTone,
+                  color: allOk ? _tone(context, Colors.green) : _tone(context, kReviewTone),
                 ),
               ),
             ],
@@ -10152,18 +10195,21 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
             color: stats.partial! > 0 ? kReviewTone : null),
       if (stats.seqMin != null)
         kv(_l(context, 'تسلسل الإيصالات', 'Receipt sequence'), '${pad6(stats.seqMin)} ... ${pad6(stats.seqMax)}',
-            color: Colors.blueAccent),
+            color: _tone(context, Colors.blue)),
       if (stats.seqLen != null)
         kv(_l(context, 'العدد المتوقع من التسلسل', 'Expected from sequence'), '${stats.seqLen}'),
       if (stats.seqLen != null && !r.pending)
         kv(
             _l(context, 'الفرق عن التسلسل', 'Difference from sequence'),
             r.count == stats.seqLen ? _l(context, 'مطابق ✓', 'Match ✓') : '${r.count - stats.seqLen!}  (الفعلي - المتوقع)',
-            color: r.count == stats.seqLen ? Colors.green : kReviewTone),
+            color: r.count == stats.seqLen ? _tone(context, Colors.green) : _tone(context, kReviewTone)),
     ];
 
     return Scaffold(
-      appBar: AppBar(title: w.Text(_l(context, 'تقرير الإيصال', 'Receipt report'))),
+      appBar: AppBar(
+          toolbarHeight: 54,
+          title: w.Text(_l(context, 'تقرير الإيصال', 'Receipt report')),
+          actions: const [HeaderButtons()]),
       body: ListView(
         padding: const EdgeInsets.all(8),
         children: [
@@ -10250,7 +10296,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                     _bigAct(Icons.refresh, _l(context, 'إعادة العد', 'Recount'), !can ? null : () {
                       widget.onRecount();
                       setState(() {});
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "بدء العد".', 'Marked for counting. Go back and tap "Start counting".'))));
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: w.Text(_l(context, 'اتعلّم للعد. ارجع واضغط "فحص إيصالات الدفع".', 'Marked for counting. Go back and tap "Scan payment receipts".'))));
                     }),
                   ],
                 ),
@@ -10332,7 +10378,7 @@ class _ReceiptReportPageState extends State<ReceiptReportPage> {
                 if (diff != null)
                   kv(_l(context, 'الفرق', 'Difference'),
                       okAmt ? _l(context, 'مطابق ✓', 'Match ✓') : diff.toStringAsFixed(2),
-                      color: okAmt ? Colors.green : (all ? Colors.red : kReviewTone)),
+                      color: okAmt ? _tone(context, Colors.green) : (all ? _tone(context, Colors.red) : _tone(context, kReviewTone))),
                 w.Text(
                     ba == null
                         ? _l(context, 'مفيش مبلغ باتش مؤكد للماكينة دي للمقارنة.', 'No confirmed batch amount for this machine to compare.')
@@ -10467,7 +10513,10 @@ class _MachinesReportPageState extends State<MachinesReportPage> {
         );
 
     return Scaffold(
-      appBar: AppBar(title: w.Text(_l(context, 'تقرير إيصالات الدفع', 'Payment receipts report'))),
+      appBar: AppBar(
+          toolbarHeight: 54,
+          title: w.Text(_l(context, 'تقرير إيصالات الدفع', 'Payment receipts report')),
+          actions: const [HeaderButtons()]),
       body: ListView(
         padding: const EdgeInsets.all(8),
         children: [
@@ -10685,7 +10734,9 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
       length: 2,
       child: Scaffold(
       appBar: AppBar(
+        toolbarHeight: 54,
         title: w.Text(_l(context, 'تقرير التقفيل', 'Closing report')),
+        actions: const [HeaderButtons()],
         bottom: TabBar(tabs: [
           Tab(text: _l(context, 'ملخص', 'Summary')),
           Tab(text: '${_l(context, 'مراجعة', 'Review')} (${review.length + widget.warnings.length})'),
@@ -10805,7 +10856,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   bool stopReq = false;
   bool settingsOpen = false;
   double progressValue = 0;
-  String status = 'اضغط "فحص وإعادة تسمية" لفحص إيصالات الدفع من مستندات واتساب.';
+  String status = 'اضغط "فحص إيصالات الدفع" لفحص إيصالات الدفع من مستندات واتساب.';
   final List<MResult> results = [];
   AppLifecycleState _life = AppLifecycleState.resumed;
   String destDir = loadMOut();
@@ -10998,7 +11049,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     );
   }
 
-  // نفس زرار "فحص وتسمية وعد": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
+  // نفس زرار "فحص إيصالات الدفع": تسمية + عدّ كل الإيصالات (والتلقائي بيفحص الجديد بس)
   List<MResult> _visibleResults() {
     var l = results.where((r) => !reviewOnly || !r.ok).toList();
     final q = _q.trim().toLowerCase();
@@ -11069,7 +11120,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final pend = results.where((r) => r.pending).length;
     if (results.isNotEmpty) {
       status = pend > 0
-          ? 'فيه $pend ملف لسه ما اتعدّش. اضغط \"بدء العد\" لما تحب.'
+          ? 'فيه $pend ملف لسه ما اتعدّش. اضغط \"فحص إيصالات الدفع\" لما تحب.'
           : 'آخر نتيجة: ${results.length} ملف.';
     }
   }
@@ -11124,7 +11175,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       progressValue = 0;
       namingDone = false;
       reviewOnly = false;
-      status = 'تم مسح كل حاجة. اضغط "فحص وإعادة تسمية" لبدء يوم جديد.';
+      status = 'تم مسح كل حاجة. اضغط "فحص إيصالات الدفع" لبدء يوم جديد.';
     });
   }
 
@@ -11381,7 +11432,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.detail = '';
     saveMState(results);
     if (!mounted) return;
-    setState(() => status = 'اتسمّى ماكينة $picked. اضغط \"بدء العد\" لعدّ إيصالاته.');
+    setState(() => status = 'اتسمّى ماكينة $picked. اضغط \"فحص إيصالات الدفع\" لعدّ إيصالاته.');
   }
 
   Future<void> markRestOk() async {
@@ -11494,7 +11545,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       if (!lite) {
         try {
           final first = status.split('\n').first;
-          if (stopReq) {
+          if (status.startsWith('اتوقف')) {
             logScan(tab: 'mach', title: '⏹ اتوقف فحص إيصالات الدفع', text: '$first\n⏱ ${fmtElapsed(sw.elapsed)}', kind: logKind);
           } else {
             final failedRun = first.startsWith('حصل خطأ');
@@ -11606,14 +11657,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       busy = false;
       progressValue = 0;
       if (crashed != null) {
-        status = 'حصل خطأ أثناء الفحص ($crashed). اتحفظ اللي خلص، اضغط \"فحص وتسمية وعد\" وهيكمّل من مكانه.';
+        status = 'حصل خطأ أثناء الفحص ($crashed). اتحفظ اللي خلص، اضغط \"فحص إيصالات الدفع\" وهيكمّل من مكانه.';
       } else if (stopReq) {
-        status = 'اتوقف. فاضل $pend ملف لسه ما اتعدّش، اضغط "فحص" وهيكمّل من مكانه.';
+        status = 'اتوقف. فاضل $pend ملف لسه ما اتعدّش، اضغط "فحص إيصالات الدفع" وهيكمّل من مكانه.';
       } else if (results.isEmpty && idle != null) {
         status = idle;
       } else if (!count) {
         status = 'تمت التسمية: ${results.length} ملف، $named اتسمّى واتنسخ.'
-            '${pend > 0 ? ' اضغط \"بدء العد\" لعدّ إيصالات $pend ملف.' : ''}';
+            '${pend > 0 ? ' اضغط \"فحص إيصالات الدفع\" لعدّ إيصالات $pend ملف.' : ''}';
       } else {
         status = 'اكتمل العد: ${results.length} ملف، $named اتسمّى، إجمالي $total إيصال.'
             '${pend > 0 ? ' (فاضل $pend لسه)' : ''}';
@@ -12522,7 +12573,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     r.count = -1;
     r.tries = 0;
     saveMState(results);
-    if (mounted) setState(() => status = 'اتعلّم للعد. اضغط \"بدء العد\".');
+    if (mounted) setState(() => status = 'اتعلّم للعد. اضغط \"فحص إيصالات الدفع\".');
   }
 
   List<String> missingMachines() {
@@ -12682,7 +12733,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
                 (busy && !namingDone) || named == 0 ? null : shareAll),
             _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
                 busy || named == 0 ? null : transferGood),
-            _quickBtnG(context, Icons.picture_as_pdf, 'يدوي', busy ? null : pickManualPdfs),
+            _quickBtnG(context, Icons.note_add, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
           _filterRowCompact(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
