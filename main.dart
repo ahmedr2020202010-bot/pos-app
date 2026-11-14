@@ -8627,7 +8627,7 @@ class _ReviewPageState extends State<ReviewPage> {
                       Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
                       Text(
                         'TID: ${numToTid[i]}  •  MID: ${merchantIdOfRow(terminals[numToTid[i]]!.excelRow) ?? '—'}',
-                        style: TextStyle(fontSize: 11.5, color: Theme.of(c).colorScheme.onSurfaceVariant),
+                        style: TextStyle(fontSize: 11.5, color: Theme.of(context).colorScheme.onSurfaceVariant),
                       ),
                     ],
                   ),
