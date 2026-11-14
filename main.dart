@@ -436,6 +436,24 @@ Widget _settingsCard(List<Widget> children) => Card(
       ),
     );
 
+// كارت الإعدادات مطوي في سطر ملخّص واحد (المصدر • الفترة • المخرجات) وبالضغط عليه يفتح بكل الإعدادات
+Widget _settingsCollapsed(BuildContext context, String summary, List<Widget> children) => Card(
+      margin: const EdgeInsets.only(bottom: 6),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 10),
+          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+          dense: true,
+          maintainState: true,
+          leading: const Icon(Icons.tune, size: 20),
+          title: Text(summary, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+          children: [Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children)],
+        ),
+      ),
+    );
+
 Widget _switchRow(String label, bool v, void Function(bool)? onChanged) => SwitchListTile(
       dense: true,
       visualDensity: VisualDensity.compact,
@@ -732,6 +750,8 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
         askBatteryExempt(force: true);
       } else if (v == 'resetApps') {
         resetDefaultHandlers(context);
+      } else if (v == 'resetSettings') {
+        resetAllSettings(context);
       } else if (v == 'log') {
         onLog();
       } else if (v == 'autolog') {
@@ -747,8 +767,11 @@ Widget _moreMenu(BuildContext context, {required bool busy, required VoidCallbac
           value: 'battery', child: w.Text(ar ? 'السماح بالعمل في الخلفية' : 'Allow background running')),
       PopupMenuItem(
           value: 'resetApps', child: w.Text(ar ? 'إعادة اختيار تطبيقات الفتح' : 'Reset default apps')),
-      PopupMenuItem(value: 'autolog', child: w.Text(ar ? 'سجل الفحص التلقائي' : 'Auto-scan log')),
-      PopupMenuItem(value: 'log', child: w.Text(ar ? 'مشاركة اللوج' : 'Share log')),
+      PopupMenuItem(
+          value: 'resetSettings',
+          enabled: !busy,
+          child: w.Text(ar ? '↩️ رجّع كل الإعدادات للافتراضي' : '↩️ Reset all settings to default')),
+      PopupMenuItem(value: 'autolog', child: w.Text(ar ? 'سجل الفحص' : 'Scan log')),
       const PopupMenuDivider(),
       PopupMenuItem(
           value: 'wipe',
@@ -766,19 +789,19 @@ Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallbac
     borderRadius: BorderRadius.circular(30),
     onTap: onTap,
     child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           CircleAvatar(
-            radius: 24,
+            radius: 17,
             backgroundColor: onTap == null ? cs.surfaceContainerHighest : cs.primaryContainer,
-            child: Icon(icon, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
+            child: Icon(icon, size: 19, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           Text(label,
               style: TextStyle(
-                  fontSize: 12, color: onTap == null ? Theme.of(context).disabledColor : null)),
+                  fontSize: 11, color: onTap == null ? Theme.of(context).disabledColor : null)),
         ],
       ),
     ),
@@ -1032,6 +1055,7 @@ const List<String> kSeedNamesEn = ['Teal', 'Blue', 'Indigo', 'Green', 'Orange', 
 
 // ───────── حالة مشتركة بين التابين ─────────
 final ValueNotifier<Map<int, int>> closingTxn = ValueNotifier<Map<int, int>>(<int, int>{}); // رقم الماكينة -> عدد معاملات الباتش
+final ValueNotifier<int> settingsResetSignal = ValueNotifier<int>(0); // بيتغير لما "رجّع كل الإعدادات للافتراضي" يخلص
 final ValueNotifier<int> wipeSignal = ValueNotifier<int>(0); // بيتغير لما "مسح كل حاجة" يخلص
 bool homeBusyG = false;
 bool machBusyG = false;
@@ -1086,6 +1110,11 @@ void quickMarkSeen(Iterable<String> keys) {
 // ───────── الفحص الشامل: الباتشات (التقفيل) ثم الملفات (إيصالات الدفع) ورا بعض ─────────
 bool chainRunning = false;
 bool chainAbort = false;
+
+// بيترمي من جوه حلقات الصفحات/الصور لما تضغط إيقاف، علشان الفحص يقف في ثواني مش بعد ما الملف الكبير يخلص
+class ScanStopped implements Exception {
+  const ScanStopped();
+}
 bool homeAutoG = false;
 bool machAutoG = false;
 final ValueNotifier<int> chainStep = ValueNotifier<int>(0); // 0 = واقف، 1 = الباتشات، 2 = الملفات
@@ -1459,6 +1488,53 @@ Future<bool> confirmSend(BuildContext context, {int review = 0, int missing = 0,
     ),
   );
   return r == true;
+}
+
+// رجّع كل الإعدادات للافتراضي: المظهر واللغة واللون، الفولدرات (المصدر والمخرجات)، الفترة، الفحص التلقائي،
+// طرق العد، التطبيقات الافتراضية. مش بيمس: الإيصالات والنتايج والتصحيحات والملفات.
+Future<void> resetAllSettings(BuildContext context) async {
+  final ar = AppSettings.of(context).isAr;
+  final m = ScaffoldMessenger.of(context);
+  if (homeBusyG || machBusyG) {
+    m.showSnackBar(SnackBar(
+        content: w.Text(ar ? 'استنى لحد ما المعالجة تخلص أو وقّفها الأول.' : 'Wait for processing to finish or stop it first.')));
+    return;
+  }
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: w.Text(ar ? 'رجّع كل الإعدادات للافتراضي؟' : 'Reset all settings to default?'),
+      content: w.Text(ar
+          ? 'هيرجع للافتراضي:\n• المظهر واللغة واللون\n• فولدر المصدر وفولدر المخرجات\n• الفترة (اليوم)\n• الفحص التلقائي والصور المقلوبة\n• طرق العد\n• التطبيقات الافتراضية للفتح\n\nمش هيتمس: الإيصالات ونتايج الفحص والتصحيحات والملفات.'
+          : 'Will be reset:\n• Theme, language and color\n• Source and output folders\n• Period (today)\n• Auto-scan and flipped-image scan\n• Counting methods\n• Default apps for opening files\n\nNot touched: receipts, scan results, corrections and files.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: w.Text(ar ? 'إلغاء' : 'Cancel')),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: w.Text(ar ? 'رجّع للافتراضي' : 'Reset'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return;
+  resetCountDefaults();
+  try {
+    final cfg = _readCfg();
+    for (final k in const [
+      'folder', 'out', 'pdfDir', 'mOut', 'autoScan', 'autoScanM', 'fastCount', 'dualCount', 'parallelCount',
+      'countEngine', 'countMethod', 'redFixCount', 'consensusGuard', 'defFolder', 'defImage', 'defPdf', 'batteryAsked'
+    ]) {
+      cfg.remove(k);
+    }
+    _writeCfg(cfg);
+  } catch (_) {}
+  sharedDays.value = 0;
+  appSettings.setMode(ThemeMode.system);
+  appSettings.setLang(null);
+  appSettings.setSeed(kDefaultSeed);
+  settingsResetSignal.value++;
+  m.showSnackBar(SnackBar(
+      content: w.Text(appSettings.isAr ? 'رجعت كل الإعدادات للافتراضي ✓' : 'All settings reset to default ✓')));
 }
 
 // مسح كل حاجة: ملفات الإخراج + الصور + نتايج الفحص + التصحيحات + اللوج + الكاش والملفات المؤقتة (الإعدادات واللغة والثيم بيفضلوا)
@@ -1976,6 +2052,11 @@ const List<List<String>> _kEnPhrases = [
   ['جاري فحص الملفات', 'Scanning files'],
   ['اكتمل الفحص الشامل', 'Full scan complete'],
   ['اتوقف الفحص الشامل', 'Full scan stopped'],
+  ['سجل الفحص', 'Scan log'],
+  ['مشاركة السجل', 'Share log'],
+  ['فحص شامل', 'Full scan'],
+  ['يدوي', 'Manual'],
+  ['تلقائي', 'Auto'],
   ['فحص تلقائي خفيف (يعدّ الملف الجديد لوحده ويبعتلك إشعار بالنتيجة)', 'Light auto scan (counts each new file by itself and notifies you of the result)'],
   ['فحص تلقائي خفيف (يفحص الإيصال الجديد لوحده ويبعتلك إشعار بالنتيجة)', 'Light auto scan (checks each new receipt by itself and notifies you of the result)'],
   ['الباقي صح', 'Mark rest OK'],
@@ -4099,16 +4180,18 @@ class AutoLogEntry {
   final String text;
   final bool bad;
   final String? payload;
-  AutoLogEntry(this.t, this.tab, this.title, this.text, this.bad, this.payload);
+  final String kind; // auto = فحص تلقائي | manual = فحص يدوي | chain = فحص شامل
+  AutoLogEntry(this.t, this.tab, this.title, this.text, this.bad, this.payload, {this.kind = 'auto'});
   Map<String, dynamic> toJson() =>
-      {'t': t.millisecondsSinceEpoch, 'tab': tab, 'title': title, 'text': text, 'bad': bad, 'p': payload};
+      {'t': t.millisecondsSinceEpoch, 'tab': tab, 'title': title, 'text': text, 'bad': bad, 'p': payload, 'k': kind};
   static AutoLogEntry fromJson(Map<String, dynamic> j) => AutoLogEntry(
       DateTime.fromMillisecondsSinceEpoch((j['t'] as num).toInt()),
       (j['tab'] ?? 'home') as String,
       (j['title'] ?? '') as String,
       (j['text'] ?? '') as String,
       j['bad'] == true,
-      j['p'] as String?);
+      j['p'] as String?,
+      kind: (j['k'] ?? 'auto') as String);
 }
 
 final List<AutoLogEntry> autoLogG = <AutoLogEntry>[];
@@ -4137,16 +4220,34 @@ void _saveAutoLog() {
   } catch (_) {}
 }
 
-// بيسجّل الإشعار في السجل وبيبعته لشريط التليفون (بصوت واهتزاز لو فيه مشكلة، وهادي لو تمام)
-Future<void> postAutoNotify(
-    {required String tab, required String title, required String text, required bool bad, String? openKey}) async {
+void _addLog(String tab, String title, String text, bool bad, String? payload, String kind) {
   loadAutoLog();
-  final payload = openKey == null ? null : '$tab|$openKey';
-  autoLogG.insert(0, AutoLogEntry(DateTime.now(), tab, title, text, bad, payload));
-  while (autoLogG.length > 300) {
+  autoLogG.insert(0, AutoLogEntry(DateTime.now(), tab, title, text, bad, payload, kind: kind));
+  while (autoLogG.length > 3000) {
     autoLogG.removeLast();
   }
   _saveAutoLog();
+}
+
+// بيسجّل في سجل الفحص من غير إشعار (الفحص اليدوي والشامل: بداية ونتيجة وإيقاف وأخطاء وكل ملف)
+void logScan({
+  required String tab,
+  required String title,
+  String text = '',
+  bool bad = false,
+  String kind = 'manual',
+  String? openKey,
+}) {
+  try {
+    _addLog(tab, title, text, bad, openKey == null ? null : '$tab|$openKey', kind);
+  } catch (_) {}
+}
+
+// بيسجّل الإشعار في السجل وبيبعته لشريط التليفون (بصوت واهتزاز لو فيه مشكلة، وهادي لو تمام)
+Future<void> postAutoNotify(
+    {required String tab, required String title, required String text, required bool bad, String? openKey}) async {
+  final payload = openKey == null ? null : '$tab|$openKey';
+  _addLog(tab, title, text, bad, payload, 'auto');
   try {
     await _chan.invokeMethod('notify', {
       'title': tr(title),
@@ -4170,6 +4271,9 @@ class AutoLogPage extends StatefulWidget {
 
 class _AutoLogPageState extends State<AutoLogPage> {
   bool onlyBad = false;
+  String kindF = 'all'; // all | auto | manual | chain
+
+  static String _kindLabel(String k) => k == 'chain' ? 'فحص شامل' : (k == 'manual' ? 'يدوي' : 'تلقائي');
 
   @override
   void initState() {
@@ -4183,13 +4287,35 @@ class _AutoLogPageState extends State<AutoLogPage> {
   Widget build(BuildContext context) {
     final now = DateTime.now();
     bool today(DateTime a) => a.year == now.year && a.month == now.month && a.day == now.day;
-    final list = autoLogG.where((e) => !onlyBad || e.bad).toList();
+    final list = autoLogG.where((e) => (!onlyBad || e.bad) && (kindF == 'all' || e.kind == kindF)).toList();
     final todayAll = autoLogG.where((e) => today(e.t)).toList();
     final todayBad = todayAll.where((e) => e.bad).length;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('سجل الفحص التلقائي'),
+        title: w.Text(tr('سجل الفحص')),
         actions: [
+          IconButton(
+            tooltip: tr('مشاركة السجل'),
+            icon: const Icon(Icons.ios_share),
+            onPressed: () async {
+              final m = ScaffoldMessenger.of(context);
+              try {
+                final b = StringBuffer('===== سجل الفحص =====\n');
+                for (final e in autoLogG) {
+                  b.writeln('[${e.t.toIso8601String().substring(0, 19).replaceFirst('T', ' ')}] '
+                      '(${e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل'} / ${_kindLabel(e.kind)}) ${e.title}'
+                      '${e.text.isEmpty ? '' : '\n    ${e.text.replaceAll('\n', '\n    ')}'}');
+                }
+                final d = File('$baseDir/id_debug.txt');
+                if (d.existsSync()) b.write('\n===== تفاصيل فنية =====\n${d.readAsStringSync()}');
+                final out = File('$baseDir/scan_log.txt');
+                out.writeAsStringSync(b.toString());
+                await Share.shareXFiles([XFile(out.path, mimeType: 'text/plain')], text: 'سجل الفحص');
+              } catch (_) {
+                m.showSnackBar(const SnackBar(content: Text('مفيش سجل لسه. شغّل الفحص الأول.')));
+              }
+            },
+          ),
           IconButton(
             tooltip: tr('مسح السجل'),
             icon: const Icon(Icons.delete_outline),
@@ -4221,7 +4347,7 @@ class _AutoLogPageState extends State<AutoLogPage> {
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
             child: Row(
               children: [
-                Expanded(child: w.Text(tr('النهارده: ${todayAll.length} إشعار • $todayBad فيهم مشاكل'))),
+                Expanded(child: w.Text(tr('النهارده: ${todayAll.length} سجل • $todayBad فيهم مشاكل'))),
                 FilterChip(
                   label: const Text('مشاكل بس'),
                   selected: onlyBad,
@@ -4230,9 +4356,26 @@ class _AutoLogPageState extends State<AutoLogPage> {
               ],
             ),
           ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                for (final k in const ['all', 'manual', 'auto', 'chain'])
+                  Padding(
+                    padding: const EdgeInsetsDirectional.only(end: 6),
+                    child: ChoiceChip(
+                      label: Text(k == 'all' ? 'الكل' : _kindLabel(k)),
+                      selected: kindF == k,
+                      onSelected: (_) => setState(() => kindF = k),
+                    ),
+                  ),
+              ],
+            ),
+          ),
           Expanded(
             child: list.isEmpty
-                ? const Center(child: Text('مفيش إشعارات لسه.'))
+                ? const Center(child: Text('مفيش سجلات لسه.'))
                 : ListView.separated(
                     itemCount: list.length,
                     separatorBuilder: (_, __) => const Divider(height: 1),
@@ -4240,11 +4383,16 @@ class _AutoLogPageState extends State<AutoLogPage> {
                       final e = list[i];
                       final d = today(e.t) ? '' : '${e.t.day}/${e.t.month}  ';
                       return ListTile(
-                        leading: Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
-                            color: e.bad ? kReviewTone : Colors.green),
+                        leading: e.title.startsWith('▶')
+                            ? const Icon(Icons.play_circle_outline, color: Colors.blueGrey)
+                            : (e.title.startsWith('⏹')
+                                ? const Icon(Icons.stop_circle_outlined, color: Colors.blueGrey)
+                                : Icon(e.bad ? Icons.warning_amber : Icons.check_circle,
+                                    color: e.bad ? kReviewTone : Colors.green)),
                         title: w.Text(tr(e.title), maxLines: 2, overflow: TextOverflow.ellipsis),
-                        subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')}\n${tr(e.text)}'),
-                        isThreeLine: true,
+                        subtitle: w.Text('$d${_hm(e.t)} • ${tr(e.tab == 'mach' ? 'إيصالات الدفع' : 'التقفيل')} • ${tr(_kindLabel(e.kind))}'
+                            '${e.text.isEmpty ? '' : '\n${tr(e.text)}'}'),
+                        isThreeLine: e.text.isNotEmpty,
                         trailing: e.payload != null ? const Icon(Icons.chevron_left) : null,
                         onTap: e.payload == null
                             ? null
@@ -5263,6 +5411,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
+    settingsResetSignal.addListener(_onSettingsReset);
     customDir = loadFolder();
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
@@ -5271,6 +5420,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _syncDays() {
     if (!mounted || busy || days == sharedDays.value) return;
     setState(() => days = sharedDays.value);
+  }
+
+  // "رجّع كل الإعدادات للافتراضي": الفولدرات والفترة والفحص التلقائي والصور المقلوبة
+  void _onSettingsReset() {
+    if (!mounted) return;
+    if (autoScan) _setAuto(false);
+    setState(() {
+      customDir = null;
+      customOut = null;
+      outputDir = defaultOutputDir;
+      autoRotate = false;
+      days = 0;
+    });
   }
 
   void _onWipe() {
@@ -5404,6 +5566,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     openReqG.removeListener(_onOpenReqHome);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
+    settingsResetSignal.removeListener(_onSettingsReset);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -5718,8 +5881,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final rv = processedItems.where((e) => e.needsReview).length;
     return Row(
       children: [
-        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blue, compact: true),
-        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.green, compact: true),
+        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blueGrey, compact: true),
+        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.blueGrey, compact: true),
         _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber,
             compact: true, onTap: missingTerminals.isEmpty ? null : openClosingReport),
         _statCard(Icons.fact_check, 'مراجعة', '$rv', kReviewTone,
@@ -6674,11 +6837,59 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } catch (_) {}
     }
     final sw = Stopwatch()..start();
+    final logKind = auto ? 'auto' : (chainRunning ? 'chain' : 'manual');
+    Object? runErr;
+    if (!lite) {
+      logScan(
+          tab: 'home',
+          title: '▶ بدأ فحص التقفيل',
+          text: manualPaths != null ? 'صور محددة يدوياً (${manualPaths.length})' : (chainRunning ? 'ضمن الفحص الشامل' : ''),
+          kind: logKind);
+    }
     try {
       await _runPipelineInner(manualPaths: manualPaths, lite: lite);
+    } catch (e) {
+      runErr = e;
+      rethrow;
     } finally {
       _fullRunning = false;
       sw.stop();
+      if (!lite) {
+        try {
+          final rvL = processedItems.where((e) => e.needsReview).toList();
+          final wl = <String>[
+            for (final x in warnings.take(10)) '• $x',
+            if (warnings.length > 10) '• ... و${warnings.length - 10} ملاحظة تانية',
+          ];
+          if (runErr != null) {
+            logScan(tab: 'home', title: '⚠️ فحص التقفيل وقف بخطأ', text: runErr.toString().split('\n').first, bad: true, kind: logKind);
+          } else if (stopReq) {
+            logScan(
+                tab: 'home',
+                title: '⏹ اتوقف فحص التقفيل',
+                text: '⏱ ${fmtElapsed(sw.elapsed)}',
+                kind: logKind);
+          } else {
+            final bad = rvL.isNotEmpty || missingTerminals.isNotEmpty;
+            logScan(
+                tab: 'home',
+                title: '${bad ? '⚠️' : '✅'} انتهى فحص التقفيل',
+                text: [
+                  '${processedItems.length} إيصال/صورة${rvL.isNotEmpty ? ' • ${rvL.length} للمراجعة' : ''}'
+                      '${missingTerminals.isNotEmpty ? ' • ناقص ${missingTerminals.length} ماكينة' : ''}'
+                      ' • ⏱ ${fmtElapsed(sw.elapsed)}',
+                  ...wl,
+                ].join('\n'),
+                bad: bad,
+                kind: logKind);
+            for (final it in processedItems) {
+              final ln = _liteLine(it);
+              if (ln == null) continue;
+              logScan(tab: 'home', title: ln, bad: ln.startsWith('⚠️'), kind: logKind, openKey: it.key);
+            }
+          }
+        } catch (_) {}
+      }
       if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
         setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
       }
@@ -6772,6 +6983,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       var pdfPages = 0;
       final used = <String>[];
       for (final pf in cpdfs) {
+        if (stopReq) break;
         setState(() => status = 'بقرأ صفحات ملف PDF: ${baseName(pf.path)}...');
         final pages = await extractPdfPages(pf);
         if (pages.isEmpty) continue;
@@ -6980,6 +7192,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
         }
         var res = await recognizer.processImage(InputImage.fromFilePath(workPath));
+        if (stopReq) break;
         final fkey = '${baseName(f.path)}:${f.lengthSync()}';
         final fxm = fixes[fkey];
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
@@ -7018,6 +7231,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // صورة مقلوبة؟ جرّب EXIF ثم 90 / 270 / 180
         if (!isReceipt && !skipPay && autoRotate) {
           for (final deg in const [0, 90, 270, 180]) {
+            if (stopReq) break;
             final tp = '$tmpDir/rot_$deg.jpg';
             try {
               final wrote = await fixImageAsync(f.path, tp, deg);
@@ -7035,6 +7249,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
         }
 
+        if (stopReq) break;
         if (isReceipt) {
           final key = '${baseName(f.path)}:${f.lengthSync()}';
           final a = analyzeLines(toLines(res));
@@ -7046,7 +7261,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
           // القراءة التانية بس للإيصالات اللي القراءة الأولى فيها مش مؤكدة (علشان السرعة)
           final needSecond = !a.ok || a.tid == null || a.row == null || a.val <= 0 || !hasBatchClosed || hasReprint;
-          if (needSecond) {
+          if (needSecond && !stopReq) {
             try {
             final ep = '$tmpDir/enh.jpg';
             await enhanceImageAsync(workPath, ep);
@@ -7295,6 +7510,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     }
 
+    if (stopReq) {
+      dropProvisional();
+      if (mounted) {
+        setState(() {
+          busy = false;
+          status = 'اتوقف الفحص. اضغط "بدء" لو عايز تبدأ من جديد.';
+        });
+      }
+      return;
+    }
+
     // ═════════ المرحلة 3: إعادة التسمية (على مرحلتين عشان التعارض) ═════════
     setState(() => status = 'إعادة تسمية الصور وترتيبها...');
     final moves = <ReceiptItem>[];
@@ -7407,7 +7633,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
-          _settingsCard([
+          _settingsCollapsed(
+              context,
+              '${customDir != null ? baseName(customDir!) : _l(context, 'واتساب', 'WhatsApp')} • ${_periodLabel()}'
+              ' • ${_l(context, 'المخرجات', 'Output')}: ${customOut == null ? _l(context, 'الافتراضي', 'Default') : baseName(customOut!)}'
+              '${autoScan ? ' • ${_l(context, 'فحص تلقائي ✓', 'Auto-scan ✓')}' : ''}',
+              [
             _switchRow('فحص تلقائي خفيف (يفحص الإيصال الجديد لوحده ويبعتلك إشعار بالنتيجة)', autoScan, (v) => _setAuto(v)),
             const Divider(height: 4),
             _sourceChips(context,
@@ -10831,6 +11062,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     days = sharedDays.value;
     sharedDays.addListener(_syncDays);
     wipeSignal.addListener(_onWipe);
+    settingsResetSignal.addListener(_onSettingsReset);
     closingTxn.addListener(_onClosing);
     results.addAll(loadMState());
     results.sort(_cmpM);
@@ -10851,6 +11083,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     openReqG.removeListener(_onOpenReqM);
     sharedDays.removeListener(_syncDays);
     wipeSignal.removeListener(_onWipe);
+    settingsResetSignal.removeListener(_onSettingsReset);
     closingTxn.removeListener(_onClosing);
     WidgetsBinding.instance.removeObserver(this);
     for (final r in results) {
@@ -10868,6 +11101,17 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
   void _syncDays() {
     if (!mounted || busy || days == sharedDays.value) return;
     setState(() => days = sharedDays.value);
+  }
+
+  // "رجّع كل الإعدادات للافتراضي": الفولدرات والفترة والفحص التلقائي
+  void _onSettingsReset() {
+    if (!mounted) return;
+    if (autoScan) _setAuto(false);
+    setState(() {
+      pdfDir = null;
+      destDir = defaultMDest;
+      days = 0;
+    });
   }
 
   void _onWipe() {
@@ -11235,10 +11479,34 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       } catch (_) {}
     }
     final sw = Stopwatch()..start();
+    final logKind = chainRunning ? 'chain' : 'manual';
+    if (!lite) {
+      logScan(
+          tab: 'mach',
+          title: '▶ بدأ فحص إيصالات الدفع',
+          text: manualPaths != null ? 'ملفات محددة يدوياً (${manualPaths.length})' : (chainRunning ? 'ضمن الفحص الشامل' : ''),
+          kind: logKind);
+    }
     try {
       await _run(resumeOnly, count, manualPaths: manualPaths, lite: lite);
     } finally {
       sw.stop();
+      if (!lite) {
+        try {
+          final first = status.split('\n').first;
+          if (stopReq) {
+            logScan(tab: 'mach', title: '⏹ اتوقف فحص إيصالات الدفع', text: '$first\n⏱ ${fmtElapsed(sw.elapsed)}', kind: logKind);
+          } else {
+            final failedRun = first.startsWith('حصل خطأ');
+            logScan(
+                tab: 'mach',
+                title: '${failedRun ? '⚠️' : '✅'} انتهى فحص إيصالات الدفع',
+                text: '$first\n⏱ ${fmtElapsed(sw.elapsed)}',
+                bad: failedRun,
+                kind: logKind);
+          }
+        } catch (_) {}
+      }
       if (mounted && sw.elapsed.inSeconds >= 1 && _isFinalScanStatus(status)) {
         setState(() => status = '$status\n⏱ الوقت المستغرق: ${fmtElapsed(sw.elapsed)}');
       }
@@ -11441,6 +11709,9 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       setState(() => status = 'تعريف الملفات ${i + 1} / ${pdfs.length}: $name');
       try {
         await _identifyOne(r, f, rec);
+      } on ScanStopped {
+        r.ctl.dispose();
+        break; // الملف ده ما اتسجلش: هيتعرّف تاني في الفحص الجاي
       } catch (e, st) {
         r.idOk = false;
         r.idNotes.add('فشل التعريف: ${e.toString().split('\n').first}');
@@ -11470,6 +11741,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final votes = <String, double>{};
     var id = MIdent();
     for (var pi = 0; pi < 25; pi++) {
+      if (stopReq) throw const ScanStopped();
       // بعد 6 صفحات لو لقينا ماكينة نوقف، ولو لسه مفيش نكمّل لحد 25 صفحة
       if (pi >= 6 && votes.isNotEmpty) break;
       var got = false;
@@ -11693,6 +11965,13 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       try {
         await _countOne(r, rec);
+      } on ScanStopped {
+        // وقفنا في نص الملف: نسيبه "لسه ما اتعدّش" علشان يتكمل من أول مرة تانية
+        r.count = -1;
+        r.tries = 0;
+        r.cntNotes.clear();
+        saveMState(results);
+        break;
       } catch (e, st) {
         _dbg('COUNT_ERROR ${r.pdfName}: $e\n$st');
         r.count = 0;
@@ -11701,6 +11980,15 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
       r.tries = 0;
       saveMState(results);
+      if (only == null) {
+        logScan(
+            tab: 'mach',
+            title: '${r.cntOk ? '✅' : '⚠️'} ${r.newName ?? r.pdfName}: ${r.count} إيصال',
+            text: r.cntNotes.join('\n'),
+            bad: !r.cntOk,
+            kind: chainRunning ? 'chain' : 'manual',
+            openKey: r.key);
+      }
       _dbg('COUNT ${i + 1}/${todo.length} ${r.newName ?? r.pdfName} = ${r.count}  RSS=${ProcessInfo.currentRss ~/ 1048576}MB');
       if (!mounted) return;
       setState(() => progressValue = (i + 1) / todo.length);
@@ -11735,6 +12023,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       final recs = <TextRecognizer>[rec, ...extra];
       try {
         for (var i0 = 0; i0 < ranges.length; i0 += recs.length) {
+          if (stopReq) throw const ScanStopped();
           final idxs = <int>[for (var k = i0; k < i0 + recs.length && k < ranges.length; k++) k];
           _ensureMTmp();
           _tick(i0 + 1, ranges.length);
@@ -11798,6 +12087,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
     }
     if (!par) for (var i = 0; i < ranges.length; i++) {
+      if (stopReq) throw const ScanStopped();
       final fp = File('$mTmpDir/f_$i.jpg');
       try {
         _ensureMTmp();
@@ -11864,6 +12154,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       }
     }
     for (final k in (redFixCount ? (sus.toList()..sort()) : <int>[])) {
+      if (stopReq) throw const ScanStopped();
       try {
         _ensureMTmp();
         final p1 = '$mTmpDir/rr_${k - 1}.jpg';
@@ -11952,6 +12243,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     total = chosenM == 1 ? total1 : (chosenM == 2 ? total2 : total3);
     // العدد بيتحدد من القراءة بس. الباتش والسيستم بيتقارنوا بيه في التقرير ومش بيأثروا عليه أبداً.
     // ───── آخر صفحة: قراءة تانية بصورة محسّنة للمقارنة بس (من غير أي مرجع من الباتش أو السيستم) ─────
+    if (stopReq) throw const ScanStopped();
     var lastInfo = '';
     final lastKeys = pageSm3.keys.toList()..sort();
     if (lastKeys.isNotEmpty) {
@@ -12127,6 +12419,8 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     if (fastCount) {
       try {
         if (await _countOneFast(r, rec, bytes, src)) return;
+      } on ScanStopped {
+        rethrow;
       } catch (e) {
         _dbg('FAST فشل وهنكمل بالطريقة الدقيقة: $e');
       }
@@ -12144,6 +12438,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
     final failedPages = <int>[];
     var consecFail = 0;
     for (var pg = 1; pg <= 400; pg++) {
+      if (stopReq) throw const ScanStopped();
       var got = false;
       Object? lastErr;
       for (var attempt = 0; attempt < 2 && !got; attempt++) {
@@ -12335,7 +12630,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       body: ListView(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         children: [
-          _settingsCard([
+          _settingsCollapsed(
+              context,
+              '${pdfDir != null ? baseName(pdfDir!) : _l(context, 'واتساب', 'WhatsApp')} • ${_periodLabelOf(days)}'
+              ' • ${_l(context, 'المخرجات', 'Output')}: ${destDir == defaultMDest ? _l(context, 'الافتراضي', 'Default') : baseName(destDir)}'
+              '${autoScan ? ' • ${_l(context, 'فحص تلقائي ✓', 'Auto-scan ✓')}' : ''}',
+              [
             _switchRow('فحص تلقائي خفيف (يعدّ الملف الجديد لوحده ويبعتلك إشعار بالنتيجة)', autoScan, (v) => _setAuto(v)),
             _countMethodsPanel(busy: busy, onChanged: () => setState(() {})),
             const Divider(height: 4),
@@ -12367,11 +12667,11 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           const SizedBox(height: 6),
           Row(
             children: [
-              _statCard(Icons.description, 'ملفات', '${results.length}', Colors.blue),
-              _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.green),
-              _statCard(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.purple),
-              _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber),
-              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', kReviewTone),
+              _statCard(Icons.description, 'ملفات', '${results.length}', Colors.blueGrey, compact: true),
+              _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.blueGrey, compact: true),
+              _statCard(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.blueGrey, compact: true),
+              _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber, compact: true),
+              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', kReviewTone, compact: true),
             ],
           ),
           const SizedBox(height: 6),
@@ -12385,7 +12685,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             _quickBtnG(context, Icons.picture_as_pdf, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
-          _filterRow(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
+          _filterRowCompact(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
           _reviewTools(context,
               hint: _l(context, 'اسحب أي ملف لتعليمه: صح ✓ أو غلط ✗',
                   'Swipe any file to mark it: OK ✓ or wrong ✗'),
