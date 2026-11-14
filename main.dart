@@ -6248,19 +6248,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               pw.Page(
                 pageFormat: PdfPageFormat(pageW, maxH + 2 * mg),
                 margin: const pw.EdgeInsets.all(mg),
-                build: (pw.Context ctx) => pw.Row(
+                build: (pw.Context ctx) => pw.Directionality(
                   textDirection: pw.TextDirection.ltr,
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    for (var i = 0; i < n; i++) ...[
-                      if (i > 0) pw.SizedBox(width: gap),
-                      pw.SizedBox(
-                        width: dims[i][0] * k,
-                        height: dims[i][1] * k,
-                        child: pw.Image(ims[i], fit: pw.BoxFit.fill),
-                      ),
+                  child: pw.Row(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      for (var i = 0; i < n; i++) ...[
+                        if (i > 0) pw.SizedBox(width: gap),
+                        pw.SizedBox(
+                          width: dims[i][0] * k,
+                          height: dims[i][1] * k,
+                          child: pw.Image(ims[i], fit: pw.BoxFit.fill),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             );
