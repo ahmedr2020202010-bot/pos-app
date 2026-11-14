@@ -456,7 +456,8 @@ String _todayFolderName() {
   return '${n.day}.${n.month}';
 }
 
-Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<String> paths) async {
+Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<String> paths,
+    {String? forceMode, bool allowMove = true}) async {
   final existing = paths.where((p) => File(p).existsSync()).toList();
   if (existing.isEmpty) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -464,15 +465,16 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
     );
     return null;
   }
-  final mode = await showDialog<String>(
+  final mode = forceMode ?? await showDialog<String>(
     context: context,
     builder: (c) => AlertDialog(
       title: const Text('نقل الملفات'),
-      content: Text('${existing.length} ملف. اختار مكان من التليفون، وهيتعمل فيه فولدر بتاريخ النهارده (${_todayFolderName()}) والملفات تتحط جواه.'),
+      content: Text('${existing.length} ملف. اختار مكان من التليفون، وهيتعمل فيه فولدر بتاريخ النهارده (${_todayFolderName()}) والملفات تتحط جواه.'
+          '${allowMove ? '' : '\n\nالنقل هيتفعل لما العد يخلص. دلوقتي النسخ بس.'}'),
       actions: [
         TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
         TextButton(onPressed: () => Navigator.pop(c, 'copy'), child: const Text('نسخ')),
-        FilledButton(onPressed: () => Navigator.pop(c, 'move'), child: const Text('نقل')),
+        FilledButton(onPressed: allowMove ? () => Navigator.pop(c, 'move') : null, child: const Text('نقل')),
       ],
     ),
   );
@@ -11209,11 +11211,14 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
       final p = _transferPathOf(r);
       if (p != null) items[r] = p;
     }
-    final moved = await transferFilesViaPicker(context, items.values.toSet().toList());
+    // النسخ متاح بعد التسمية (حتى لو العد شغال)، والنقل بس بعد ما العد يخلص
+    final countDone = !busy && !results.any((r) => !r.excluded && r.pending);
+    final moved = await transferFilesViaPicker(context, items.values.toSet().toList(), allowMove: countDone);
     if (moved == null || moved.isEmpty || !mounted) return;
     items.forEach((r, p) {
       final np = moved[p];
       if (np == null) return;
+      if (File(p).existsSync()) return; // نسخ: الأصل لسه موجود فالمسارات ما تتغيرش
       if (r.srcPath == p) r.srcPath = np;
       r.openPath = np;
     });
@@ -12624,7 +12629,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
             _quickBtnG(context, Icons.chat, 'إرسال الكل ($named)',
                 (busy && !namingDone) || named == 0 ? null : shareAll),
             _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
-                busy || results.every((r) => r.excluded) ? null : transferGood),
+                (busy && !namingDone) || results.every((r) => r.excluded) ? null : transferGood),
             _quickBtnG(context, Icons.note_add, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
