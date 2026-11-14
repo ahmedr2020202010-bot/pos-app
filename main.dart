@@ -2314,6 +2314,14 @@ final Map<String, int> merchantCodeMap = {
   "27": 7, "28": 8, "29": 9, "30": 10, "31": 11,
 };
 
+// Merchant ID للوحدة: 0011470 + كود الوحدة (22..31) + 084، مثال برج العرب 001147023084
+String? merchantIdOfRow(int row) {
+  for (final e in merchantCodeMap.entries) {
+    if (e.value == row) return '0011470${e.key}084';
+  }
+  return null;
+}
+
 final List<MapEntry<List<String>, int>> nameHints = [
   MapEntry(["ABYSS", "ABIS"], 2),
   MapEntry(["BURJ", "BORG"], 3),
@@ -8601,11 +8609,28 @@ class _ReviewPageState extends State<ReviewPage> {
             value: order,
             isExpanded: true,
             hint: const Text('اختر الماكينة (1..25)'),
+            selectedItemBuilder: (c) => [
+              for (var i = 1; i <= machineCount; i++)
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
+                ),
+            ],
             items: [
               for (var i = 1; i <= machineCount; i++)
                 DropdownMenuItem(
                   value: i,
-                  child: Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('ماكينة $i - ${rowNames[terminals[numToTid[i]]!.excelRow]}${terminals[numToTid[i]]!.spare ? ' (احتياطي)' : ''}'),
+                      Text(
+                        'TID: ${numToTid[i]}  •  MID: ${merchantIdOfRow(terminals[numToTid[i]]!.excelRow) ?? '—'}',
+                        style: TextStyle(fontSize: 11.5, color: Theme.of(c).colorScheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
                 ),
             ],
             onChanged: (v) => setState(() => order = v),
