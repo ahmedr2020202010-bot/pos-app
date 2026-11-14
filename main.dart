@@ -2053,7 +2053,7 @@ const List<List<String>> _kEnPhrases = [
   ['فيه', 'There are'],
   ['لسه', 'yet'],
   ['أو', 'or'],
-  ['و', 'and']
+  ['و', 'and'],
   // عامة: في الآخر علشان العبارات الأطول اللي فوق تتطبق الأول
   ['إيصال/صورة', 'receipts/images'],
   ['للمراجعة', 'to review'],
