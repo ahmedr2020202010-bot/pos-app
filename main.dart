@@ -6225,6 +6225,51 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           srcs = await scanReceiptAsync(r.path);
         } catch (_) {}
         if (srcs.isEmpty) srcs = <String>[r.path];
+        // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
+        if (srcs.length > 1) {
+          try {
+            final ims = <pw.MemoryImage>[];
+            final dims = <List<int>>[];
+            for (final p in srcs) {
+              final b = File(p).readAsBytesSync();
+              final d = _jpegSize(b);
+              if (d == null) throw Exception('not jpeg');
+              ims.add(pw.MemoryImage(b));
+              dims.add(d);
+            }
+            const mg = 6.0, gap = 8.0;
+            final n = ims.length;
+            final pageW = 420.0 + 140.0 * (n - 1);
+            final contentW = pageW - 2 * mg - gap * (n - 1);
+            final sumW = dims.fold<int>(0, (a, d) => a + d[0]);
+            final k = contentW / sumW;
+            final maxH = dims.map((d) => d[1] * k).reduce((a, b) => a > b ? a : b);
+            pdf.addPage(
+              pw.Page(
+                pageFormat: PdfPageFormat(pageW, maxH + 2 * mg),
+                margin: const pw.EdgeInsets.all(mg),
+                build: (pw.Context ctx) => pw.Row(
+                  textDirection: pw.TextDirection.ltr,
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    for (var i = 0; i < n; i++) ...[
+                      if (i > 0) pw.SizedBox(width: gap),
+                      pw.SizedBox(
+                        width: dims[i][0] * k,
+                        height: dims[i][1] * k,
+                        child: pw.Image(ims[i], fit: pw.BoxFit.fill),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+            pages++;
+            continue;
+          } catch (_) {
+            // لو فشل التركيب نرجع للطريقة القديمة: صفحة لكل باتش
+          }
+        }
         for (final p in srcs) {
           try {
             final bytes = File(p).readAsBytesSync();
