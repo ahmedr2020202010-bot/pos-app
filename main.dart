@@ -3890,6 +3890,93 @@ img.Image? _warpAndEnhance(img.Image im, List<double> q) {
   return res;
 }
 
+// لو فوق أو تحت الباتش في الصورة كارت/شريط مكتوب فيه الاسم والتاريخ (منفصل عن الورقة بفاصل غامق): نوسّع القص ليشمله
+// (بنقرا الصورة الأصلية بس، ومبنكتبش أي حاجة جوه الملف). لو مفيش شريط بيرجّع نفس القص.
+// بيرجّع المسافة (نسبة من طول الورقة) اللي لازم نوسّع بيها، أو 0 لو مفيش شريط.
+double _captionExtent(img.Image im, List<double> q, bool top) {
+  try {
+    final hq = (_dist(q[0], q[1], q[4], q[5]) + _dist(q[2], q[3], q[6], q[7])) / 2;
+    final wq = (_dist(q[0], q[1], q[2], q[3]) + _dist(q[4], q[5], q[6], q[7])) / 2;
+    if (hq < 150 || wq < 60) return 0;
+    // الحافة اللي بندوّر بعدها (e1,e2) والحافة المقابلة لها (o1,o2)
+    final e1x = top ? q[0] : q[4], e1y = top ? q[1] : q[5];
+    final e2x = top ? q[2] : q[6], e2y = top ? q[3] : q[7];
+    final o1x = top ? q[4] : q[0], o1y = top ? q[5] : q[1];
+    final o2x = top ? q[6] : q[2], o2y = top ? q[7] : q[3];
+    const maxExt = 0.30;
+    const steps = 120;
+    const cols = 31;
+    final prof = <double>[];
+    var hitEdge = false;
+    for (var k = 0; k <= steps; k++) {
+      final t = maxExt * k / steps;
+      var sum = 0.0;
+      var n = 0;
+      var out = false;
+      for (var i = 0; i < cols; i++) {
+        final u = 0.15 + 0.7 * i / (cols - 1);
+        final ex = e1x * (1 - u) + e2x * u, ey = e1y * (1 - u) + e2y * u;
+        final ox = o1x * (1 - u) + o2x * u, oy = o1y * (1 - u) + o2y * u;
+        final x = ex + (ex - ox) * t, y = ey + (ey - oy) * t;
+        if (x < 0 || y < 0 || x > im.width - 1 || y > im.height - 1) {
+          out = true;
+          break;
+        }
+        final p = im.getPixel(x.round(), y.round());
+        sum += (p.r * 299 + p.g * 587 + p.b * 114) / 1000;
+        n++;
+      }
+      if (out) {
+        hitEdge = true;
+        break;
+      }
+      prof.add(sum / n);
+    }
+    if (prof.length < 10) return 0;
+    final lo = prof.reduce(math.min), hi = prof.reduce(math.max);
+    if (hi - lo < 60) return 0;
+    final mid = (lo + hi) / 2;
+    // ورقة (فاتح) -> فاصل غامق -> كارت فاتح -> غامق/نهاية الصورة
+    var k1 = 0;
+    while (k1 < prof.length && prof[k1] >= mid) k1++;
+    if (k1 >= prof.length) return 0;
+    var k2 = k1;
+    while (k2 < prof.length && prof[k2] < mid) k2++;
+    if (k2 >= prof.length) return 0;
+    var k3 = k2;
+    while (k3 < prof.length && prof[k3] >= mid) k3++;
+    if (k3 >= prof.length && !hitEdge) return 0; // فاتح لحد آخر البحث: غالباً خلفية مش كارت
+    const per = maxExt / steps;
+    if ((k2 - k1) * per > 0.08) return 0; // الفاصل كبير: مش كارت لازق في الباتش
+    if ((k3 - k2) * per < 0.03) return 0; // الشريط الفاتح قصير: مش كارت
+    return per * (math.min(k3, prof.length) - 1) + per;
+  } catch (_) {
+    return 0;
+  }
+}
+
+List<double> _extendForCaption(img.Image im, List<double> q) {
+  final tb = _captionExtent(im, q, false); // تحت
+  final tt = _captionExtent(im, q, true); // فوق
+  if (tb <= 0 && tt <= 0) return q;
+  final mx = (im.width - 1).toDouble(), my = (im.height - 1).toDouble();
+  final r = List<double>.from(q);
+  if (tt > 0) {
+    // الحافة العليا بتتحرك لفوق (بعيد عن الحافة السفلى)
+    r[0] = _cd(q[0] + (q[0] - q[4]) * tt, 0.0, mx);
+    r[1] = _cd(q[1] + (q[1] - q[5]) * tt, 0.0, my);
+    r[2] = _cd(q[2] + (q[2] - q[6]) * tt, 0.0, mx);
+    r[3] = _cd(q[3] + (q[3] - q[7]) * tt, 0.0, my);
+  }
+  if (tb > 0) {
+    r[4] = _cd(q[4] + (q[4] - q[0]) * tb, 0.0, mx);
+    r[5] = _cd(q[5] + (q[5] - q[1]) * tb, 0.0, my);
+    r[6] = _cd(q[6] + (q[6] - q[2]) * tb, 0.0, mx);
+    r[7] = _cd(q[7] + (q[7] - q[3]) * tb, 0.0, my);
+  }
+  return r;
+}
+
 // بتشتغل في Isolate. بترجّع مسارات الصفحات (صفحة لكل باتش). فاضي = استخدم الصورة الأصلية.
 List<String> _scanToPages(String src, String base) {
   final cached = <String>[];
@@ -3908,7 +3995,8 @@ List<String> _scanToPages(String src, String base) {
       var quads = _detectReceipts(im);
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
-      for (final q in quads) {
+      for (final q0 in quads) {
+        final q = _extendForCaption(im, q0);
         final o = _warpAndEnhance(im, q);
         if (o == null) continue;
         final p = '${base}_${out.length}.jpg';
@@ -3930,7 +4018,7 @@ Future<List<String>> scanReceiptAsync(String src) async {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final base = '$baseDir/.scans/v2_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    final base = '$baseDir/.scans/v4_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
     return await Isolate.run(() => _scanToPages(src, base));
   } catch (_) {
     return <String>[];
@@ -5688,7 +5776,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (final sy in sysReads) {
         if (!newNames.contains(sy.file)) continue;
         final t = sy.tid != null ? terminals[sy.tid] : null;
-        final label = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
+        final label = t != null ? machineLabel(t.orderNum, t.unitName) : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
         if (sy.amount == null) {
           lines.add('⚠️ صورة سيستم ($label): مش قادر أقرا المبلغ - راجعها');
           continue;
@@ -5727,7 +5815,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final name = baseName(it.path);
     if (it.ignoredDoc) return '⚠️ $name: شكله إيصال دفع/مستند مش باتش - راجعه';
     final label = it.orderNum != null
-        ? 'ماكينة ${it.orderNum}${it.suffix != null ? ' (باتش ${it.suffix})' : ''}${it.unitName != null ? ' - ${it.unitName}' : ''}'
+        ? '${machineLabel(it.orderNum, it.unitName)}${it.suffix != null ? ' (باتش ${it.suffix})' : ''}'
         : (it.unitName ?? name);
     final why = <String>[];
     if (it.reprintSummary) why.add('REPRINT/SUMMARY (إعادة طباعة/ملخص)');
@@ -6262,7 +6350,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     await Share.shareXFiles([XFile(item.path)],
-        text: item.orderNum != null ? 'ماكينة ${item.orderNum}' : baseName(item.path));
+        text: item.orderNum != null ? machineLabel(item.orderNum, item.unitName) : baseName(item.path));
   }
 
   Future<void> rebuildFiles({bool lite = false}) async {
@@ -7674,7 +7762,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       child: Text(
                         item.ignoredDoc || item.ign == 'drop'
                             ? 'مستند متجاهل - ${baseName(item.path)}'
-                            : 'ماكينة ${item.orderNum ?? '؟'} - ${item.unitName ?? 'وحدة غير معروفة'}',
+                            : (item.orderNum != null ? machineLabel(item.orderNum, item.unitName) : (item.unitName ?? 'وحدة غير معروفة')),
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -8395,7 +8483,7 @@ class _ReviewPageState extends State<ReviewPage> {
                 MaterialPageRoute(
                   builder: (_) => ReceiptZoomPage(
                     path: it.path,
-                    title: 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? ''}',
+                    title: it.orderNum != null ? machineLabel(it.orderNum, it.unitName) : (it.unitName ?? '؟'),
                   ),
                 ),
               ),
@@ -8732,6 +8820,20 @@ void savePdfDir(String? f) {
   final m = _readCfg();
   m['pdfDir'] = f;
   _writeCfg(m);
+}
+
+// اسم الماكينة للعرض: "أبيس 1" / "برج العرب 2" (من غير كلمة ماكينة). الوحدة اللي فيها ماكينة واحدة بس بتظهر باسمها
+String machineLabel(int? orderNum, [String? unitName]) {
+  if (orderNum == null) return unitName ?? '؟';
+  final tid = numToTid[orderNum];
+  final info = tid != null ? terminals[tid] : null;
+  if (info == null) return unitName ?? '$orderNum';
+  final same = terminals.values.where((t) => t.excelRow == info.excelRow).toList()
+    ..sort((a, b) => a.orderNum.compareTo(b.orderNum));
+  final unit = info.unitName.trim();
+  if (same.length <= 1) return unit;
+  final k = same.indexWhere((t) => t.orderNum == info.orderNum) + 1;
+  return '$unit $k';
 }
 
 // الاسم الجديد: "1.أبيس.1.يوم.4.11" (وحدة فيها أكتر من ماكينة) أو "17.مديرية.الأمن.يوم.4.11"
@@ -10586,7 +10688,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
     final sysRows = <Widget>[];
     for (final s in sysList) {
       final t = terminals[s.tid];
-      final nm = t != null ? 'ماكينة ${t.orderNum} - ${t.unitName}' : 'ترمنل ${s.tid}';
+      final nm = t != null ? machineLabel(t.orderNum, t.unitName) : 'ترمنل ${s.tid}';
       var tot = 0.0;
       var n = 0;
       if (t != null) {
@@ -10740,7 +10842,7 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
                 title: w.Text(
                     it.ignoredDoc || it.ign == 'drop'
                         ? 'مستند متجاهل - ${baseName(it.path)}'
-                        : 'ماكينة ${it.orderNum ?? '؟'} - ${it.unitName ?? 'وحدة غير معروفة'}',
+                        : (it.orderNum != null ? machineLabel(it.orderNum, it.unitName) : (it.unitName ?? 'وحدة غير معروفة')),
                     style: const TextStyle(fontWeight: FontWeight.bold)),
                 subtitle: w.Text(widget.subtitleOf(it), style: const TextStyle(fontSize: 12)),
               ),
