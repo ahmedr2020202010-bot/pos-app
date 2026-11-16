@@ -3903,8 +3903,8 @@ double _captionExtent(img.Image im, List<double> q, bool top) {
     final e2x = top ? q[2] : q[6], e2y = top ? q[3] : q[7];
     final o1x = top ? q[4] : q[0], o1y = top ? q[5] : q[1];
     final o2x = top ? q[6] : q[2], o2y = top ? q[7] : q[3];
-    const maxExt = 0.30;
-    const steps = 120;
+    const maxExt = 0.35;
+    const steps = 140;
     const cols = 31;
     final prof = <double>[];
     var hitEdge = false;
@@ -3918,7 +3918,7 @@ double _captionExtent(img.Image im, List<double> q, bool top) {
         final ex = e1x * (1 - u) + e2x * u, ey = e1y * (1 - u) + e2y * u;
         final ox = o1x * (1 - u) + o2x * u, oy = o1y * (1 - u) + o2y * u;
         final x = ex + (ex - ox) * t, y = ey + (ey - oy) * t;
-        if (x < 0 || y < 0 || x > im.width - 1 || y > im.height - 1) {
+        if (x < 2 || y < 2 || x > im.width - 3 || y > im.height - 3) {
           out = true;
           break;
         }
@@ -3934,7 +3934,7 @@ double _captionExtent(img.Image im, List<double> q, bool top) {
     }
     if (prof.length < 10) return 0;
     final lo = prof.reduce(math.min), hi = prof.reduce(math.max);
-    if (hi - lo < 60) return 0;
+    if (hi - lo < 50) return 0;
     final mid = (lo + hi) / 2;
     // ورقة (فاتح) -> فاصل غامق -> كارت فاتح -> غامق/نهاية الصورة
     var k1 = 0;
@@ -3945,11 +3945,17 @@ double _captionExtent(img.Image im, List<double> q, bool top) {
     if (k2 >= prof.length) return 0;
     var k3 = k2;
     while (k3 < prof.length && prof[k3] >= mid) k3++;
-    if (k3 >= prof.length && !hitEdge) return 0; // فاتح لحد آخر البحث: غالباً خلفية مش كارت
     const per = maxExt / steps;
-    if ((k2 - k1) * per > 0.08) return 0; // الفاصل كبير: مش كارت لازق في الباتش
+    if ((k2 - k1) * per > 0.10) return 0; // الفاصل كبير: مش كارت لازق في الباتش
     if ((k3 - k2) * per < 0.03) return 0; // الشريط الفاتح قصير: مش كارت
-    return per * (math.min(k3, prof.length) - 1) + per;
+    if (k3 >= prof.length && !hitEdge) {
+      var minInside = 255.0;
+      for (var idx = k2; idx < prof.length; idx++) {
+        if (prof[idx] < minInside) minInside = prof[idx];
+      }
+      if (hi - minInside < 25) return 0; // خلفية سادة بدون كتابة
+    }
+    return per * (math.min(k3, prof.length) - 1) + 0.015;
   } catch (_) {
     return 0;
   }
@@ -4018,7 +4024,7 @@ Future<List<String>> scanReceiptAsync(String src) async {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final base = '$baseDir/.scans/v4_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    final base = '$baseDir/.scans/v5_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
     return await Isolate.run(() => _scanToPages(src, base));
   } catch (_) {
     return <String>[];
