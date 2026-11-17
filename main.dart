@@ -1104,223 +1104,47 @@ class SysTotal {
       );
 }
 
-// أعداد صورة السيستم من مواقع الكلمات (الـ OCR لاتيني فبيقرا الأرقام بس، والعناوين العربي مش مقروءة).
+// أعداد صورة السيستم من مواقع الأسطر (الـ OCR لاتيني فبيقرا الأرقام بس، والعناوين العربي مش مقروءة).
 // الترتيب من فوق لتحت بعد سطر التاريخ وقبل سطر المبلغ: إجمالي العمليات، إيصالات إلكترونية، يدوية، ملغية.
-// v60-lite: القراءة بقت بالكلمات (مش بالسطور) + تصحيح O/I/l + دمج الصفوف + فحص إن الأرقام منطقية
-// (إجمالي = إلكترونية + يدوية [+ ملغية]). لو مش منطقية بنرجّع "مش متأكد" وبنعيد القراءة على صورة مقصوصة ومكبّرة.
-class _SysCnt {
-  final List<int> rows; // القيم المقروءة من فوق لتحت
-  final int? total, elec;
-  final bool sure; // الأرقام متسقة مع بعض
-  const _SysCnt(this.rows, this.total, this.elec, this.sure);
-}
-
-int? _sysTokenInt(String raw) {
-  var t = raw.trim().replaceAll(RegExp(r'^[^0-9A-Za-z|\u0660-\u0669\u06F0-\u06F9]+|[^0-9A-Za-z|\u0660-\u0669\u06F0-\u06F9]+$'), '');
-  if (t.isEmpty || t.length > 5) return null;
-  const ar = '٠١٢٣٤٥٦٧٨٩';
-  const fa = '۰۱۲۳۴۵۶۷۸۹';
-  final b = StringBuffer();
-  for (final ch in t.split('')) {
-    final ia = ar.indexOf(ch), ifa = fa.indexOf(ch);
-    if (ia >= 0) {
-      b.write(ia);
-    } else if (ifa >= 0) {
-      b.write(ifa);
-    } else if ('OoQD'.contains(ch)) {
-      b.write('0');
-    } else if ('Il|'.contains(ch)) {
-      b.write('1');
-    } else if (ch == 'S') {
-      b.write('5');
-    } else if (ch == 'B') {
-      b.write('8');
-    } else if (RegExp(r'\d').hasMatch(ch)) {
-      b.write(ch);
-    } else {
-      return null;
-    }
-  }
-  return int.tryParse(b.toString());
-}
-
-_SysCnt _sysCountsDetail(RecognizedText rt) {
-  const none = _SysCnt(<int>[], null, null, false);
+// بترجع [إجمالي العمليات، الإلكترونية] أو [null, null] لو مش متأكدين.
+List<int?> _sysCounts(RecognizedText rt) {
   final lines = <TextLine>[for (final b in rt.blocks) ...b.lines];
-  if (lines.isEmpty) return none;
   final egpRe = RegExp(r'\d[.,]\d{2}\s*EG[PR]', caseSensitive: false);
-  final egpRe2 = RegExp(r'EG[PR]\b', caseSensitive: false);
   double? egpTop;
-  for (final re in [egpRe, egpRe2]) {
-    for (final l in lines) {
-      if (re.hasMatch(l.text)) {
-        final t = l.boundingBox.top;
-        if (egpTop == null || t < egpTop) egpTop = t;
-      }
+  for (final l in lines) {
+    if (egpRe.hasMatch(l.text)) {
+      final t = l.boundingBox.top;
+      if (egpTop == null || t < egpTop) egpTop = t;
     }
-    if (egpTop != null) break;
   }
-  if (egpTop == null) return none;
-  final hs = <double>[for (final l in lines) l.boundingBox.height]..sort();
-  final medH = hs[hs.length ~/ 2];
+  if (egpTop == null) return [null, null];
   final dateRe = RegExp(r'\d{1,2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?20\d{2}');
-  double? dateCy;
+  double? dateBottom;
   for (final l in lines) {
-    final cy = (l.boundingBox.top + l.boundingBox.bottom) / 2;
-    if (dateRe.hasMatch(l.text) && cy < egpTop) {
-      if (dateCy == null || cy < dateCy) dateCy = cy;
+    if (dateRe.hasMatch(l.text) && l.boundingBox.top < egpTop) {
+      final b = l.boundingBox.bottom;
+      if (dateBottom == null || b < dateBottom) dateBottom = b;
     }
   }
-  // مرشّحين: (cy, cx, قيمة)
-  final cands = <List<double>>[];
+  final numRe = RegExp(r'^[^A-Za-z\d]{0,3}(\d{1,5})[^A-Za-z\d]{0,3}$');
+  final nums = <MapEntry<double, int>>[];
   for (final l in lines) {
-    final bb = l.boundingBox;
-    final cy = (bb.top + bb.bottom) / 2;
-    if (cy >= egpTop - medH * 0.2) continue;
-    if (dateCy != null && cy <= dateCy + medH * 0.4) continue;
-    final els = l.elements.isNotEmpty ? l.elements : <TextElement>[];
-    if (els.isEmpty) {
-      final v = _sysTokenInt(l.text);
-      if (v != null) cands.add([cy, (bb.left + bb.right) / 2, v.toDouble()]);
-      continue;
-    }
-    for (final e in els) {
-      final v = _sysTokenInt(e.text);
-      if (v == null) continue;
-      final eb = e.boundingBox;
-      cands.add([(eb.top + eb.bottom) / 2, (eb.left + eb.right) / 2, v.toDouble()]);
-    }
+    final m = numRe.firstMatch(l.text.trim());
+    if (m == null) continue;
+    if (l.boundingBox.bottom > egpTop + 4) continue;
+    if (dateBottom != null && l.boundingBox.top < dateBottom - 4) continue;
+    nums.add(MapEntry(l.boundingBox.top, int.parse(m.group(1)!)));
   }
-  if (cands.isEmpty) return none;
-  cands.sort((a, b) => a[0].compareTo(b[0]));
-  // دمج اللي في نفس الصف (الأقرب للشمال = القيمة؛ العنوان العربي على اليمين)
-  final rows = <List<double>>[];
-  for (final c in cands) {
-    if (rows.isNotEmpty && (c[0] - rows.last[0]).abs() < medH * 0.6) {
-      if (c[1] < rows.last[1]) rows[rows.length - 1] = c;
-    } else {
-      rows.add(c);
-    }
-  }
-  final v = <int>[for (final r in rows) r[2].toInt()];
-  if (v.length < 2) return _SysCnt(v, null, null, false);
-  // 4 قيم أو أكتر: دوّر على نافذة منطقية
-  if (v.length >= 4) {
-    for (var i = 0; i + 4 <= v.length; i++) {
-      final t = v[i], e = v[i + 1], m = v[i + 2], c = v[i + 3];
-      if (t >= e && (t == e + m || t == e + m + c)) return _SysCnt(v.sublist(i, i + 4), t, e, true);
-    }
-    return _SysCnt(v.sublist(0, 4), v[0] >= v[1] ? v[0] : null, v[0] >= v[1] ? v[1] : null, false);
-  }
-  final t = v[0], e = v[1];
-  if (e > t) return _SysCnt(v, null, null, false);
-  if (v.length == 3) return _SysCnt(v, t, e, t == e + v[2]);
-  return _SysCnt(v, t, e, t == e); // قيمتين بس: متأكدين لو متساويين (يدوي/ملغي = 0 ومش مقروء)
-}
-
-// قراءات متعددة لنفس الصورة: نختار عدد متأكد منه، أو عدد اتكرر في قراءتين
-List<int>? _pickSysCounts(List<_SysCnt> reads) {
-  final sure = reads.where((r) => r.sure && r.total != null && r.elec != null).toList();
-  if (sure.isNotEmpty) return [sure.last.total!, sure.last.elec!];
-  final seen = <String, int>{};
-  for (final r in reads) {
-    if (r.total == null || r.elec == null || r.rows.length < 4) continue;
-    seen['${r.total}|${r.elec}'] = (seen['${r.total}|${r.elec}'] ?? 0) + 1;
-  }
-  for (final e in seen.entries) {
-    if (e.value >= 2) {
-      final p = e.key.split('|');
-      return [int.parse(p[0]), int.parse(p[1])];
-    }
-  }
-  return null;
-}
-
-// شكل صورة السيستم (حتى لو الترمنل أو الأعداد مش مقروءة): مش باتش أبداً
-bool _looksLikeSys(String text) {
-  final up = text.toUpperCase();
-  if (RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER|CONSOLE\s*V\d|V\d{2,3}\s*-\s*LITE').hasMatch(up)) return true;
-  final hasPrinted = RegExp(r'PRINTED\W{0,3}\s*20\d{2}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}').hasMatch(up);
-  final hasEgp = RegExp(r'\d[.,]\d{2}\s*EG[PR]').hasMatch(up);
-  return hasPrinted && hasEgp && classifyReceipt(text) == 'other';
-}
-
-// قص الصورة على مكان النص + تكبير وتحسين (للصور البعيدة: الشاشة صغيرة جوه الصورة)
-void _cropEnhance(String src, String dst, double l, double t, double r, double b) {
-  var im = img.decodeImage(File(src).readAsBytesSync());
-  if (im == null) throw Exception('decode failed');
-  im = img.bakeOrientation(im);
-  final padX = ((r - l) * 0.10).round() + 8;
-  final padY = ((b - t) * 0.04).round() + 8;
-  final x0 = math.max(0, l.round() - padX);
-  final y0 = math.max(0, t.round() - padY);
-  final x1 = math.min(im.width, r.round() + padX);
-  final y1 = math.min(im.height, b.round() + padY);
-  if (x1 - x0 < 40 || y1 - y0 < 40) throw Exception('crop too small');
-  var c = img.copyCrop(im, x: x0, y: y0, width: x1 - x0, height: y1 - y0);
-  c = img.grayscale(c);
-  c = img.adjustColor(c, contrast: 1.5);
-  if (c.width < 1400) {
-    c = img.copyResize(c, width: 1400, interpolation: img.Interpolation.cubic);
-  }
-  File(dst).writeAsBytesSync(img.encodeJpg(c, quality: 95));
-}
-
-// قراءة تانية لصورة السيستم لما الأولى ناقصة (صورة بعيدة/مايلة): قص + تكبير، وبعدها صورة محسّنة كاملة.
-// بترجع SysTotal مدموج، أو SysTotal فاضي (من غير ترمنل) لو الصورة سيستم أكيد بس مش مقروءة، علشان ما تتحسبش باتش.
-Future<SysTotal?> _sysSecondPass(
-    TextRecognizer rec, String path, String tmpDir, String name, RecognizedText first, SysTotal? sp) async {
-  final reads = <_SysCnt>[_sysCountsDetail(first)];
-  var tid = sp?.tid, amount = sp?.amount, date = sp?.date;
-  var printed = sp?.printed ?? '';
-  bool done() => tid != null && amount != null && _pickSysCounts(reads) != null;
-
-  void absorb(RecognizedText r2) {
-    final s2 = parseSysConsole(r2.text, name, rt: r2);
-    if (s2 != null) {
-      tid ??= s2.tid;
-      amount ??= s2.amount;
-      date ??= s2.date;
-      if (printed.isEmpty) printed = s2.printed;
-    }
-    reads.add(_sysCountsDetail(r2));
-  }
-
-  if (!done()) {
-    try {
-      double l = 1e9, t = 1e9, r = 0, b = 0;
-      for (final bl in first.blocks) {
-        final bb = bl.boundingBox;
-        l = math.min(l, bb.left);
-        t = math.min(t, bb.top);
-        r = math.max(r, bb.right);
-        b = math.max(b, bb.bottom);
-      }
-      if (r > l && b > t) {
-        final cp = '$tmpDir/sys_crop.jpg';
-        await Isolate.run(() => _cropEnhance(path, cp, l, t, r, b));
-        absorb(await rec.processImage(InputImage.fromFilePath(cp)));
-      }
-    } catch (_) {}
-  }
-  if (!done()) {
-    try {
-      final ep = '$tmpDir/sys_enh.jpg';
-      await enhanceImageAsync(path, ep);
-      absorb(await rec.processImage(InputImage.fromFilePath(ep)));
-    } catch (_) {}
-  }
-  final pc = _pickSysCounts(reads);
-  if (tid == null && amount == null && pc == null && sp == null) {
-    // شكلها سيستم لكن مفيش بيانات: نتجاهلها كصورة سيستم (مش باتش) علشان المستخدم يراجعها
-    return SysTotal(null, null, date, printed, name);
-  }
-  return SysTotal(tid, amount, date, printed, name, txn: pc?[1], txnAll: pc?[0]);
+  nums.sort((a, b) => a.key.compareTo(b.key));
+  if (nums.length < 2) return [null, null];
+  final total = nums[0].value, elec = nums[1].value;
+  if (elec > total) return [null, null];
+  return [total, elec];
 }
 
 SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
   final up = text.toUpperCase();
-  final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER|CONSOLE\s*V\d|V\d{2,3}\s*-\s*LITE').hasMatch(up);
+  final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER').hasMatch(up);
   final printedM = RegExp(
           r'PRINTED\W{0,3}\s*(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?',
           caseSensitive: false)
@@ -1339,11 +1163,8 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
   }
   String? tid = findTerminalIn([text]);
   tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
-  // الصور البعيدة: رقم الترمنل ممكن يتقرا غلط بحرف/رقم → نقارنه بالماكينات المعروفة بفرق رقم واحد
-  tid ??= findTerminalFuzzyIn([text], null);
-  // العنوان واضح (A2R Operations Console) والمبلغ/الطباعة مقروءين لكن الترمنل لأ: لسه صورة سيستم ومش باتش
-  // (بتتسجل من غير ترمنل: مش بتتربط بماكينة، لكن مش بتتحسب باتش)
-  if (tid == null && !(hasTitle && (amount != null || printedM != null))) return null;
+  // إيصال السيستم لازم فيه رقم ترمنل (أي ترمنل). من غيره مش إيصال سيستم. رقم إصدار البرنامج (v60 / v51...) ملوش علاقة
+  if (tid == null) return null;
 
   String? date;
   final dm = RegExp(r'(?<!\d)(\d{1,2})\s?[.\-/]\s?(\d{1,2})\s?[.\-/]\s?(20\d{2})(?!\d)').firstMatch(text);
@@ -1358,9 +1179,8 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
     final tt = t == null ? '' : t.split(':').map((e) => e.padLeft(2, '0')).join(':');
     printed = '${printedM.group(1)}-${printedM.group(2)!.padLeft(2, '0')}-${printedM.group(3)!.padLeft(2, '0')} $tt';
   }
-  final cd = rt == null ? null : _sysCountsDetail(rt);
-  final okCnt = cd != null && cd.sure;
-  return SysTotal(tid, amount, date, printed, file, txnAll: okCnt ? cd.total : null, txn: okCnt ? cd.elec : null);
+  final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
+  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1]);
 }
 
 String _fmtMoney(double v) {
@@ -4179,7 +3999,7 @@ List<double> _extendForCaption(img.Image im, List<double> q) {
 }
 
 // بتشتغل في Isolate. بترجّع مسارات الصفحات (صفحة لكل باتش). فاضي = استخدم الصورة الأصلية.
-List<String> _scanToPages(String src, String base, double padV, double padH) {
+List<String> _scanToPages(String src, String base) {
   final cached = <String>[];
   var ci = 0;
   while (File('${base}_$ci.jpg').existsSync()) {
@@ -4197,7 +4017,7 @@ List<String> _scanToPages(String src, String base, double padV, double padH) {
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
       for (final q0 in quads) {
-        final q = _padQuad(im, _extendForCaption(im, q0), padV, padH);
+        final q = _extendForCaption(im, q0);
         final o = _warpAndEnhance(im, q);
         if (o == null) continue;
         final p = '${base}_${out.length}.jpg';
@@ -4214,528 +4034,16 @@ List<String> _scanToPages(String src, String base, double padV, double padH) {
   return out;
 }
 
-// ───────────────── قص الباتش: زيادة تلقائية + قص يدوي لكل صورة ─────────────────
-// زيادة على القص التلقائي (نسبة من أبعاد الباتش). موجب = بيزوّد، سالب = بيقص. الافتراضي: شوية طول فوق وتحت.
-double kPadV = 0.04; // فوق وتحت (الطول)
-double kPadH = 0.0; // شمال ويمين (العرض)
-
-void loadCropPads() {
-  final c = _readCfg();
-  kPadV = ((c['padV'] as num?)?.toDouble() ?? 0.04).clamp(-0.2, 0.5).toDouble();
-  kPadH = ((c['padH'] as num?)?.toDouble() ?? 0.0).clamp(-0.2, 0.5).toDouble();
-}
-
-// القص اليدوي: لكل صورة قائمة مستطيلات [l,t,r,b] كنسب (0..1) من الصورة بعد تصحيح الاتجاه
-final String cropFile = '$baseDir/.app_crop.json';
-
-String cropKeyOf(ReceiptItem r) => r.key.isNotEmpty ? r.key : baseName(r.path);
-
-Map<String, dynamic> _loadCrops() {
-  try {
-    return Map<String, dynamic>.from(jsonDecode(File(cropFile).readAsStringSync()) as Map);
-  } catch (_) {
-    return <String, dynamic>{};
-  }
-}
-
-List<List<double>> getManualCrop(String key) {
-  final out = <List<double>>[];
-  final v = _loadCrops()[key];
-  if (v is List) {
-    for (final r in v) {
-      if (r is List && r.length == 4) out.add([for (final n in r) (n as num).toDouble()]);
-    }
-  }
-  return out;
-}
-
-void saveManualCrop(String key, List<List<double>>? rects) {
-  try {
-    final m = _loadCrops();
-    if (rects == null || rects.isEmpty) {
-      m.remove(key);
-    } else {
-      m[key] = rects;
-    }
-    File(cropFile)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode(m));
-  } catch (_) {}
-}
-
-// بيوسّع (أو بيقلّص لو سالب) الباتش على محاوره: padV للطول، padH للعرض
-List<double> _padQuad(img.Image im, List<double> q, double padV, double padH) {
-  if (padV.abs() < 0.001 && padH.abs() < 0.001) return q;
-  final vx = ((q[4] - q[0]) + (q[6] - q[2])) / 2, vy = ((q[5] - q[1]) + (q[7] - q[3])) / 2;
-  final hx = ((q[2] - q[0]) + (q[6] - q[4])) / 2, hy = ((q[3] - q[1]) + (q[7] - q[5])) / 2;
-  final mx = (im.width - 1).toDouble(), my = (im.height - 1).toDouble();
-  double cx(double v) => _cd(v, 0.0, mx);
-  double cy(double v) => _cd(v, 0.0, my);
-  return [
-    cx(q[0] - vx * padV - hx * padH), cy(q[1] - vy * padV - hy * padH),
-    cx(q[2] - vx * padV + hx * padH), cy(q[3] - vy * padV + hy * padH),
-    cx(q[4] + vx * padV - hx * padH), cy(q[5] + vy * padV - hy * padH),
-    cx(q[6] + vx * padV + hx * padH), cy(q[7] + vy * padV + hy * padH),
-  ];
-}
-
-// قص يدوي: كل مستطيل بيتقص من الصورة الأصلية وبيتحسّن بنفس طريقة السكانر
-List<String> _manualToPages(String src, String base, List<List<double>> rects) {
-  final cached = <String>[];
-  for (var i = 0; i < rects.length; i++) {
-    final f = File('${base}_$i.jpg');
-    if (!f.existsSync()) {
-      cached.clear();
-      break;
-    }
-    cached.add(f.path);
-  }
-  if (cached.length == rects.length) return cached;
-  final out = <String>[];
-  try {
-    var im = img.decodeImage(File(src).readAsBytesSync());
-    if (im == null) return out;
-    im = img.bakeOrientation(im);
-    final w = im.width.toDouble(), h = im.height.toDouble();
-    for (final r in rects) {
-      final l = _cd(r[0] * w, 0.0, w - 2), t = _cd(r[1] * h, 0.0, h - 2);
-      final rr = _cd(r[2] * w, l + 2, w), b = _cd(r[3] * h, t + 2, h);
-      final o = _warpAndEnhance(im, [l, t, rr, t, l, b, rr, b]);
-      if (o == null) continue;
-      final p = '${base}_${out.length}.jpg';
-      File(p).writeAsBytesSync(img.encodeJpg(o, quality: 90));
-      out.add(p);
-    }
-  } catch (_) {}
-  return out;
-}
-
-// أول عنصر = [عرض, طول] الصورة. الباقي = المستطيلات التلقائية (بعد الزيادة). بيكتب نسخة للعرض في الشاشة.
-List<List<double>> _cropPrep(String src, String viewDst, double padV, double padH) {
-  var im = img.decodeImage(File(src).readAsBytesSync());
-  if (im == null) throw Exception('decode failed');
-  im = img.bakeOrientation(im);
-  final rects = <List<double>>[];
-  try {
-    var quads = _detectReceipts(im);
-    if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
-    if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
-    for (final q0 in quads) {
-      final q = _padQuad(im, _extendForCaption(im, q0), padV, padH);
-      final xs = [q[0], q[2], q[4], q[6]], ys = [q[1], q[3], q[5], q[7]];
-      rects.add([
-        xs.reduce(math.min) / im.width,
-        ys.reduce(math.min) / im.height,
-        xs.reduce(math.max) / im.width,
-        ys.reduce(math.max) / im.height,
-      ]);
-    }
-  } catch (_) {}
-  rects.sort((a, b) => a[0].compareTo(b[0]));
-  var v = im;
-  if (math.max(im.width, im.height) > 1800) {
-    v = im.width >= im.height ? img.copyResize(im, width: 1800) : img.copyResize(im, height: 1800);
-  }
-  File(viewDst).writeAsBytesSync(img.encodeJpg(v, quality: 85));
-  return [
-    [im.width.toDouble(), im.height.toDouble()],
-    ...rects
-  ];
-}
-
-Future<List<List<double>>> cropPrepAsync(String src, String dst, double padV, double padH) =>
-    Isolate.run(() => _cropPrep(src, dst, padV, padH));
-
-Future<List<String>> scanReceiptAsync(String src, {String? cropKey}) async {
+Future<List<String>> scanReceiptAsync(String src) async {
   try {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final stamp = '${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
-    if (cropKey != null) {
-      final manual = getManualCrop(cropKey);
-      if (manual.isNotEmpty) {
-        final sig = manual.expand((e) => e).map((v) => (v * 10000).round()).join('_');
-        final mbase = '$baseDir/.scans/m_${stamp}_$sig';
-        final r = await Isolate.run(() => _manualToPages(src, mbase, manual));
-        if (r.isNotEmpty) return r;
-      }
-    }
-    loadCropPads();
-    final padV = kPadV, padH = kPadH;
-    final base = '$baseDir/.scans/v7_${stamp}_p${(padV * 100).round()}_${(padH * 100).round()}';
-    return await Isolate.run(() => _scanToPages(src, base, padV, padH));
+    final base = '$baseDir/.scans/v6_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    return await Isolate.run(() => _scanToPages(src, base));
   } catch (_) {
     return <String>[];
   }
-}
-
-// حوار الزيادة التلقائية على كل الباتشات
-Future<bool> showCropPadsDialog(BuildContext context) async {
-  loadCropPads();
-  var v = kPadV, h = kPadH;
-  var saved = false;
-  await showDialog<void>(
-    context: context,
-    builder: (c) => StatefulBuilder(
-      builder: (c, set) => AlertDialog(
-        title: const Text('زيادة القص التلقائي'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('الطول (فوق وتحت): ${(v * 100).round()}%'),
-            Slider(value: v, min: -0.1, max: 0.3, divisions: 40, onChanged: (x) => set(() => v = x)),
-            Text('العرض (شمال ويمين): ${(h * 100).round()}%'),
-            Slider(value: h, min: -0.1, max: 0.3, divisions: 40, onChanged: (x) => set(() => h = x)),
-            const Text('موجب = بيزوّد، سالب = بيقص. بيتطبق على كل الباتشات اللي مفيهاش قص يدوي.',
-                style: TextStyle(fontSize: 12)),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
-          FilledButton(
-            onPressed: () {
-              _saveCfgKey('padV', v);
-              _saveCfgKey('padH', h);
-              saved = true;
-              Navigator.pop(c);
-            },
-            child: const Text('حفظ'),
-          ),
-        ],
-      ),
-    ),
-  );
-  loadCropPads();
-  return saved;
-}
-
-// ───────────────── شاشة القص اليدوي (زي أيقونة الكروب) ─────────────────
-class CropPage extends StatefulWidget {
-  final ReceiptItem item;
-  const CropPage({super.key, required this.item});
-
-  @override
-  State<CropPage> createState() => _CropPageState();
-}
-
-class _CropPageState extends State<CropPage> {
-  String? viewPath;
-  double imgW = 1, imgH = 1;
-  List<List<double>> rects = <List<double>>[];
-  int sel = 0;
-  bool loading = true;
-  String? err;
-  int _drag = -1; // 0..7 مقبض (زوايا وأضلاع) • 8 تحريك • -1 مفيش
-  double _scale = 1, _ox = 0, _oy = 0;
-  static const double _minSize = 0.04;
-
-  @override
-  void initState() {
-    super.initState();
-    _init();
-  }
-
-  @override
-  void dispose() {
-    try {
-      if (viewPath != null) File(viewPath!).deleteSync();
-    } catch (_) {}
-    super.dispose();
-  }
-
-  Future<void> _init({bool forceAuto = false}) async {
-    setState(() {
-      loading = true;
-      err = null;
-    });
-    try {
-      loadCropPads();
-      Directory('$baseDir/.scans').createSync(recursive: true);
-      final old = viewPath;
-      final dst = '$baseDir/.scans/cropview_${DateTime.now().microsecondsSinceEpoch}.jpg';
-      final r = await cropPrepAsync(widget.item.path, dst, kPadV, kPadH);
-      try {
-        if (old != null) File(old).deleteSync();
-      } catch (_) {}
-      imgW = r[0][0];
-      imgH = r[0][1];
-      var rs = r.sublist(1);
-      final saved = forceAuto ? <List<double>>[] : getManualCrop(cropKeyOf(widget.item));
-      if (saved.isNotEmpty) rs = saved;
-      if (rs.isEmpty) rs = [<double>[0.05, 0.05, 0.95, 0.95]];
-      rects = [for (final e in rs) List<double>.from(e)];
-      sel = 0;
-      viewPath = dst;
-    } catch (_) {
-      err = 'مقدرتش أفتح الصورة';
-    }
-    if (!mounted) return;
-    setState(() => loading = false);
-  }
-
-  List<Offset> _handles(List<double> r) {
-    final cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
-    return [
-      Offset(r[0], r[1]), Offset(cx, r[1]), Offset(r[2], r[1]), Offset(r[2], cy),
-      Offset(r[2], r[3]), Offset(cx, r[3]), Offset(r[0], r[3]), Offset(r[0], cy),
-    ];
-  }
-
-  Offset _toPx(Offset n) => Offset(_ox + n.dx * imgW * _scale, _oy + n.dy * imgH * _scale);
-
-  void _onStart(Offset p) {
-    _drag = -1;
-    final r = rects[sel];
-    final hs = _handles(r);
-    var best = 34.0;
-    for (var i = 0; i < hs.length; i++) {
-      final d = (_toPx(hs[i]) - p).distance;
-      if (d < best) {
-        best = d;
-        _drag = i;
-      }
-    }
-    if (_drag >= 0) return;
-    final order = <int>[sel, for (var i = 0; i < rects.length; i++) if (i != sel) i];
-    for (final i in order) {
-      final q = rects[i];
-      final rect = Rect.fromPoints(_toPx(Offset(q[0], q[1])), _toPx(Offset(q[2], q[3])));
-      if (rect.contains(p)) {
-        setState(() => sel = i);
-        _drag = 8;
-        return;
-      }
-    }
-  }
-
-  void _onUpdate(Offset delta) {
-    if (_drag < 0) return;
-    final dx = delta.dx / (imgW * _scale), dy = delta.dy / (imgH * _scale);
-    final r = rects[sel];
-    setState(() {
-      if (_drag == 8) {
-        final w = r[2] - r[0], h = r[3] - r[1];
-        final l = _cd(r[0] + dx, 0.0, 1.0 - w), t = _cd(r[1] + dy, 0.0, 1.0 - h);
-        r[0] = l;
-        r[1] = t;
-        r[2] = l + w;
-        r[3] = t + h;
-        return;
-      }
-      if (_drag == 0 || _drag == 6 || _drag == 7) r[0] += dx;
-      if (_drag == 2 || _drag == 3 || _drag == 4) r[2] += dx;
-      if (_drag == 0 || _drag == 1 || _drag == 2) r[1] += dy;
-      if (_drag == 4 || _drag == 5 || _drag == 6) r[3] += dy;
-      r[0] = _cd(r[0], 0.0, r[2] - _minSize);
-      r[2] = _cd(r[2], r[0] + _minSize, 1.0);
-      r[1] = _cd(r[1], 0.0, r[3] - _minSize);
-      r[3] = _cd(r[3], r[1] + _minSize, 1.0);
-    });
-  }
-
-  // زيادة/نقص بخطوة ثابتة (نسبة من أبعاد المستطيل) على الطول أو العرض
-  void _grow({double h = 0, double v = 0}) {
-    final r = rects[sel];
-    final w = r[2] - r[0], ht = r[3] - r[1];
-    if (w + 2 * w * h < _minSize || ht + 2 * ht * v < _minSize) return;
-    setState(() {
-      r[0] = _cd(r[0] - w * h, 0.0, 1.0);
-      r[2] = _cd(r[2] + w * h, 0.0, 1.0);
-      r[1] = _cd(r[1] - ht * v, 0.0, 1.0);
-      r[3] = _cd(r[3] + ht * v, 0.0, 1.0);
-    });
-  }
-
-  void _apply() {
-    final out = [for (final r in rects) List<double>.from(r)]..sort((a, b) => a[0].compareTo(b[0]));
-    saveManualCrop(cropKeyOf(widget.item), out);
-    Navigator.pop(context, true);
-  }
-
-  void _clearManual() {
-    saveManualCrop(cropKeyOf(widget.item), null);
-    Navigator.pop(context, true);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('قص الباتش'),
-        actions: [
-          IconButton(
-            tooltip: tr('زيادة تلقائية لكل الباتشات'),
-            icon: const Icon(Icons.tune),
-            onPressed: () async {
-              if (await showCropPadsDialog(context)) _init(forceAuto: true);
-            },
-          ),
-          IconButton(
-            tooltip: tr('رجوع للقص التلقائي'),
-            icon: const Icon(Icons.auto_fix_high),
-            onPressed: () => _init(forceAuto: true),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: loading
-            ? const Center(child: CircularProgressIndicator())
-            : err != null || viewPath == null
-                ? Center(child: Text(err ?? 'خطأ'))
-                : Column(
-                    children: [
-                      Expanded(
-                        child: LayoutBuilder(
-                          builder: (c, box) {
-                            _scale = math.min(box.maxWidth / imgW, box.maxHeight / imgH);
-                            _ox = (box.maxWidth - imgW * _scale) / 2;
-                            _oy = (box.maxHeight - imgH * _scale) / 2;
-                            return GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onPanStart: (d) => _onStart(d.localPosition),
-                              onPanUpdate: (d) => _onUpdate(d.delta),
-                              onPanEnd: (_) => _drag = -1,
-                              child: Stack(
-                                children: [
-                                  Positioned(
-                                    left: _ox,
-                                    top: _oy,
-                                    width: imgW * _scale,
-                                    height: imgH * _scale,
-                                    child: Image.file(File(viewPath!), fit: BoxFit.fill, gaplessPlayback: true),
-                                  ),
-                                  Positioned.fill(
-                                    child: CustomPaint(
-                                      painter: _CropPainter(rects, sel, _ox, _oy, imgW * _scale, imgH * _scale),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Wrap(
-                              spacing: 6,
-                              runSpacing: 4,
-                              alignment: WrapAlignment.center,
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              children: [
-                                for (var i = 0; i < rects.length; i++)
-                                  if (rects.length > 1)
-                                    ChoiceChip(
-                                      label: Text('باتش ${i + 1}'),
-                                      selected: sel == i,
-                                      onSelected: (_) => setState(() => sel = i),
-                                    ),
-                                IconButton(
-                                  tooltip: tr('إضافة باتش'),
-                                  icon: const Icon(Icons.add_box_outlined),
-                                  onPressed: () => setState(() {
-                                    rects.add(<double>[0.25, 0.25, 0.75, 0.75]);
-                                    sel = rects.length - 1;
-                                  }),
-                                ),
-                                if (rects.length > 1)
-                                  IconButton(
-                                    tooltip: tr('حذف المحدد'),
-                                    icon: const Icon(Icons.delete_outline),
-                                    onPressed: () => setState(() {
-                                      rects.removeAt(sel);
-                                      sel = 0;
-                                    }),
-                                  ),
-                              ],
-                            ),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                OutlinedButton(onPressed: () => _grow(v: 0.03), child: const Text('طول +')),
-                                const SizedBox(width: 6),
-                                OutlinedButton(onPressed: () => _grow(v: -0.03), child: const Text('طول -')),
-                                const SizedBox(width: 6),
-                                OutlinedButton(onPressed: () => _grow(h: 0.03), child: const Text('عرض +')),
-                                const SizedBox(width: 6),
-                                OutlinedButton(onPressed: () => _grow(h: -0.03), child: const Text('عرض -')),
-                              ],
-                            ),
-                            const SizedBox(height: 6),
-                            Row(
-                              children: [
-                                OutlinedButton(onPressed: _clearManual, child: const Text('إلغاء القص اليدوي')),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: FilledButton.icon(
-                                    onPressed: _apply,
-                                    icon: const Icon(Icons.crop),
-                                    label: const Text('تطبيق القص'),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-      ),
-    );
-  }
-}
-
-class _CropPainter extends CustomPainter {
-  final List<List<double>> rects;
-  final int sel;
-  final double ox, oy, w, h;
-  _CropPainter(this.rects, this.sel, this.ox, this.oy, this.w, this.h);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    Rect px(List<double> r) => Rect.fromLTRB(ox + r[0] * w, oy + r[1] * h, ox + r[2] * w, oy + r[3] * h);
-    var hole = Path();
-    for (final r in rects) {
-      hole = Path.combine(PathOperation.union, hole, Path()..addRect(px(r)));
-    }
-    final shade = Path.combine(PathOperation.difference, Path()..addRect(Rect.fromLTWH(ox, oy, w, h)), hole);
-    canvas.drawPath(shade, Paint()..color = Colors.black54);
-    for (var i = 0; i < rects.length; i++) {
-      canvas.drawRect(
-        px(rects[i]),
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = i == sel ? 2.5 : 1.5
-          ..color = i == sel ? Colors.lightGreenAccent : Colors.orangeAccent,
-      );
-    }
-    final r = rects[sel];
-    final cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
-    final pts = [
-      [r[0], r[1]], [cx, r[1]], [r[2], r[1]], [r[2], cy],
-      [r[2], r[3]], [cx, r[3]], [r[0], r[3]], [r[0], cy],
-    ];
-    for (final p in pts) {
-      final o = Offset(ox + p[0] * w, oy + p[1] * h);
-      canvas.drawCircle(o, 9, Paint()..color = Colors.white);
-      canvas.drawCircle(
-        o,
-        9,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2
-          ..color = Colors.lightGreen,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _CropPainter old) => true;
 }
 
 // ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
@@ -5273,77 +4581,54 @@ class ReceiptItem {
     this.missingBatchClosed = false,
   }) : batches = batches ?? <double>[];
 
-  // داخل في الإجماليات والـ PDF؟
-  bool get counts => !skip && !dupSuspect && !userExcluded && !ignoredDoc;
-
   Map<String, dynamic> toJson() => {
-        'path': path,
-        'tid': tid,
-        'orderNum': orderNum,
-        'row': row,
-        'unitName': unitName,
-        'amount': amount,
-        'date': date,
-        'key': key,
-        'ok': ok,
-        'how': how,
-        'batches': batches,
-        'suffix': suffix,
-        'origTid': origTid,
-        'conflict': conflict,
-        'skip': skip,
-        'alt': alt,
-        'dupSuspect': dupSuspect,
-        'userExcluded': userExcluded,
-        'dupDecision': dupDecision,
-        'dupOf': dupOf,
-        'unusual': unusual,
-        'ignoredDoc': ignoredDoc,
-        'ign': ign,
-        'dateOdd': dateOdd,
-        'dateMain': dateMain,
-        'dateFix': dateFix,
-        'txn': txn,
-        'reprintSummary': reprintSummary,
-        'missingBatchClosed': missingBatchClosed,
+        'path': path, 'tid': tid, 'on': orderNum, 'row': row, 'unit': unitName,
+        'amt': amount, 'date': date, 'key': key, 'ok': ok, 'how': how,
+        'bat': batches, 'sfx': suffix, 'otid': origTid, 'conf': conflict, 'skip': skip,
+        'alt': alt, 'dup': dupSuspect, 'ux': userExcluded, 'dd': dupDecision, 'dof': dupOf,
+        'unu': unusual, 'igd': ignoredDoc, 'ign': ign, 'dodd': dateOdd, 'dmain': dateMain,
+        'dfix': dateFix, 'txn': txn, 'rep': reprintSummary, 'nobc': missingBatchClosed,
         'cands': cands,
       };
 
-  static ReceiptItem fromJson(Map<String, dynamic> j) {
-    final r = ReceiptItem(
-      path: (j['path'] ?? '').toString(),
-      tid: j['tid'] as String?,
-      orderNum: (j['orderNum'] as num?)?.toInt(),
-      row: (j['row'] as num?)?.toInt(),
-      unitName: j['unitName'] as String?,
-      amount: ((j['amount'] as num?) ?? 0).toDouble(),
-      date: j['date'] as String?,
-      key: (j['key'] ?? '').toString(),
-      ok: j['ok'] == true,
-      how: (j['how'] ?? 'none').toString(),
-      batches: ((j['batches'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList(),
-      suffix: (j['suffix'] as num?)?.toInt(),
-      origTid: j['origTid'] as String?,
-      conflict: j['conflict'] == true,
-      skip: j['skip'] == true,
-      alt: (j['alt'] as num?)?.toDouble(),
-      dupSuspect: j['dupSuspect'] == true,
-      userExcluded: j['userExcluded'] == true,
-      dupDecision: j['dupDecision'] as String?,
-      dupOf: (j['dupOf'] as num?)?.toInt(),
-      ignoredDoc: j['ignoredDoc'] == true,
-      ign: j['ign'] as String?,
-      dateOdd: j['dateOdd'] == true,
-      reprintSummary: j['reprintSummary'] == true,
-      missingBatchClosed: j['missingBatchClosed'] == true,
+  static ReceiptItem fromJson(Map m) {
+    final it = ReceiptItem(
+      path: (m['path'] as String?) ?? '',
+      tid: m['tid'] as String?,
+      orderNum: (m['on'] as num?)?.toInt(),
+      row: (m['row'] as num?)?.toInt(),
+      unitName: m['unit'] as String?,
+      amount: ((m['amt'] as num?) ?? 0).toDouble(),
+      date: m['date'] as String?,
+      key: (m['key'] as String?) ?? '',
+      ok: m['ok'] == true,
+      how: (m['how'] as String?) ?? 'none',
+      batches: ((m['bat'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList(),
+      suffix: (m['sfx'] as num?)?.toInt(),
+      origTid: m['otid'] as String?,
+      conflict: m['conf'] == true,
+      skip: m['skip'] == true,
+      alt: (m['alt'] as num?)?.toDouble(),
+      dupSuspect: m['dup'] == true,
+      userExcluded: m['ux'] == true,
+      dupDecision: m['dd'] as String?,
+      dupOf: (m['dof'] as num?)?.toInt(),
+      ignoredDoc: m['igd'] == true,
+      ign: m['ign'] as String?,
+      dateOdd: m['dodd'] == true,
+      reprintSummary: m['rep'] == true,
+      missingBatchClosed: m['nobc'] == true,
     );
-    r.unusual = j['unusual'] as String?;
-    r.dateMain = j['dateMain'] as String?;
-    r.dateFix = j['dateFix'] as String?;
-    r.txn = (j['txn'] as num?)?.toInt();
-    r.cands = ((j['cands'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList();
-    return r;
+    it.unusual = m['unu'] as String?;
+    it.dateMain = m['dmain'] as String?;
+    it.dateFix = m['dfix'] as String?;
+    it.txn = (m['txn'] as num?)?.toInt();
+    it.cands = ((m['cands'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList();
+    return it;
   }
+
+  // داخل في الإجماليات والـ PDF؟
+  bool get counts => !skip && !dupSuspect && !userExcluded && !ignoredDoc;
 
   // الماكينة/الوحدة متحددة بطريقة مش مؤكدة (تلقائي / بالاسم فقط)
   bool get weakId =>
@@ -5364,15 +4649,36 @@ class ReceiptItem {
               weakId));
 }
 
-// ───────────────────── حالة قايمة الباتشات (بتفضل محفوظة زي إيصالات الدفع) ─────────────────────
-// بتتمسح بس لما تعمل فحص جديد أو "مسح كل حاجة" من قايمة ⋮ أو "مسح الكل".
+// ───────────────────── نتايج قايمة التقفيل (بتفضل محفوظة حتى لو قفلت التطبيق) ─────────────────────
 final String closingStatePath = '$baseDir/.app_closing.json';
 
-void saveClosingState(Map<String, dynamic> m) {
+// لو true: الإكسيل / الـ PDF مش بيتعملوا لحد ما كل الإيصالات اللي محتاجة مراجعة (باتش غلط، ماكينة أو مبلغ
+// مش متحدد، مشكوك فيه...) تتصحح. غيّر أي واحدة لـ false لو عايز الملف ده يتعمل في كل الأحوال.
+const bool kHoldExcelUntilReviewed = true;
+const bool kHoldPdfUntilReviewed = true;
+
+void saveClosingState({
+  required List<ReceiptItem> items,
+  required List<SysTotal> sys,
+  required List<int> missing,
+  required List<String> warnings,
+  required List<String> excludedPay,
+  required String sourceNote,
+}) {
   try {
-    File(closingStatePath)
-      ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode(m));
+    if (items.isEmpty && sys.isEmpty) return; // ما نمسحش آخر نتيجة محفوظة بقايمة فاضية
+    final tmp = File('$closingStatePath.tmp')..createSync(recursive: true);
+    tmp.writeAsStringSync(jsonEncode({
+      'v': 1,
+      'items': items.map((e) => e.toJson()).toList(),
+      'sys': sys.map((e) => e.toJson()).toList(),
+      'missing': missing,
+      'warnings': warnings,
+      'excludedPay': excludedPay,
+      'sourceNote': sourceNote,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    }));
+    tmp.renameSync(closingStatePath); // كتابة آمنة: لو التطبيق اتقفل في النص الملف القديم يفضل سليم
   } catch (_) {}
 }
 
@@ -5380,8 +4686,7 @@ Map<String, dynamic>? loadClosingState() {
   try {
     final f = File(closingStatePath);
     if (!f.existsSync()) return null;
-    final m = jsonDecode(f.readAsStringSync());
-    return m is Map ? Map<String, dynamic>.from(m) : null;
+    return Map<String, dynamic>.from(jsonDecode(f.readAsStringSync()) as Map);
   } catch (_) {
     return null;
   }
@@ -6223,6 +5528,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _autoTimer;
   Set<String> _quickPend = <String>{}; // ملفات جديدة لسه حجمها بيتغير (التنزيل ما خلصش)
   bool _fullRunning = false; // فحص يدوي كامل شغال أو بيبدأ: الفحص الخفيف يستنى
+  bool reviewHold = false; // الإكسيل/الـ PDF متوقفين لحد ما تخلّص مراجعة الإيصالات
+
+  void _saveClosing({bool force = false}) {
+    if (busy && !force) return;
+    saveClosingState(
+      items: processedItems,
+      sys: sysReads,
+      missing: missingTerminals,
+      warnings: warnings,
+      excludedPay: excludedPay,
+      sourceNote: sourceNote,
+    );
+  }
+
+  // رجوع نتايج آخر فحص بعد فتح التطبيق من جديد (الصور اللي اتمسحت من الجهاز بتتشال)
+  void _restoreClosing() {
+    try {
+      if (processedItems.isNotEmpty || sysReads.isNotEmpty) return;
+      final m = loadClosingState();
+      if (m == null) return;
+      final its = <ReceiptItem>[];
+      for (final e in (m['items'] as List? ?? const [])) {
+        if (e is! Map) continue;
+        final it = ReceiptItem.fromJson(e);
+        if (it.path.isEmpty || !File(it.path).existsSync()) continue;
+        its.add(it);
+      }
+      final sys = <SysTotal>[
+        for (final e in (m['sys'] as List? ?? const []))
+          if (e is Map) SysTotal.fromJson(e)
+      ];
+      if (its.isEmpty && sys.isEmpty) return;
+      processedItems.addAll(its);
+      sysReads.addAll(sys);
+      missingTerminals = [for (final e in (m['missing'] as List? ?? const [])) (e as num).toInt()];
+      warnings.addAll([for (final e in (m['warnings'] as List? ?? const [])) e.toString()]);
+      excludedPay.addAll([for (final e in (m['excludedPay'] as List? ?? const [])) e.toString()]);
+      sourceNote = (m['sourceNote'] as String?) ?? '';
+      reviewHold = (kHoldExcelUntilReviewed || kHoldPdfUntilReviewed) && its.any((e) => e.needsReview);
+      status = 'رجّعت نتايج آخر فحص: ${_countLine()}'
+          '${reviewHold ? '\n⏸️ الإكسيل والـ PDF هيتعملوا أول ما تخلّص مراجعة الإيصالات اللي عليها علامة ⚠️.' : ''}';
+    } catch (_) {}
+  }
 
   @override
   void initState() {
@@ -6248,56 +5596,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
     _restoreClosing();
-  }
-
-  // رجّع نتايج آخر فحص تقفيل (الباتشات + صور السيستم + الملاحظات) لو التطبيق اتقفل واتفتح
-  void _restoreClosing() {
-    final m = loadClosingState();
-    if (m == null) return;
-    try {
-      final items = ((m['items'] as List?) ?? const [])
-          .whereType<Map>()
-          .map((e) => ReceiptItem.fromJson(Map<String, dynamic>.from(e)))
-          .where((r) => r.path.isNotEmpty && File(r.path).existsSync())
-          .toList();
-      if (items.isEmpty) return;
-      processedItems.addAll(items);
-      sysReads.addAll(((m['sys'] as List?) ?? const [])
-          .whereType<Map>()
-          .map((e) => SysTotal.fromJson(Map<String, dynamic>.from(e))));
-      missingTerminals = ((m['missing'] as List?) ?? const []).map((e) => (e as num).toInt()).toList();
-      warnings.addAll(((m['warnings'] as List?) ?? const []).map((e) => e.toString()));
-      excludedPay.addAll(((m['excludedPay'] as List?) ?? const []).map((e) => e.toString()));
-      sourceNote = (m['sourceNote'] ?? '').toString();
-      filesDirty = m['dirty'] == true;
-      String? ex(String? p) => p != null && File(p).existsSync() ? p : null;
-      standardXlsxPath = ex(m['xlsx'] as String?);
-      generatedPdfPath = ex(m['pdf'] as String?);
-      extraPdfPaths = ((m['extraPdf'] as List?) ?? const []).map((e) => e.toString()).where((p) => File(p).existsSync()).toList();
-      final st = (m['status'] ?? '').toString();
-      status = st.isNotEmpty ? st : 'آخر نتيجة محفوظة: ${processedItems.length} إيصال.';
-    } catch (_) {
-      processedItems.clear();
-      sysReads.clear();
-    }
-  }
-
-  // بيحفظ نتايج الفحص على الديسك: بعد كل فحص/تعديل وعند الخروج من التطبيق
-  void _saveClosing() {
-    if (processedItems.isEmpty && sysReads.isEmpty) return;
-    saveClosingState({
-      'items': processedItems.map((e) => e.toJson()).toList(),
-      'sys': sysReads.map((e) => e.toJson()).toList(),
-      'missing': missingTerminals,
-      'warnings': warnings,
-      'excludedPay': excludedPay,
-      'sourceNote': sourceNote,
-      'dirty': filesDirty,
-      'xlsx': standardXlsxPath,
-      'pdf': generatedPdfPath,
-      'extraPdf': extraPdfPaths,
-      'status': status,
-    });
   }
 
   void _syncDays() {
@@ -6326,87 +5624,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       missingTerminals = [];
       warnings.clear();
       excludedPay.clear();
-      filesDirty = false;
       standardXlsxPath = null;
       generatedPdfPath = null;
       extraPdfPaths = [];
       reviewOnly = false;
+      reviewHold = false;
       sourceNote = '';
+      deleteClosingState();
       status = 'تم مسح كل حاجة. اضغط "فحص التقفيل" لبدء يوم جديد.';
     });
   }
 
   // أثناء الفحص: نحدّث الشاشة بس (الملفات بتتبني في آخر المعالجة). بعد الفحص: إعادة بناء الإكسيل والـ PDF
-  // بعد أي تعديل: بنحدّث الأرقام والتقرير بس (فحص خفيف) من غير بناء الـ PDF والإكسيل.
-  // الملفات بتتبني لما تضغط زرار "إعادة بناء الـ PDF والإكسيل" في الشاشة الرئيسية.
-  bool filesDirty = false;
   Future<void> _refresh() async {
-    filesDirty = true;
     if (busy) {
       if (mounted) setState(() {});
     } else {
-      await _guardedRebuild();
+      await rebuildFiles();
     }
-  }
-
-  // بناء الملفات مرة واحدة في الوقت: لو اتطلب بناء وفيه بناء شغال، بيستنى وبعدين بيتعمل تاني بآخر التعديلات
-  Future<void>? _rebuildFut;
-  bool _rebuildAgain = false;
-  bool _wantFull = false; // true = ابني الـ PDF والإكسيل فعلاً، false = تحديث خفيف للأرقام بس
-  Future<void> _guardedRebuild({bool full = false}) {
-    if (full) _wantFull = true;
-    if (_rebuildFut != null) {
-      _rebuildAgain = true;
-      return _rebuildFut!;
-    }
-    final f = () async {
-      try {
-        do {
-          _rebuildAgain = false;
-          final doFull = _wantFull;
-          _wantFull = false;
-          await rebuildFiles(lite: !doFull);
-        } while (_rebuildAgain);
-      } finally {
-        _rebuildFut = null;
-      }
-    }();
-    _rebuildFut = f;
-    return f;
-  }
-
-  // زرار "إعادة بناء الـ PDF" في شاشة المراجعة: بيبني الإكسيل والـ PDF دلوقتي بآخر القص والتدوير. بيرجّع true لو الـ PDF اتبنى
-  Future<bool> rebuildNow() async {
-    if (busy) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('في فحص شغال دلوقتي، استنى لما يخلص وجرّب تاني.')),
-        );
-      }
-      return false;
-    }
-    try {
-      await _guardedRebuild(full: true);
-    } catch (_) {
-      return false;
-    }
-    final p = generatedPdfPath;
-    return p != null && File(p).existsSync();
-  }
-
-  // زرار "إعادة بناء الـ PDF والإكسيل" في الشاشة الرئيسية (بعد ما تخلّص الفحص والتعديلات)
-  Future<void> rebuildFromButton() async {
-    final ok = await rebuildNow();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(ok
-          ? _l(context, 'اتبنى الـ PDF والإكسيل بآخر التعديلات.', 'PDF and Excel rebuilt with the latest edits.')
-          : _l(context, 'مقدرتش أبني الملفات، جرّب تاني.', 'Could not rebuild the files, try again.')),
-      action: ok
-          ? SnackBarAction(label: _l(context, 'افتح PDF', 'Open PDF'), onPressed: () => openFile(latestOutput('.pdf'), 'application/pdf'))
-          : SnackBarAction(label: _l(context, 'إعادة', 'Retry'), onPressed: rebuildFromButton),
-    ));
   }
 
   Future<void> _onSwipe(ReceiptItem it, bool approve) async {
@@ -6453,6 +5688,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } else {
         it.userExcluded = true;
         it.ok = false;
+        if (it.ignoredDoc) {
+          // سحب صورة متجاهلة لـ "غلط" = تجاهلها نهائي (علشان ما تفضلش مانعة الإكسيل)
+          it.ignoredDoc = false;
+          it.ign = 'drop';
+        }
         saveFix(it);
         await _refresh();
       }
@@ -6496,7 +5736,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
-    if (state != AppLifecycleState.resumed && !busy) _saveClosing();
+    // التطبيق رايح للخلفية / بيتقفل: نحفظ نتايج التقفيل الحالية
+    if (state != AppLifecycleState.resumed) _saveClosing();
     // رجعت للتطبيق: نعرض هل المراقبة كانت شغالة وانت برا (تشخيص)
     if (state == AppLifecycleState.resumed && autoScan && !busy && _lastTickAt != null && mounted) {
       final ago = DateTime.now().difference(_lastTickAt!).inSeconds;
@@ -6508,7 +5749,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    if (!busy) _saveClosing();
     _autoTimer?.cancel();
     homeRunG = null;
     homeSumG = null;
@@ -6935,7 +6175,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final files = <XFile>[if (x != null) XFile(x), if (p != null) XFile(p)];
     if (files.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('لم يتم إنشاء ملفات بعد لمشاركتها.')),
+        SnackBar(
+            content: Text(reviewHold
+                ? 'خلّص مراجعة الإيصالات اللي عليها ⚠️ الأول، وبعدها الإكسيل والـ PDF هيتعملوا.'
+                : 'لم يتم إنشاء ملفات بعد لمشاركتها.')),
       );
       return;
     }
@@ -6948,6 +6191,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // أحدث ملف إخراج (إكسيل/PDF): من آخر معالجة، أو آخر ملف "الاسكندريه ..." في فولدر الإخراج
   String? latestOutput(String ext) {
+    // لسه فيه إيصالات محتاجة مراجعة: ما نعرضش ملف قديم ممكن يكون إجمالياته غلط
+    if (reviewHold && (ext == '.xlsx' ? kHoldExcelUntilReviewed : kHoldPdfUntilReviewed)) return null;
     final cur = ext == '.xlsx' ? standardXlsxPath : generatedPdfPath;
     if (cur != null && File(cur).existsSync()) return cur;
     try {
@@ -7061,10 +6306,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       sysReads.clear();
       missingTerminals = [];
       warnings.clear();
-      filesDirty = false;
       standardXlsxPath = null;
       generatedPdfPath = null;
       extraPdfPaths = [];
+      reviewHold = false;
       status = 'تم مسح $n ملف.';
     });
   }
@@ -7079,17 +6324,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final changed = await Navigator.push<bool>(
       context,
-      MaterialPageRoute(
-          builder: (_) => ReviewPage(
-              items: list,
-              allItems: processedItems,
-              )),
+      MaterialPageRoute(builder: (_) => ReviewPage(items: list, allItems: processedItems)),
     );
     if (changed == true) {
       await _refresh();
     } else if (mounted) {
       setState(() {});
-      _saveClosing();
     }
   }
 
@@ -7111,19 +6351,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       context,
       MaterialPageRoute(
         builder: (_) => ReviewPage(
-            items: list,
-            allItems: processedItems,
-            single: true,
-            initialIndex: at,
-            sysLineOf: _sysLineOf,
-            ),
+            items: list, allItems: processedItems, single: true, initialIndex: at, sysLineOf: _sysLineOf),
       ),
     );
     if (changed == true) {
       await _refresh();
     } else if (mounted) {
       setState(() {});
-      _saveClosing();
     }
   }
 
@@ -7326,7 +6560,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     // الفحص الخفيف: نفس الحسابات (الناقص + التقرير + غير المعتاد) من غير بناء الـ PDF ولا الإكسيل
     if (lite) {
-      filesDirty = true;
       final ignoreL = <int>{};
       try {
         for (final m in RegExp(r'\d+').allMatches(File('$baseDir/ignore.txt').readAsStringSync())) {
@@ -7339,12 +6572,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           if (!foundL.contains(i) && !ignoreL.contains(i)) i
       ];
       writeReport(reportDate);
+      reviewHold = processedItems.any((e) => e.needsReview) && (kHoldExcelUntilReviewed || kHoldPdfUntilReviewed);
+      _saveClosing(force: true);
       setState(() => status = 'تم فحص خفيف: ${_countLine()}\n'
-          '• الإكسيل والـ PDF لسه متبنوش بآخر التعديلات: اضغط "إعادة بناء الـ PDF والإكسيل" لما تخلّص.' +
+          '• من غير بناء الإكسيل والـ PDF (اضغط "فحص التقفيل" لبنائهم).' +
           (sourceNote.isEmpty ? '' : '\n$sourceNote'));
-      _saveClosing();
       return;
     }
+    // الإكسيل والـ PDF مبيتعملوش لحد ما كل الإيصالات اللي محتاجة مراجعة تتصحح
+    // (باتش غلط / ماكينة أو مبلغ مش متحدد / مكرر مشكوك فيه / تاريخ مختلف...)
+    final pendingRv = processedItems.where((e) => e.needsReview).toList();
+    final holdXlsx = kHoldExcelUntilReviewed && pendingRv.isNotEmpty;
+    final holdPdf = kHoldPdfUntilReviewed && pendingRv.isNotEmpty;
+    reviewHold = holdXlsx || holdPdf;
     var pageNo = 0;
     Future<bool> buildPdf(List<ReceiptItem> items, File out) async {
       final pdf = pw.Document();
@@ -7356,7 +6596,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
         var srcs = <String>[];
         try {
-          srcs = await scanReceiptAsync(r.path, cropKey: cropKeyOf(r));
+          srcs = await scanReceiptAsync(r.path);
         } catch (_) {}
         if (srcs.isEmpty) srcs = <String>[r.path];
         // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
@@ -7443,12 +6683,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     final pdfOutFile = File('$outputDir/الاسكندريه $reportDate.pdf');
-    await buildPdf(mainItems, pdfOutFile);
-    generatedPdfPath = pdfOutFile.path;
     extraPdfPaths = [];
-    for (final e in otherByDate.entries) {
-      final f = File('$outputDir/الاسكندريه ${e.key}.pdf');
-      if (await buildPdf(e.value, f)) extraPdfPaths.add(f.path);
+    if (holdPdf) {
+      generatedPdfPath = null;
+    } else {
+      await buildPdf(mainItems, pdfOutFile);
+      generatedPdfPath = pdfOutFile.path;
+      for (final e in otherByDate.entries) {
+        final f = File('$outputDir/الاسكندريه ${e.key}.pdf');
+        if (await buildPdf(e.value, f)) extraPdfPaths.add(f.path);
+      }
     }
 
     // حساب إجماليات كل وحدة
@@ -7471,8 +6715,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // الإكسيل: نفس القالب بالظبط، بنكتب بس عمود C (عدد الأجهزة) و D (مبلغ كل وحدة) و F (الإجمالي)
     var xlsxLine = '• تم توليد الإكسيل: الاسكندريه $reportDate.xlsx';
     standardXlsxPath = null;
-    final tpl = await loadTemplateBytes();
-    if (tpl == null) {
+    final tpl = holdXlsx ? null : await loadTemplateBytes();
+    if (holdXlsx) {
+      xlsxLine = '• ⏸️ الإكسيل لسه ما اتعملش.';
+    } else if (tpl == null) {
       xlsxLine = '⚠️ قالب "الاسكندريه 00.xlsx" مش موجود في فولدر all (ولا مضاف للتطبيق)، فمتعملش إكسيل.';
     } else {
       try {
@@ -7499,16 +6745,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (!foundOrders.contains(i) && !ignore.contains(i)) i
     ];
     writeReport(reportDate);
-    filesDirty = false;
+    _saveClosing(force: true);
+
+    final noMachine = pendingRv.where((e) => !e.ignoredDoc && (e.row == null || e.orderNum == null)).length;
+    final noAmount = pendingRv.where((e) => !e.ignoredDoc && e.amount <= 0).length;
+    final holdLine = (holdXlsx || holdPdf)
+        ? '\n⏸️ لسه ${pendingRv.length} إيصال محتاج مراجعة'
+            '${noMachine > 0 ? ' ($noMachine من غير ماكينة محددة)' : ''}'
+            '${noAmount > 0 ? ' ($noAmount من غير مبلغ مقروء)' : ''}'
+            ' - الإكسيل والـ PDF هيتعملوا تلقائي أول ما تخلّصهم.'
+        : '';
 
     setState(() => status = 'اكتمل العد: ${_countLine()}\n'
         '$xlsxLine\n'
-        '• تم توليد ملف الـ PDF المجمع.' +
+        '${holdPdf ? '• ⏸️ الـ PDF لسه ما اتعملش.' : '• تم توليد ملف الـ PDF المجمع.'}$holdLine' +
         (extraPdfPaths.isEmpty
             ? ''
             : '\n• فيه إيصالات بتواريخ تانية (${otherByDate.keys.join(' ، ')}): اتعمل لها PDF منفصل لكل يوم، ومش داخلة في إجماليات يوم $reportDate.') +
         (sourceNote.isEmpty ? '' : '\n$sourceNote'));
-    _saveClosing();
   }
 
   // مبلغ السيستم الخاص بترمنل الباتش ده (أحدث صورة لنفس الترمنل وتاريخ الباتش)
@@ -7665,11 +6919,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             padding: const EdgeInsets.only(top: 4),
             child: _flagChip(context, sl.text, sl.ok ? Colors.green : Colors.red),
           ),
-        if (sl?.cnt != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: _flagChip(context, sl!.cnt!, sl.cntTone ?? Colors.blue),
-          ),
         _warnChips(item),
       ],
     );
@@ -7682,35 +6931,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final diff = _sysDiffOf(item);
     if (sys == null || sys.amount == null || diff == null) return null;
     final head = '🖥️ ${_l(context, 'السيستم', 'System')}: ${_fmtMoney(sys.amount!)} ج.م';
-    // عدد معاملات السيستم (إيصالات إلكترونية) + مقارنته بمجموع معاملات باتشات الماكينة
-    String cnt;
-    MaterialColor cntTone;
-    final bt = item.orderNum == null ? null : batchTxnByNum[item.orderNum!];
-    if (sys.txn != null) {
-      cnt = '🧾 ${_l(context, 'معاملات السيستم', 'System transactions')}: ${sys.txn}';
-      if (bt == null) {
-        cntTone = Colors.blue;
-      } else if (bt == sys.txn) {
-        cnt += ' ✓ ${_l(context, 'مطابق للباتش', 'Matches batch')}';
-        cntTone = Colors.green;
-      } else {
-        cnt += ' | ${_l(context, 'الباتش', 'Batch')}: $bt';
-        cntTone = kReviewTone;
-      }
-    } else {
-      cnt = '🧾 ${_l(context, 'معاملات السيستم: مش مقروءة - راجع الصورة', 'System transactions: unreadable - check the image')}';
-      cntTone = Colors.amber;
-    }
-    if (diff == 0) {
-      return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true, cnt: cnt, cntTone: cntTone);
-    }
+    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true);
     return SysLine(
         '$head | ${_l(context, 'فرق', 'Gap')}: '
         '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
         '${diff.abs().toStringAsFixed(2)} ج.م',
-        false,
-        cnt: cnt,
-        cntTone: cntTone);
+        false);
   }
 
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
@@ -8129,7 +7355,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           var hit = true;
           if (ignPre == 'keep' && kind != 'receipt') hit = false;
           if (kind == 'none' && autoRotate && ce['ar'] != true) hit = false;
-          if (kind == 'console' && ce['cv'] != 2) hit = false; // قراءة الأعداد اتحسنت: نعيد قراءة صور السيستم القديمة
           if (hit && kind == 'receipt') {
             final ct = ce['tid'];
             if (ct is String && !terminals.containsKey(ct)) hit = false;
@@ -8187,16 +7412,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
         // صورة السيستم (A2R Operations Console): مش باتش، بناخد منها الترمنل والإجمالي بس
         if (ign != 'keep') {
-          var sp = parseSysConsole(res.text, baseName(f.path), rt: res);
-          // صورة بعيدة/مايلة: قراءة ناقصة (ترمنل/مبلغ/أعداد) → قراءة تانية على صورة مقصوصة ومكبّرة
-          if (_looksLikeSys(res.text) &&
-              (sp == null || sp.tid == null || sp.amount == null || sp.txn == null)) {
-            if (mounted) setState(() => status = 'فحص OCR: ${i + 1} من ${todo.length} (صورة سيستم - قراءة تانية)');
-            sp = await _sysSecondPass(recognizer, f.path, tmpDir, baseName(f.path), res, sp);
-          }
+          final sp = parseSysConsole(res.text, baseName(f.path), rt: res);
           if (sp != null) {
             sysReads.add(sp);
-            _cachePut(fkey, {'k': 'console', ...sp.toJson(), 'cv': 2});
+            _cachePut(fkey, {'k': 'console', ...sp.toJson()});
             if (!mounted) return;
             setState(() {
               progress = ((i + 1) / todo.length) * 0.5;
@@ -8647,25 +7866,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 6),
           _statsRow(),
           const SizedBox(height: 6),
-          if (processedItems.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: SizedBox(
-                width: double.infinity,
-                child: filesDirty
-                    ? FilledButton.icon(
-                        onPressed: busy ? null : rebuildFromButton,
-                        icon: const Icon(Icons.autorenew),
-                        label: Text(_l(context, 'إعادة بناء الـ PDF والإكسيل (فيه تعديلات)',
-                            'Rebuild PDF & Excel (edits pending)')),
-                      )
-                    : OutlinedButton.icon(
-                        onPressed: busy ? null : rebuildFromButton,
-                        icon: const Icon(Icons.autorenew),
-                        label: Text(_l(context, 'إعادة بناء الـ PDF والإكسيل', 'Rebuild PDF & Excel')),
-                      ),
-              ),
-            ),
           _actionRow([
             _quickBtn(Icons.insights, _l(context, 'التقرير', 'Report'),
                 processedItems.isEmpty && sysReads.isEmpty ? null : openClosingReport),
@@ -8788,10 +7988,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 if (item.ign == 'drop') {
                                   keepIgnored(item);
                                   setState(() {});
-                                  _saveClosing();
+                                  _saveClosing(force: true);
                                 } else {
                                   keepAsExtraBatch(item, processedItems);
-                                  await _refresh();
+                                  await rebuildFiles();
                                 }
                               },
                       ),
@@ -9209,9 +8409,7 @@ class ReceiptZoomPage extends StatelessWidget {
 class SysLine {
   final String text;
   final bool ok;
-  final String? cnt; // سطر عدد معاملات السيستم (إيصالات إلكترونية)
-  final MaterialColor? cntTone;
-  const SysLine(this.text, this.ok, {this.cnt, this.cntTone});
+  const SysLine(this.text, this.ok);
 }
 
 class ReviewPage extends StatefulWidget {
@@ -9380,24 +8578,8 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
-  // قص يدوي للباتش (زي الكروب): بيتحفظ وبيتطبق في الـ PDF عند إعادة البناء
-  Future<void> openCrop() async {
-    final ok = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => CropPage(item: item)),
-    );
-    if (ok == true) {
-      changed = true;
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(_l(context, 'اتحفظ القص. هيتطبق على الـ PDF لما تضغط "إعادة بناء الـ PDF والإكسيل" في الشاشة الرئيسية.', 'Crop saved. It is applied to the PDF when you tap "Rebuild PDF & Excel" on the main screen.'))),
-      );
-    }
-  }
-
   Future<void> rotate() async {
     try {
-      saveManualCrop(cropKeyOf(item), null); // التدوير بيغيّر الاتجاه، فالقص اليدوي القديم مبقاش مظبوط
       await fixImageAsync(item.path, item.path, 90);
       await FileImage(File(item.path)).evict();
       imageCache.clear();
@@ -9438,12 +8620,6 @@ class _ReviewPageState extends State<ReviewPage> {
                 fontSize: 13,
                 fontWeight: FontWeight.bold,
                 color: _tintFg(context, sl.ok ? Colors.green : Colors.red))),
-      if (sl?.cnt != null)
-        Text(sl!.cnt!,
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-                color: _tintFg(context, sl.cntTone ?? Colors.blue))),
       if (good && sl == null)
         Text(_l(context, '✅ مفيش مشاكل', '✅ No problems'),
             style: TextStyle(color: _tintFg(context, Colors.green), fontSize: 13)),
@@ -9496,15 +8672,6 @@ class _ReviewPageState extends State<ReviewPage> {
                   },
                 ),
               ),
-            ),
-          ),
-          Positioned(
-            top: 4,
-            left: 52,
-            child: IconButton.filledTonal(
-              tooltip: tr('قص الباتش'),
-              icon: const Icon(Icons.crop),
-              onPressed: openCrop,
             ),
           ),
           Positioned(
@@ -9765,12 +8932,6 @@ class _ReviewPageState extends State<ReviewPage> {
                 onPressed: rotate,
                 icon: const Icon(Icons.rotate_right),
                 label: const Text('تدوير'),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton.icon(
-                onPressed: openCrop,
-                icon: const Icon(Icons.crop),
-                label: const Text('قص'),
               ),
               const SizedBox(width: 8),
               Expanded(
