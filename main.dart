@@ -1104,47 +1104,223 @@ class SysTotal {
       );
 }
 
-// أعداد صورة السيستم من مواقع الأسطر (الـ OCR لاتيني فبيقرا الأرقام بس، والعناوين العربي مش مقروءة).
+// أعداد صورة السيستم من مواقع الكلمات (الـ OCR لاتيني فبيقرا الأرقام بس، والعناوين العربي مش مقروءة).
 // الترتيب من فوق لتحت بعد سطر التاريخ وقبل سطر المبلغ: إجمالي العمليات، إيصالات إلكترونية، يدوية، ملغية.
-// بترجع [إجمالي العمليات، الإلكترونية] أو [null, null] لو مش متأكدين.
-List<int?> _sysCounts(RecognizedText rt) {
+// v60-lite: القراءة بقت بالكلمات (مش بالسطور) + تصحيح O/I/l + دمج الصفوف + فحص إن الأرقام منطقية
+// (إجمالي = إلكترونية + يدوية [+ ملغية]). لو مش منطقية بنرجّع "مش متأكد" وبنعيد القراءة على صورة مقصوصة ومكبّرة.
+class _SysCnt {
+  final List<int> rows; // القيم المقروءة من فوق لتحت
+  final int? total, elec;
+  final bool sure; // الأرقام متسقة مع بعض
+  const _SysCnt(this.rows, this.total, this.elec, this.sure);
+}
+
+int? _sysTokenInt(String raw) {
+  var t = raw.trim().replaceAll(RegExp(r'^[^0-9A-Za-z|\u0660-\u0669\u06F0-\u06F9]+|[^0-9A-Za-z|\u0660-\u0669\u06F0-\u06F9]+$'), '');
+  if (t.isEmpty || t.length > 5) return null;
+  const ar = '٠١٢٣٤٥٦٧٨٩';
+  const fa = '۰۱۲۳۴۵۶۷۸۹';
+  final b = StringBuffer();
+  for (final ch in t.split('')) {
+    final ia = ar.indexOf(ch), ifa = fa.indexOf(ch);
+    if (ia >= 0) {
+      b.write(ia);
+    } else if (ifa >= 0) {
+      b.write(ifa);
+    } else if ('OoQD'.contains(ch)) {
+      b.write('0');
+    } else if ('Il|'.contains(ch)) {
+      b.write('1');
+    } else if (ch == 'S') {
+      b.write('5');
+    } else if (ch == 'B') {
+      b.write('8');
+    } else if (RegExp(r'\d').hasMatch(ch)) {
+      b.write(ch);
+    } else {
+      return null;
+    }
+  }
+  return int.tryParse(b.toString());
+}
+
+_SysCnt _sysCountsDetail(RecognizedText rt) {
+  const none = _SysCnt(<int>[], null, null, false);
   final lines = <TextLine>[for (final b in rt.blocks) ...b.lines];
+  if (lines.isEmpty) return none;
   final egpRe = RegExp(r'\d[.,]\d{2}\s*EG[PR]', caseSensitive: false);
+  final egpRe2 = RegExp(r'EG[PR]\b', caseSensitive: false);
   double? egpTop;
-  for (final l in lines) {
-    if (egpRe.hasMatch(l.text)) {
-      final t = l.boundingBox.top;
-      if (egpTop == null || t < egpTop) egpTop = t;
+  for (final re in [egpRe, egpRe2]) {
+    for (final l in lines) {
+      if (re.hasMatch(l.text)) {
+        final t = l.boundingBox.top;
+        if (egpTop == null || t < egpTop) egpTop = t;
+      }
     }
+    if (egpTop != null) break;
   }
-  if (egpTop == null) return [null, null];
+  if (egpTop == null) return none;
+  final hs = <double>[for (final l in lines) l.boundingBox.height]..sort();
+  final medH = hs[hs.length ~/ 2];
   final dateRe = RegExp(r'\d{1,2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?20\d{2}');
-  double? dateBottom;
+  double? dateCy;
   for (final l in lines) {
-    if (dateRe.hasMatch(l.text) && l.boundingBox.top < egpTop) {
-      final b = l.boundingBox.bottom;
-      if (dateBottom == null || b < dateBottom) dateBottom = b;
+    final cy = (l.boundingBox.top + l.boundingBox.bottom) / 2;
+    if (dateRe.hasMatch(l.text) && cy < egpTop) {
+      if (dateCy == null || cy < dateCy) dateCy = cy;
     }
   }
-  final numRe = RegExp(r'^[^A-Za-z\d]{0,3}(\d{1,5})[^A-Za-z\d]{0,3}$');
-  final nums = <MapEntry<double, int>>[];
+  // مرشّحين: (cy, cx, قيمة)
+  final cands = <List<double>>[];
   for (final l in lines) {
-    final m = numRe.firstMatch(l.text.trim());
-    if (m == null) continue;
-    if (l.boundingBox.bottom > egpTop + 4) continue;
-    if (dateBottom != null && l.boundingBox.top < dateBottom - 4) continue;
-    nums.add(MapEntry(l.boundingBox.top, int.parse(m.group(1)!)));
+    final bb = l.boundingBox;
+    final cy = (bb.top + bb.bottom) / 2;
+    if (cy >= egpTop - medH * 0.2) continue;
+    if (dateCy != null && cy <= dateCy + medH * 0.4) continue;
+    final els = l.elements.isNotEmpty ? l.elements : <TextElement>[];
+    if (els.isEmpty) {
+      final v = _sysTokenInt(l.text);
+      if (v != null) cands.add([cy, (bb.left + bb.right) / 2, v.toDouble()]);
+      continue;
+    }
+    for (final e in els) {
+      final v = _sysTokenInt(e.text);
+      if (v == null) continue;
+      final eb = e.boundingBox;
+      cands.add([(eb.top + eb.bottom) / 2, (eb.left + eb.right) / 2, v.toDouble()]);
+    }
   }
-  nums.sort((a, b) => a.key.compareTo(b.key));
-  if (nums.length < 2) return [null, null];
-  final total = nums[0].value, elec = nums[1].value;
-  if (elec > total) return [null, null];
-  return [total, elec];
+  if (cands.isEmpty) return none;
+  cands.sort((a, b) => a[0].compareTo(b[0]));
+  // دمج اللي في نفس الصف (الأقرب للشمال = القيمة؛ العنوان العربي على اليمين)
+  final rows = <List<double>>[];
+  for (final c in cands) {
+    if (rows.isNotEmpty && (c[0] - rows.last[0]).abs() < medH * 0.6) {
+      if (c[1] < rows.last[1]) rows[rows.length - 1] = c;
+    } else {
+      rows.add(c);
+    }
+  }
+  final v = <int>[for (final r in rows) r[2].toInt()];
+  if (v.length < 2) return _SysCnt(v, null, null, false);
+  // 4 قيم أو أكتر: دوّر على نافذة منطقية
+  if (v.length >= 4) {
+    for (var i = 0; i + 4 <= v.length; i++) {
+      final t = v[i], e = v[i + 1], m = v[i + 2], c = v[i + 3];
+      if (t >= e && (t == e + m || t == e + m + c)) return _SysCnt(v.sublist(i, i + 4), t, e, true);
+    }
+    return _SysCnt(v.sublist(0, 4), v[0] >= v[1] ? v[0] : null, v[0] >= v[1] ? v[1] : null, false);
+  }
+  final t = v[0], e = v[1];
+  if (e > t) return _SysCnt(v, null, null, false);
+  if (v.length == 3) return _SysCnt(v, t, e, t == e + v[2]);
+  return _SysCnt(v, t, e, t == e); // قيمتين بس: متأكدين لو متساويين (يدوي/ملغي = 0 ومش مقروء)
+}
+
+// قراءات متعددة لنفس الصورة: نختار عدد متأكد منه، أو عدد اتكرر في قراءتين
+List<int>? _pickSysCounts(List<_SysCnt> reads) {
+  final sure = reads.where((r) => r.sure && r.total != null && r.elec != null).toList();
+  if (sure.isNotEmpty) return [sure.last.total!, sure.last.elec!];
+  final seen = <String, int>{};
+  for (final r in reads) {
+    if (r.total == null || r.elec == null || r.rows.length < 4) continue;
+    seen['${r.total}|${r.elec}'] = (seen['${r.total}|${r.elec}'] ?? 0) + 1;
+  }
+  for (final e in seen.entries) {
+    if (e.value >= 2) {
+      final p = e.key.split('|');
+      return [int.parse(p[0]), int.parse(p[1])];
+    }
+  }
+  return null;
+}
+
+// شكل صورة السيستم (حتى لو الترمنل أو الأعداد مش مقروءة): مش باتش أبداً
+bool _looksLikeSys(String text) {
+  final up = text.toUpperCase();
+  if (RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER|CONSOLE\s*V\d|V\d{2,3}\s*-\s*LITE').hasMatch(up)) return true;
+  final hasPrinted = RegExp(r'PRINTED\W{0,3}\s*20\d{2}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}').hasMatch(up);
+  final hasEgp = RegExp(r'\d[.,]\d{2}\s*EG[PR]').hasMatch(up);
+  return hasPrinted && hasEgp && classifyReceipt(text) == 'other';
+}
+
+// قص الصورة على مكان النص + تكبير وتحسين (للصور البعيدة: الشاشة صغيرة جوه الصورة)
+void _cropEnhance(String src, String dst, double l, double t, double r, double b) {
+  var im = img.decodeImage(File(src).readAsBytesSync());
+  if (im == null) throw Exception('decode failed');
+  im = img.bakeOrientation(im);
+  final padX = ((r - l) * 0.10).round() + 8;
+  final padY = ((b - t) * 0.04).round() + 8;
+  final x0 = math.max(0, l.round() - padX);
+  final y0 = math.max(0, t.round() - padY);
+  final x1 = math.min(im.width, r.round() + padX);
+  final y1 = math.min(im.height, b.round() + padY);
+  if (x1 - x0 < 40 || y1 - y0 < 40) throw Exception('crop too small');
+  var c = img.copyCrop(im, x: x0, y: y0, width: x1 - x0, height: y1 - y0);
+  c = img.grayscale(c);
+  c = img.adjustColor(c, contrast: 1.5);
+  if (c.width < 1400) {
+    c = img.copyResize(c, width: 1400, interpolation: img.Interpolation.cubic);
+  }
+  File(dst).writeAsBytesSync(img.encodeJpg(c, quality: 95));
+}
+
+// قراءة تانية لصورة السيستم لما الأولى ناقصة (صورة بعيدة/مايلة): قص + تكبير، وبعدها صورة محسّنة كاملة.
+// بترجع SysTotal مدموج، أو SysTotal فاضي (من غير ترمنل) لو الصورة سيستم أكيد بس مش مقروءة، علشان ما تتحسبش باتش.
+Future<SysTotal?> _sysSecondPass(
+    TextRecognizer rec, String path, String tmpDir, String name, RecognizedText first, SysTotal? sp) async {
+  final reads = <_SysCnt>[_sysCountsDetail(first)];
+  var tid = sp?.tid, amount = sp?.amount, date = sp?.date;
+  var printed = sp?.printed ?? '';
+  bool done() => tid != null && amount != null && _pickSysCounts(reads) != null;
+
+  void absorb(RecognizedText r2) {
+    final s2 = parseSysConsole(r2.text, name, rt: r2);
+    if (s2 != null) {
+      tid ??= s2.tid;
+      amount ??= s2.amount;
+      date ??= s2.date;
+      if (printed.isEmpty) printed = s2.printed;
+    }
+    reads.add(_sysCountsDetail(r2));
+  }
+
+  if (!done()) {
+    try {
+      double l = 1e9, t = 1e9, r = 0, b = 0;
+      for (final bl in first.blocks) {
+        final bb = bl.boundingBox;
+        l = math.min(l, bb.left);
+        t = math.min(t, bb.top);
+        r = math.max(r, bb.right);
+        b = math.max(b, bb.bottom);
+      }
+      if (r > l && b > t) {
+        final cp = '$tmpDir/sys_crop.jpg';
+        await Isolate.run(() => _cropEnhance(path, cp, l, t, r, b));
+        absorb(await rec.processImage(InputImage.fromFilePath(cp)));
+      }
+    } catch (_) {}
+  }
+  if (!done()) {
+    try {
+      final ep = '$tmpDir/sys_enh.jpg';
+      await enhanceImageAsync(path, ep);
+      absorb(await rec.processImage(InputImage.fromFilePath(ep)));
+    } catch (_) {}
+  }
+  final pc = _pickSysCounts(reads);
+  if (tid == null && amount == null && pc == null && sp == null) {
+    // شكلها سيستم لكن مفيش بيانات: نتجاهلها كصورة سيستم (مش باتش) علشان المستخدم يراجعها
+    return SysTotal(null, null, date, printed, name);
+  }
+  return SysTotal(tid, amount, date, printed, name, txn: pc?[1], txnAll: pc?[0]);
 }
 
 SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
   final up = text.toUpperCase();
-  final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER').hasMatch(up);
+  final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER|CONSOLE\s*V\d|V\d{2,3}\s*-\s*LITE').hasMatch(up);
   final printedM = RegExp(
           r'PRINTED\W{0,3}\s*(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?',
           caseSensitive: false)
@@ -1163,8 +1339,11 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
   }
   String? tid = findTerminalIn([text]);
   tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
-  // إيصال السيستم لازم فيه رقم ترمنل (أي ترمنل). من غيره مش إيصال سيستم. رقم إصدار البرنامج (v60 / v51...) ملوش علاقة
-  if (tid == null) return null;
+  // الصور البعيدة: رقم الترمنل ممكن يتقرا غلط بحرف/رقم → نقارنه بالماكينات المعروفة بفرق رقم واحد
+  tid ??= findTerminalFuzzyIn([text], null);
+  // العنوان واضح (A2R Operations Console) والمبلغ/الطباعة مقروءين لكن الترمنل لأ: لسه صورة سيستم ومش باتش
+  // (بتتسجل من غير ترمنل: مش بتتربط بماكينة، لكن مش بتتحسب باتش)
+  if (tid == null && !(hasTitle && (amount != null || printedM != null))) return null;
 
   String? date;
   final dm = RegExp(r'(?<!\d)(\d{1,2})\s?[.\-/]\s?(\d{1,2})\s?[.\-/]\s?(20\d{2})(?!\d)').firstMatch(text);
@@ -1179,8 +1358,9 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
     final tt = t == null ? '' : t.split(':').map((e) => e.padLeft(2, '0')).join(':');
     printed = '${printedM.group(1)}-${printedM.group(2)!.padLeft(2, '0')}-${printedM.group(3)!.padLeft(2, '0')} $tt';
   }
-  final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
-  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1]);
+  final cd = rt == null ? null : _sysCountsDetail(rt);
+  final okCnt = cd != null && cd.sure;
+  return SysTotal(tid, amount, date, printed, file, txnAll: okCnt ? cd.total : null, txn: okCnt ? cd.elec : null);
 }
 
 String _fmtMoney(double v) {
@@ -3999,7 +4179,7 @@ List<double> _extendForCaption(img.Image im, List<double> q) {
 }
 
 // بتشتغل في Isolate. بترجّع مسارات الصفحات (صفحة لكل باتش). فاضي = استخدم الصورة الأصلية.
-List<String> _scanToPages(String src, String base) {
+List<String> _scanToPages(String src, String base, double padV, double padH) {
   final cached = <String>[];
   var ci = 0;
   while (File('${base}_$ci.jpg').existsSync()) {
@@ -4017,7 +4197,7 @@ List<String> _scanToPages(String src, String base) {
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
       if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
       for (final q0 in quads) {
-        final q = _extendForCaption(im, q0);
+        final q = _padQuad(im, _extendForCaption(im, q0), padV, padH);
         final o = _warpAndEnhance(im, q);
         if (o == null) continue;
         final p = '${base}_${out.length}.jpg';
@@ -4034,16 +4214,528 @@ List<String> _scanToPages(String src, String base) {
   return out;
 }
 
-Future<List<String>> scanReceiptAsync(String src) async {
+// ───────────────── قص الباتش: زيادة تلقائية + قص يدوي لكل صورة ─────────────────
+// زيادة على القص التلقائي (نسبة من أبعاد الباتش). موجب = بيزوّد، سالب = بيقص. الافتراضي: شوية طول فوق وتحت.
+double kPadV = 0.04; // فوق وتحت (الطول)
+double kPadH = 0.0; // شمال ويمين (العرض)
+
+void loadCropPads() {
+  final c = _readCfg();
+  kPadV = ((c['padV'] as num?)?.toDouble() ?? 0.04).clamp(-0.2, 0.5).toDouble();
+  kPadH = ((c['padH'] as num?)?.toDouble() ?? 0.0).clamp(-0.2, 0.5).toDouble();
+}
+
+// القص اليدوي: لكل صورة قائمة مستطيلات [l,t,r,b] كنسب (0..1) من الصورة بعد تصحيح الاتجاه
+final String cropFile = '$baseDir/.app_crop.json';
+
+String cropKeyOf(ReceiptItem r) => r.key.isNotEmpty ? r.key : baseName(r.path);
+
+Map<String, dynamic> _loadCrops() {
+  try {
+    return Map<String, dynamic>.from(jsonDecode(File(cropFile).readAsStringSync()) as Map);
+  } catch (_) {
+    return <String, dynamic>{};
+  }
+}
+
+List<List<double>> getManualCrop(String key) {
+  final out = <List<double>>[];
+  final v = _loadCrops()[key];
+  if (v is List) {
+    for (final r in v) {
+      if (r is List && r.length == 4) out.add([for (final n in r) (n as num).toDouble()]);
+    }
+  }
+  return out;
+}
+
+void saveManualCrop(String key, List<List<double>>? rects) {
+  try {
+    final m = _loadCrops();
+    if (rects == null || rects.isEmpty) {
+      m.remove(key);
+    } else {
+      m[key] = rects;
+    }
+    File(cropFile)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+// بيوسّع (أو بيقلّص لو سالب) الباتش على محاوره: padV للطول، padH للعرض
+List<double> _padQuad(img.Image im, List<double> q, double padV, double padH) {
+  if (padV.abs() < 0.001 && padH.abs() < 0.001) return q;
+  final vx = ((q[4] - q[0]) + (q[6] - q[2])) / 2, vy = ((q[5] - q[1]) + (q[7] - q[3])) / 2;
+  final hx = ((q[2] - q[0]) + (q[6] - q[4])) / 2, hy = ((q[3] - q[1]) + (q[7] - q[5])) / 2;
+  final mx = (im.width - 1).toDouble(), my = (im.height - 1).toDouble();
+  double cx(double v) => _cd(v, 0.0, mx);
+  double cy(double v) => _cd(v, 0.0, my);
+  return [
+    cx(q[0] - vx * padV - hx * padH), cy(q[1] - vy * padV - hy * padH),
+    cx(q[2] - vx * padV + hx * padH), cy(q[3] - vy * padV + hy * padH),
+    cx(q[4] + vx * padV - hx * padH), cy(q[5] + vy * padV - hy * padH),
+    cx(q[6] + vx * padV + hx * padH), cy(q[7] + vy * padV + hy * padH),
+  ];
+}
+
+// قص يدوي: كل مستطيل بيتقص من الصورة الأصلية وبيتحسّن بنفس طريقة السكانر
+List<String> _manualToPages(String src, String base, List<List<double>> rects) {
+  final cached = <String>[];
+  for (var i = 0; i < rects.length; i++) {
+    final f = File('${base}_$i.jpg');
+    if (!f.existsSync()) {
+      cached.clear();
+      break;
+    }
+    cached.add(f.path);
+  }
+  if (cached.length == rects.length) return cached;
+  final out = <String>[];
+  try {
+    var im = img.decodeImage(File(src).readAsBytesSync());
+    if (im == null) return out;
+    im = img.bakeOrientation(im);
+    final w = im.width.toDouble(), h = im.height.toDouble();
+    for (final r in rects) {
+      final l = _cd(r[0] * w, 0.0, w - 2), t = _cd(r[1] * h, 0.0, h - 2);
+      final rr = _cd(r[2] * w, l + 2, w), b = _cd(r[3] * h, t + 2, h);
+      final o = _warpAndEnhance(im, [l, t, rr, t, l, b, rr, b]);
+      if (o == null) continue;
+      final p = '${base}_${out.length}.jpg';
+      File(p).writeAsBytesSync(img.encodeJpg(o, quality: 90));
+      out.add(p);
+    }
+  } catch (_) {}
+  return out;
+}
+
+// أول عنصر = [عرض, طول] الصورة. الباقي = المستطيلات التلقائية (بعد الزيادة). بيكتب نسخة للعرض في الشاشة.
+List<List<double>> _cropPrep(String src, String viewDst, double padV, double padH) {
+  var im = img.decodeImage(File(src).readAsBytesSync());
+  if (im == null) throw Exception('decode failed');
+  im = img.bakeOrientation(im);
+  final rects = <List<double>>[];
+  try {
+    var quads = _detectReceipts(im);
+    if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
+    if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
+    for (final q0 in quads) {
+      final q = _padQuad(im, _extendForCaption(im, q0), padV, padH);
+      final xs = [q[0], q[2], q[4], q[6]], ys = [q[1], q[3], q[5], q[7]];
+      rects.add([
+        xs.reduce(math.min) / im.width,
+        ys.reduce(math.min) / im.height,
+        xs.reduce(math.max) / im.width,
+        ys.reduce(math.max) / im.height,
+      ]);
+    }
+  } catch (_) {}
+  rects.sort((a, b) => a[0].compareTo(b[0]));
+  var v = im;
+  if (math.max(im.width, im.height) > 1800) {
+    v = im.width >= im.height ? img.copyResize(im, width: 1800) : img.copyResize(im, height: 1800);
+  }
+  File(viewDst).writeAsBytesSync(img.encodeJpg(v, quality: 85));
+  return [
+    [im.width.toDouble(), im.height.toDouble()],
+    ...rects
+  ];
+}
+
+Future<List<List<double>>> cropPrepAsync(String src, String dst, double padV, double padH) =>
+    Isolate.run(() => _cropPrep(src, dst, padV, padH));
+
+Future<List<String>> scanReceiptAsync(String src, {String? cropKey}) async {
   try {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final base = '$baseDir/.scans/v6_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
-    return await Isolate.run(() => _scanToPages(src, base));
+    final stamp = '${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    if (cropKey != null) {
+      final manual = getManualCrop(cropKey);
+      if (manual.isNotEmpty) {
+        final sig = manual.expand((e) => e).map((v) => (v * 10000).round()).join('_');
+        final mbase = '$baseDir/.scans/m_${stamp}_$sig';
+        final r = await Isolate.run(() => _manualToPages(src, mbase, manual));
+        if (r.isNotEmpty) return r;
+      }
+    }
+    loadCropPads();
+    final padV = kPadV, padH = kPadH;
+    final base = '$baseDir/.scans/v7_${stamp}_p${(padV * 100).round()}_${(padH * 100).round()}';
+    return await Isolate.run(() => _scanToPages(src, base, padV, padH));
   } catch (_) {
     return <String>[];
   }
+}
+
+// حوار الزيادة التلقائية على كل الباتشات
+Future<bool> showCropPadsDialog(BuildContext context) async {
+  loadCropPads();
+  var v = kPadV, h = kPadH;
+  var saved = false;
+  await showDialog<void>(
+    context: context,
+    builder: (c) => StatefulBuilder(
+      builder: (c, set) => AlertDialog(
+        title: const Text('زيادة القص التلقائي'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('الطول (فوق وتحت): ${(v * 100).round()}%'),
+            Slider(value: v, min: -0.1, max: 0.3, divisions: 40, onChanged: (x) => set(() => v = x)),
+            Text('العرض (شمال ويمين): ${(h * 100).round()}%'),
+            Slider(value: h, min: -0.1, max: 0.3, divisions: 40, onChanged: (x) => set(() => h = x)),
+            const Text('موجب = بيزوّد، سالب = بيقص. بيتطبق على كل الباتشات اللي مفيهاش قص يدوي.',
+                style: TextStyle(fontSize: 12)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('إلغاء')),
+          FilledButton(
+            onPressed: () {
+              _saveCfgKey('padV', v);
+              _saveCfgKey('padH', h);
+              saved = true;
+              Navigator.pop(c);
+            },
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    ),
+  );
+  loadCropPads();
+  return saved;
+}
+
+// ───────────────── شاشة القص اليدوي (زي أيقونة الكروب) ─────────────────
+class CropPage extends StatefulWidget {
+  final ReceiptItem item;
+  const CropPage({super.key, required this.item});
+
+  @override
+  State<CropPage> createState() => _CropPageState();
+}
+
+class _CropPageState extends State<CropPage> {
+  String? viewPath;
+  double imgW = 1, imgH = 1;
+  List<List<double>> rects = <List<double>>[];
+  int sel = 0;
+  bool loading = true;
+  String? err;
+  int _drag = -1; // 0..7 مقبض (زوايا وأضلاع) • 8 تحريك • -1 مفيش
+  double _scale = 1, _ox = 0, _oy = 0;
+  static const double _minSize = 0.04;
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  @override
+  void dispose() {
+    try {
+      if (viewPath != null) File(viewPath!).deleteSync();
+    } catch (_) {}
+    super.dispose();
+  }
+
+  Future<void> _init({bool forceAuto = false}) async {
+    setState(() {
+      loading = true;
+      err = null;
+    });
+    try {
+      loadCropPads();
+      Directory('$baseDir/.scans').createSync(recursive: true);
+      final old = viewPath;
+      final dst = '$baseDir/.scans/cropview_${DateTime.now().microsecondsSinceEpoch}.jpg';
+      final r = await cropPrepAsync(widget.item.path, dst, kPadV, kPadH);
+      try {
+        if (old != null) File(old).deleteSync();
+      } catch (_) {}
+      imgW = r[0][0];
+      imgH = r[0][1];
+      var rs = r.sublist(1);
+      final saved = forceAuto ? <List<double>>[] : getManualCrop(cropKeyOf(widget.item));
+      if (saved.isNotEmpty) rs = saved;
+      if (rs.isEmpty) rs = [<double>[0.05, 0.05, 0.95, 0.95]];
+      rects = [for (final e in rs) List<double>.from(e)];
+      sel = 0;
+      viewPath = dst;
+    } catch (_) {
+      err = 'مقدرتش أفتح الصورة';
+    }
+    if (!mounted) return;
+    setState(() => loading = false);
+  }
+
+  List<Offset> _handles(List<double> r) {
+    final cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+    return [
+      Offset(r[0], r[1]), Offset(cx, r[1]), Offset(r[2], r[1]), Offset(r[2], cy),
+      Offset(r[2], r[3]), Offset(cx, r[3]), Offset(r[0], r[3]), Offset(r[0], cy),
+    ];
+  }
+
+  Offset _toPx(Offset n) => Offset(_ox + n.dx * imgW * _scale, _oy + n.dy * imgH * _scale);
+
+  void _onStart(Offset p) {
+    _drag = -1;
+    final r = rects[sel];
+    final hs = _handles(r);
+    var best = 34.0;
+    for (var i = 0; i < hs.length; i++) {
+      final d = (_toPx(hs[i]) - p).distance;
+      if (d < best) {
+        best = d;
+        _drag = i;
+      }
+    }
+    if (_drag >= 0) return;
+    final order = <int>[sel, for (var i = 0; i < rects.length; i++) if (i != sel) i];
+    for (final i in order) {
+      final q = rects[i];
+      final rect = Rect.fromPoints(_toPx(Offset(q[0], q[1])), _toPx(Offset(q[2], q[3])));
+      if (rect.contains(p)) {
+        setState(() => sel = i);
+        _drag = 8;
+        return;
+      }
+    }
+  }
+
+  void _onUpdate(Offset delta) {
+    if (_drag < 0) return;
+    final dx = delta.dx / (imgW * _scale), dy = delta.dy / (imgH * _scale);
+    final r = rects[sel];
+    setState(() {
+      if (_drag == 8) {
+        final w = r[2] - r[0], h = r[3] - r[1];
+        final l = _cd(r[0] + dx, 0.0, 1.0 - w), t = _cd(r[1] + dy, 0.0, 1.0 - h);
+        r[0] = l;
+        r[1] = t;
+        r[2] = l + w;
+        r[3] = t + h;
+        return;
+      }
+      if (_drag == 0 || _drag == 6 || _drag == 7) r[0] += dx;
+      if (_drag == 2 || _drag == 3 || _drag == 4) r[2] += dx;
+      if (_drag == 0 || _drag == 1 || _drag == 2) r[1] += dy;
+      if (_drag == 4 || _drag == 5 || _drag == 6) r[3] += dy;
+      r[0] = _cd(r[0], 0.0, r[2] - _minSize);
+      r[2] = _cd(r[2], r[0] + _minSize, 1.0);
+      r[1] = _cd(r[1], 0.0, r[3] - _minSize);
+      r[3] = _cd(r[3], r[1] + _minSize, 1.0);
+    });
+  }
+
+  // زيادة/نقص بخطوة ثابتة (نسبة من أبعاد المستطيل) على الطول أو العرض
+  void _grow({double h = 0, double v = 0}) {
+    final r = rects[sel];
+    final w = r[2] - r[0], ht = r[3] - r[1];
+    if (w + 2 * w * h < _minSize || ht + 2 * ht * v < _minSize) return;
+    setState(() {
+      r[0] = _cd(r[0] - w * h, 0.0, 1.0);
+      r[2] = _cd(r[2] + w * h, 0.0, 1.0);
+      r[1] = _cd(r[1] - ht * v, 0.0, 1.0);
+      r[3] = _cd(r[3] + ht * v, 0.0, 1.0);
+    });
+  }
+
+  void _apply() {
+    final out = [for (final r in rects) List<double>.from(r)]..sort((a, b) => a[0].compareTo(b[0]));
+    saveManualCrop(cropKeyOf(widget.item), out);
+    Navigator.pop(context, true);
+  }
+
+  void _clearManual() {
+    saveManualCrop(cropKeyOf(widget.item), null);
+    Navigator.pop(context, true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('قص الباتش'),
+        actions: [
+          IconButton(
+            tooltip: tr('زيادة تلقائية لكل الباتشات'),
+            icon: const Icon(Icons.tune),
+            onPressed: () async {
+              if (await showCropPadsDialog(context)) _init(forceAuto: true);
+            },
+          ),
+          IconButton(
+            tooltip: tr('رجوع للقص التلقائي'),
+            icon: const Icon(Icons.auto_fix_high),
+            onPressed: () => _init(forceAuto: true),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: loading
+            ? const Center(child: CircularProgressIndicator())
+            : err != null || viewPath == null
+                ? Center(child: Text(err ?? 'خطأ'))
+                : Column(
+                    children: [
+                      Expanded(
+                        child: LayoutBuilder(
+                          builder: (c, box) {
+                            _scale = math.min(box.maxWidth / imgW, box.maxHeight / imgH);
+                            _ox = (box.maxWidth - imgW * _scale) / 2;
+                            _oy = (box.maxHeight - imgH * _scale) / 2;
+                            return GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onPanStart: (d) => _onStart(d.localPosition),
+                              onPanUpdate: (d) => _onUpdate(d.delta),
+                              onPanEnd: (_) => _drag = -1,
+                              child: Stack(
+                                children: [
+                                  Positioned(
+                                    left: _ox,
+                                    top: _oy,
+                                    width: imgW * _scale,
+                                    height: imgH * _scale,
+                                    child: Image.file(File(viewPath!), fit: BoxFit.fill, gaplessPlayback: true),
+                                  ),
+                                  Positioned.fill(
+                                    child: CustomPaint(
+                                      painter: _CropPainter(rects, sel, _ox, _oy, imgW * _scale, imgH * _scale),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              alignment: WrapAlignment.center,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                for (var i = 0; i < rects.length; i++)
+                                  if (rects.length > 1)
+                                    ChoiceChip(
+                                      label: Text('باتش ${i + 1}'),
+                                      selected: sel == i,
+                                      onSelected: (_) => setState(() => sel = i),
+                                    ),
+                                IconButton(
+                                  tooltip: tr('إضافة باتش'),
+                                  icon: const Icon(Icons.add_box_outlined),
+                                  onPressed: () => setState(() {
+                                    rects.add(<double>[0.25, 0.25, 0.75, 0.75]);
+                                    sel = rects.length - 1;
+                                  }),
+                                ),
+                                if (rects.length > 1)
+                                  IconButton(
+                                    tooltip: tr('حذف المحدد'),
+                                    icon: const Icon(Icons.delete_outline),
+                                    onPressed: () => setState(() {
+                                      rects.removeAt(sel);
+                                      sel = 0;
+                                    }),
+                                  ),
+                              ],
+                            ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                OutlinedButton(onPressed: () => _grow(v: 0.03), child: const Text('طول +')),
+                                const SizedBox(width: 6),
+                                OutlinedButton(onPressed: () => _grow(v: -0.03), child: const Text('طول -')),
+                                const SizedBox(width: 6),
+                                OutlinedButton(onPressed: () => _grow(h: 0.03), child: const Text('عرض +')),
+                                const SizedBox(width: 6),
+                                OutlinedButton(onPressed: () => _grow(h: -0.03), child: const Text('عرض -')),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              children: [
+                                OutlinedButton(onPressed: _clearManual, child: const Text('إلغاء القص اليدوي')),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: FilledButton.icon(
+                                    onPressed: _apply,
+                                    icon: const Icon(Icons.crop),
+                                    label: const Text('تطبيق القص'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+      ),
+    );
+  }
+}
+
+class _CropPainter extends CustomPainter {
+  final List<List<double>> rects;
+  final int sel;
+  final double ox, oy, w, h;
+  _CropPainter(this.rects, this.sel, this.ox, this.oy, this.w, this.h);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    Rect px(List<double> r) => Rect.fromLTRB(ox + r[0] * w, oy + r[1] * h, ox + r[2] * w, oy + r[3] * h);
+    var hole = Path();
+    for (final r in rects) {
+      hole = Path.combine(PathOperation.union, hole, Path()..addRect(px(r)));
+    }
+    final shade = Path.combine(PathOperation.difference, Path()..addRect(Rect.fromLTWH(ox, oy, w, h)), hole);
+    canvas.drawPath(shade, Paint()..color = Colors.black54);
+    for (var i = 0; i < rects.length; i++) {
+      canvas.drawRect(
+        px(rects[i]),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = i == sel ? 2.5 : 1.5
+          ..color = i == sel ? Colors.lightGreenAccent : Colors.orangeAccent,
+      );
+    }
+    final r = rects[sel];
+    final cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+    final pts = [
+      [r[0], r[1]], [cx, r[1]], [r[2], r[1]], [r[2], cy],
+      [r[2], r[3]], [cx, r[3]], [r[0], r[3]], [r[0], cy],
+    ];
+    for (final p in pts) {
+      final o = Offset(ox + p[0] * w, oy + p[1] * h);
+      canvas.drawCircle(o, 9, Paint()..color = Colors.white);
+      canvas.drawCircle(
+        o,
+        9,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = Colors.lightGreen,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CropPainter old) => true;
 }
 
 // ───────────────── ملء القالب مباشرة جوه ملف الـ xlsx (من غير ما نبوّظ التنسيق) ─────────────────
@@ -5498,8 +6190,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (busy) {
       if (mounted) setState(() {});
     } else {
-      await rebuildFiles();
+      await _guardedRebuild();
     }
+  }
+
+  // بناء الملفات مرة واحدة في الوقت: لو اتطلب بناء وفيه بناء شغال، بيستنى وبعدين بيتعمل تاني بآخر التعديلات
+  Future<void>? _rebuildFut;
+  bool _rebuildAgain = false;
+  Future<void> _guardedRebuild() {
+    if (_rebuildFut != null) {
+      _rebuildAgain = true;
+      return _rebuildFut!;
+    }
+    final f = () async {
+      try {
+        do {
+          _rebuildAgain = false;
+          await rebuildFiles();
+        } while (_rebuildAgain);
+      } finally {
+        _rebuildFut = null;
+      }
+    }();
+    _rebuildFut = f;
+    return f;
+  }
+
+  // زرار "إعادة بناء الـ PDF" في شاشة المراجعة: بيبني الإكسيل والـ PDF دلوقتي بآخر القص والتدوير. بيرجّع true لو الـ PDF اتبنى
+  Future<bool> rebuildNow() async {
+    if (busy) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('في فحص شغال دلوقتي، استنى لما يخلص وجرّب تاني.')),
+        );
+      }
+      return false;
+    }
+    try {
+      await _guardedRebuild();
+    } catch (_) {
+      return false;
+    }
+    final p = generatedPdfPath;
+    return p != null && File(p).existsSync();
   }
 
   Future<void> _onSwipe(ReceiptItem it, bool approve) async {
@@ -6168,7 +6901,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final changed = await Navigator.push<bool>(
       context,
-      MaterialPageRoute(builder: (_) => ReviewPage(items: list, allItems: processedItems)),
+      MaterialPageRoute(
+          builder: (_) => ReviewPage(
+              items: list,
+              allItems: processedItems,
+              onRebuild: rebuildNow,
+              onOpenPdf: () => openFile(latestOutput('.pdf'), 'application/pdf'))),
     );
     if (changed == true) {
       await _refresh();
@@ -6195,7 +6933,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       context,
       MaterialPageRoute(
         builder: (_) => ReviewPage(
-            items: list, allItems: processedItems, single: true, initialIndex: at, sysLineOf: _sysLineOf),
+            items: list,
+            allItems: processedItems,
+            single: true,
+            initialIndex: at,
+            sysLineOf: _sysLineOf,
+            onRebuild: rebuildNow,
+            onOpenPdf: () => openFile(latestOutput('.pdf'), 'application/pdf')),
       ),
     );
     if (changed == true) {
@@ -6432,7 +7176,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
         var srcs = <String>[];
         try {
-          srcs = await scanReceiptAsync(r.path);
+          srcs = await scanReceiptAsync(r.path, cropKey: cropKeyOf(r));
         } catch (_) {}
         if (srcs.isEmpty) srcs = <String>[r.path];
         // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
@@ -6739,6 +7483,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             padding: const EdgeInsets.only(top: 4),
             child: _flagChip(context, sl.text, sl.ok ? Colors.green : Colors.red),
           ),
+        if (sl?.cnt != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: _flagChip(context, sl!.cnt!, sl.cntTone ?? Colors.blue),
+          ),
         _warnChips(item),
       ],
     );
@@ -6751,12 +7500,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final diff = _sysDiffOf(item);
     if (sys == null || sys.amount == null || diff == null) return null;
     final head = '🖥️ ${_l(context, 'السيستم', 'System')}: ${_fmtMoney(sys.amount!)} ج.م';
-    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true);
+    // عدد معاملات السيستم (إيصالات إلكترونية) + مقارنته بمجموع معاملات باتشات الماكينة
+    String cnt;
+    MaterialColor cntTone;
+    final bt = item.orderNum == null ? null : batchTxnByNum[item.orderNum!];
+    if (sys.txn != null) {
+      cnt = '🧾 ${_l(context, 'معاملات السيستم', 'System transactions')}: ${sys.txn}';
+      if (bt == null) {
+        cntTone = Colors.blue;
+      } else if (bt == sys.txn) {
+        cnt += ' ✓ ${_l(context, 'مطابق للباتش', 'Matches batch')}';
+        cntTone = Colors.green;
+      } else {
+        cnt += ' | ${_l(context, 'الباتش', 'Batch')}: $bt';
+        cntTone = kReviewTone;
+      }
+    } else {
+      cnt = '🧾 ${_l(context, 'معاملات السيستم: مش مقروءة - راجع الصورة', 'System transactions: unreadable - check the image')}';
+      cntTone = Colors.amber;
+    }
+    if (diff == 0) {
+      return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true, cnt: cnt, cntTone: cntTone);
+    }
     return SysLine(
         '$head | ${_l(context, 'فرق', 'Gap')}: '
         '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
         '${diff.abs().toStringAsFixed(2)} ج.م',
-        false);
+        false,
+        cnt: cnt,
+        cntTone: cntTone);
   }
 
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
@@ -7175,6 +7947,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           var hit = true;
           if (ignPre == 'keep' && kind != 'receipt') hit = false;
           if (kind == 'none' && autoRotate && ce['ar'] != true) hit = false;
+          if (kind == 'console' && ce['cv'] != 2) hit = false; // قراءة الأعداد اتحسنت: نعيد قراءة صور السيستم القديمة
           if (hit && kind == 'receipt') {
             final ct = ce['tid'];
             if (ct is String && !terminals.containsKey(ct)) hit = false;
@@ -7232,10 +8005,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
         // صورة السيستم (A2R Operations Console): مش باتش، بناخد منها الترمنل والإجمالي بس
         if (ign != 'keep') {
-          final sp = parseSysConsole(res.text, baseName(f.path), rt: res);
+          var sp = parseSysConsole(res.text, baseName(f.path), rt: res);
+          // صورة بعيدة/مايلة: قراءة ناقصة (ترمنل/مبلغ/أعداد) → قراءة تانية على صورة مقصوصة ومكبّرة
+          if (_looksLikeSys(res.text) &&
+              (sp == null || sp.tid == null || sp.amount == null || sp.txn == null)) {
+            if (mounted) setState(() => status = 'فحص OCR: ${i + 1} من ${todo.length} (صورة سيستم - قراءة تانية)');
+            sp = await _sysSecondPass(recognizer, f.path, tmpDir, baseName(f.path), res, sp);
+          }
           if (sp != null) {
             sysReads.add(sp);
-            _cachePut(fkey, {'k': 'console', ...sp.toJson()});
+            _cachePut(fkey, {'k': 'console', ...sp.toJson(), 'cv': 2});
             if (!mounted) return;
             setState(() {
               progress = ((i + 1) / todo.length) * 0.5;
@@ -7810,7 +8589,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   setState(() {});
                                 } else {
                                   keepAsExtraBatch(item, processedItems);
-                                  await rebuildFiles();
+                                  await _guardedRebuild();
                                 }
                               },
                       ),
@@ -8228,7 +9007,9 @@ class ReceiptZoomPage extends StatelessWidget {
 class SysLine {
   final String text;
   final bool ok;
-  const SysLine(this.text, this.ok);
+  final String? cnt; // سطر عدد معاملات السيستم (إيصالات إلكترونية)
+  final MaterialColor? cntTone;
+  const SysLine(this.text, this.ok, {this.cnt, this.cntTone});
 }
 
 class ReviewPage extends StatefulWidget {
@@ -8237,13 +9018,17 @@ class ReviewPage extends StatefulWidget {
   final bool single; // فتحناها من القلم: الحفظ بيقفل الشاشة (والسحب يمين/شمال بيتنقل بين الباتشات)
   final int initialIndex;
   final SysLine? Function(ReceiptItem)? sysLineOf; // سطر مطابقة السيستم (من التقفيل)
+  final Future<bool> Function()? onRebuild; // زرار إعادة بناء الـ PDF (true = اتبنى)
+  final VoidCallback? onOpenPdf; // فتح الـ PDF بعد البناء للتأكد
   const ReviewPage(
       {super.key,
       required this.items,
       this.allItems,
       this.single = false,
       this.initialIndex = 0,
-      this.sysLineOf});
+      this.sysLineOf,
+      this.onRebuild,
+      this.onOpenPdf});
 
   @override
   State<ReviewPage> createState() => _ReviewPageState();
@@ -8253,6 +9038,7 @@ class _ReviewPageState extends State<ReviewPage> {
   int idx = 0;
   bool changed = false;
   int rev = 0; // بيتغير لما الصورة تتدوّر علشان تتحدّث
+  bool rebuilding = false; // إعادة بناء الـ PDF شغالة من الزرار
   final done = <ReceiptItem>{};
   late TextEditingController amt;
   int? order;
@@ -8397,8 +9183,55 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // قص يدوي للباتش (زي الكروب): بيتحفظ وبيتطبق في الـ PDF عند إعادة البناء
+  Future<void> openCrop() async {
+    final ok = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => CropPage(item: item)),
+    );
+    if (ok == true) {
+      changed = true;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_l(context, 'اتحفظ القص. هيتطبق على الـ PDF لما تخرج من الشاشة، أو اضغط زرار الـ PDF فوق دلوقتي.', 'Crop saved. It is applied to the PDF when you leave this screen, or tap the PDF button above now.'))),
+      );
+    }
+  }
+
+  // زرار الـ PDF: بيبني الملفات دلوقتي (تأكيد، أو إعادة لو القص/التدوير كان غلط وصلّحته).
+  // لو ما ضغطتوش، البناء بيتعمل لوحده أول ما تخرج من الشاشة (لو فيه تعديل).
+  Future<void> rebuildPdfNow() async {
+    final cb = widget.onRebuild;
+    if (cb == null || rebuilding) return;
+    final msg = ScaffoldMessenger.of(context);
+    msg.hideCurrentSnackBar();
+    msg.showSnackBar(SnackBar(
+        duration: const Duration(seconds: 120),
+        content: Text(_l(context, 'جاري إعادة بناء الـ PDF...', 'Rebuilding the PDF...'))));
+    setState(() => rebuilding = true);
+    final wasChanged = changed;
+    changed = false; // أي تعديل يحصل وهو بيبني بيرجّعها true وبيتبني تاني عند الخروج
+    var ok = false;
+    try {
+      ok = await cb();
+    } catch (_) {}
+    if (!ok) changed = changed || wasChanged;
+    msg.hideCurrentSnackBar();
+    if (mounted) setState(() => rebuilding = false);
+    if (!mounted) return;
+    msg.showSnackBar(SnackBar(
+      content: Text(ok
+          ? _l(context, 'اتبنى الـ PDF بآخر التعديلات.', 'PDF rebuilt with the latest edits.')
+          : _l(context, 'مقدرتش أبني الـ PDF، جرّب تاني.', 'Could not rebuild the PDF, try again.')),
+      action: ok && widget.onOpenPdf != null
+          ? SnackBarAction(label: _l(context, 'افتح', 'Open'), onPressed: widget.onOpenPdf!)
+          : SnackBarAction(label: _l(context, 'إعادة', 'Retry'), onPressed: rebuildPdfNow),
+    ));
+  }
+
   Future<void> rotate() async {
     try {
+      saveManualCrop(cropKeyOf(item), null); // التدوير بيغيّر الاتجاه، فالقص اليدوي القديم مبقاش مظبوط
       await fixImageAsync(item.path, item.path, 90);
       await FileImage(File(item.path)).evict();
       imageCache.clear();
@@ -8439,6 +9272,12 @@ class _ReviewPageState extends State<ReviewPage> {
                 fontSize: 13,
                 fontWeight: FontWeight.bold,
                 color: _tintFg(context, sl.ok ? Colors.green : Colors.red))),
+      if (sl?.cnt != null)
+        Text(sl!.cnt!,
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: _tintFg(context, sl.cntTone ?? Colors.blue))),
       if (good && sl == null)
         Text(_l(context, '✅ مفيش مشاكل', '✅ No problems'),
             style: TextStyle(color: _tintFg(context, Colors.green), fontSize: 13)),
@@ -8491,6 +9330,15 @@ class _ReviewPageState extends State<ReviewPage> {
                   },
                 ),
               ),
+            ),
+          ),
+          Positioned(
+            top: 4,
+            left: 52,
+            child: IconButton.filledTonal(
+              tooltip: tr('قص الباتش'),
+              icon: const Icon(Icons.crop),
+              onPressed: openCrop,
             ),
           ),
           Positioned(
@@ -8753,6 +9601,12 @@ class _ReviewPageState extends State<ReviewPage> {
                 label: const Text('تدوير'),
               ),
               const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: openCrop,
+                icon: const Icon(Icons.crop),
+                label: const Text('قص'),
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: FilledButton(
                   onPressed: () => save(),
@@ -8781,6 +9635,18 @@ class _ReviewPageState extends State<ReviewPage> {
             onPressed: () => Navigator.pop(context, changed),
           ),
           actions: [
+            if (widget.onRebuild != null)
+              rebuilding
+                  ? const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 14),
+                      child: Center(
+                          child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+                    )
+                  : IconButton(
+                      icon: const Icon(Icons.picture_as_pdf_outlined),
+                      tooltip: _l(context, 'إعادة بناء الـ PDF', 'Rebuild PDF'),
+                      onPressed: rebuildPdfNow,
+                    ),
             IconButton(
               icon: const Icon(Icons.navigate_before),
               tooltip: tr('السابق'),
