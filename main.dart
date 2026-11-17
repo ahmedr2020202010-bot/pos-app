@@ -3943,9 +3943,24 @@ double _captionExtent(img.Image im, List<double> q, bool top) {
     var k2 = k1;
     while (k2 < prof.length && prof[k2] < mid) k2++;
     if (k2 >= prof.length) return 0;
-    var k3 = k2;
-    while (k3 < prof.length && prof[k3] >= mid) k3++;
     const per = maxExt / steps;
+    // سطور الكتابة جوه الكارت (الاسم / التاريخ) متوسط سطوعها بيقل عن الحد فكانت بتتحسب نهاية الكارت:
+    // نعدّي أي فجوة غامقة قصيرة (أقل من ~3.5% من طول الورقة) لو بعدها فاتح تاني أو وصلنا لحافة الصورة
+    final tolDark = (0.035 / per).round();
+    var k3 = k2;
+    while (k3 < prof.length) {
+      if (prof[k3] >= mid) {
+        k3++;
+        continue;
+      }
+      var e = k3;
+      while (e < prof.length && prof[e] < mid) e++;
+      if (e - k3 <= tolDark && (e < prof.length || hitEdge)) {
+        k3 = e;
+        continue;
+      }
+      break;
+    }
     if ((k2 - k1) * per > 0.10) return 0; // الفاصل كبير: مش كارت لازق في الباتش
     if ((k3 - k2) * per < 0.03) return 0; // الشريط الفاتح قصير: مش كارت
     if (k3 >= prof.length && !hitEdge) {
@@ -4024,7 +4039,7 @@ Future<List<String>> scanReceiptAsync(String src) async {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final base = '$baseDir/.scans/v5_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    final base = '$baseDir/.scans/v6_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
     return await Isolate.run(() => _scanToPages(src, base));
   } catch (_) {
     return <String>[];
