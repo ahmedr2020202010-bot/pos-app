@@ -1701,7 +1701,7 @@ Future<void> wipeEverything(BuildContext context) async {
       }
     }
   } catch (_) {}
-  for (final p in [fixPath, mStatePath, '$baseDir/id_debug.txt']) {
+  for (final p in [fixPath, mStatePath, closingStatePath, '$baseDir/id_debug.txt']) {
     final f = File(p);
     if (f.existsSync()) delFile(f);
   }
@@ -5276,6 +5276,75 @@ class ReceiptItem {
   // داخل في الإجماليات والـ PDF؟
   bool get counts => !skip && !dupSuspect && !userExcluded && !ignoredDoc;
 
+  Map<String, dynamic> toJson() => {
+        'path': path,
+        'tid': tid,
+        'orderNum': orderNum,
+        'row': row,
+        'unitName': unitName,
+        'amount': amount,
+        'date': date,
+        'key': key,
+        'ok': ok,
+        'how': how,
+        'batches': batches,
+        'suffix': suffix,
+        'origTid': origTid,
+        'conflict': conflict,
+        'skip': skip,
+        'alt': alt,
+        'dupSuspect': dupSuspect,
+        'userExcluded': userExcluded,
+        'dupDecision': dupDecision,
+        'dupOf': dupOf,
+        'unusual': unusual,
+        'ignoredDoc': ignoredDoc,
+        'ign': ign,
+        'dateOdd': dateOdd,
+        'dateMain': dateMain,
+        'dateFix': dateFix,
+        'txn': txn,
+        'reprintSummary': reprintSummary,
+        'missingBatchClosed': missingBatchClosed,
+        'cands': cands,
+      };
+
+  static ReceiptItem fromJson(Map<String, dynamic> j) {
+    final r = ReceiptItem(
+      path: (j['path'] ?? '').toString(),
+      tid: j['tid'] as String?,
+      orderNum: (j['orderNum'] as num?)?.toInt(),
+      row: (j['row'] as num?)?.toInt(),
+      unitName: j['unitName'] as String?,
+      amount: ((j['amount'] as num?) ?? 0).toDouble(),
+      date: j['date'] as String?,
+      key: (j['key'] ?? '').toString(),
+      ok: j['ok'] == true,
+      how: (j['how'] ?? 'none').toString(),
+      batches: ((j['batches'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList(),
+      suffix: (j['suffix'] as num?)?.toInt(),
+      origTid: j['origTid'] as String?,
+      conflict: j['conflict'] == true,
+      skip: j['skip'] == true,
+      alt: (j['alt'] as num?)?.toDouble(),
+      dupSuspect: j['dupSuspect'] == true,
+      userExcluded: j['userExcluded'] == true,
+      dupDecision: j['dupDecision'] as String?,
+      dupOf: (j['dupOf'] as num?)?.toInt(),
+      ignoredDoc: j['ignoredDoc'] == true,
+      ign: j['ign'] as String?,
+      dateOdd: j['dateOdd'] == true,
+      reprintSummary: j['reprintSummary'] == true,
+      missingBatchClosed: j['missingBatchClosed'] == true,
+    );
+    r.unusual = j['unusual'] as String?;
+    r.dateMain = j['dateMain'] as String?;
+    r.dateFix = j['dateFix'] as String?;
+    r.txn = (j['txn'] as num?)?.toInt();
+    r.cands = ((j['cands'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList();
+    return r;
+  }
+
   // الماكينة/الوحدة متحددة بطريقة مش مؤكدة (تلقائي / بالاسم فقط)
   bool get weakId =>
       !(how == 'terminal' || how == 'new-terminal' || how == 'fuzzy' || how == 'manual' || how == 'extra-batch');
@@ -5293,6 +5362,36 @@ class ReceiptItem {
               alt != null ||
               unusual != null ||
               weakId));
+}
+
+// ───────────────────── حالة قايمة الباتشات (بتفضل محفوظة زي إيصالات الدفع) ─────────────────────
+// بتتمسح بس لما تعمل فحص جديد أو "مسح كل حاجة" من قايمة ⋮ أو "مسح الكل".
+final String closingStatePath = '$baseDir/.app_closing.json';
+
+void saveClosingState(Map<String, dynamic> m) {
+  try {
+    File(closingStatePath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+Map<String, dynamic>? loadClosingState() {
+  try {
+    final f = File(closingStatePath);
+    if (!f.existsSync()) return null;
+    final m = jsonDecode(f.readAsStringSync());
+    return m is Map ? Map<String, dynamic>.from(m) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+void deleteClosingState() {
+  try {
+    final f = File(closingStatePath);
+    if (f.existsSync()) f.deleteSync();
+  } catch (_) {}
 }
 
 // ───────────────────── التصحيحات اليدوية (بتفضل محفوظة) ─────────────────────
@@ -6148,6 +6247,57 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     customDir = loadFolder();
     customOut = loadOutDir();
     if (customOut != null && customOut!.isNotEmpty) outputDir = customOut!;
+    _restoreClosing();
+  }
+
+  // رجّع نتايج آخر فحص تقفيل (الباتشات + صور السيستم + الملاحظات) لو التطبيق اتقفل واتفتح
+  void _restoreClosing() {
+    final m = loadClosingState();
+    if (m == null) return;
+    try {
+      final items = ((m['items'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => ReceiptItem.fromJson(Map<String, dynamic>.from(e)))
+          .where((r) => r.path.isNotEmpty && File(r.path).existsSync())
+          .toList();
+      if (items.isEmpty) return;
+      processedItems.addAll(items);
+      sysReads.addAll(((m['sys'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => SysTotal.fromJson(Map<String, dynamic>.from(e))));
+      missingTerminals = ((m['missing'] as List?) ?? const []).map((e) => (e as num).toInt()).toList();
+      warnings.addAll(((m['warnings'] as List?) ?? const []).map((e) => e.toString()));
+      excludedPay.addAll(((m['excludedPay'] as List?) ?? const []).map((e) => e.toString()));
+      sourceNote = (m['sourceNote'] ?? '').toString();
+      filesDirty = m['dirty'] == true;
+      String? ex(String? p) => p != null && File(p).existsSync() ? p : null;
+      standardXlsxPath = ex(m['xlsx'] as String?);
+      generatedPdfPath = ex(m['pdf'] as String?);
+      extraPdfPaths = ((m['extraPdf'] as List?) ?? const []).map((e) => e.toString()).where((p) => File(p).existsSync()).toList();
+      final st = (m['status'] ?? '').toString();
+      status = st.isNotEmpty ? st : 'آخر نتيجة محفوظة: ${processedItems.length} إيصال.';
+    } catch (_) {
+      processedItems.clear();
+      sysReads.clear();
+    }
+  }
+
+  // بيحفظ نتايج الفحص على الديسك: بعد كل فحص/تعديل وعند الخروج من التطبيق
+  void _saveClosing() {
+    if (processedItems.isEmpty && sysReads.isEmpty) return;
+    saveClosingState({
+      'items': processedItems.map((e) => e.toJson()).toList(),
+      'sys': sysReads.map((e) => e.toJson()).toList(),
+      'missing': missingTerminals,
+      'warnings': warnings,
+      'excludedPay': excludedPay,
+      'sourceNote': sourceNote,
+      'dirty': filesDirty,
+      'xlsx': standardXlsxPath,
+      'pdf': generatedPdfPath,
+      'extraPdf': extraPdfPaths,
+      'status': status,
+    });
   }
 
   void _syncDays() {
@@ -6176,6 +6326,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       missingTerminals = [];
       warnings.clear();
       excludedPay.clear();
+      filesDirty = false;
       standardXlsxPath = null;
       generatedPdfPath = null;
       extraPdfPaths = [];
@@ -6186,7 +6337,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   // أثناء الفحص: نحدّث الشاشة بس (الملفات بتتبني في آخر المعالجة). بعد الفحص: إعادة بناء الإكسيل والـ PDF
+  // بعد أي تعديل: بنحدّث الأرقام والتقرير بس (فحص خفيف) من غير بناء الـ PDF والإكسيل.
+  // الملفات بتتبني لما تضغط زرار "إعادة بناء الـ PDF والإكسيل" في الشاشة الرئيسية.
+  bool filesDirty = false;
   Future<void> _refresh() async {
+    filesDirty = true;
     if (busy) {
       if (mounted) setState(() {});
     } else {
@@ -6197,7 +6352,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // بناء الملفات مرة واحدة في الوقت: لو اتطلب بناء وفيه بناء شغال، بيستنى وبعدين بيتعمل تاني بآخر التعديلات
   Future<void>? _rebuildFut;
   bool _rebuildAgain = false;
-  Future<void> _guardedRebuild() {
+  bool _wantFull = false; // true = ابني الـ PDF والإكسيل فعلاً، false = تحديث خفيف للأرقام بس
+  Future<void> _guardedRebuild({bool full = false}) {
+    if (full) _wantFull = true;
     if (_rebuildFut != null) {
       _rebuildAgain = true;
       return _rebuildFut!;
@@ -6206,7 +6363,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       try {
         do {
           _rebuildAgain = false;
-          await rebuildFiles();
+          final doFull = _wantFull;
+          _wantFull = false;
+          await rebuildFiles(lite: !doFull);
         } while (_rebuildAgain);
       } finally {
         _rebuildFut = null;
@@ -6227,12 +6386,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return false;
     }
     try {
-      await _guardedRebuild();
+      await _guardedRebuild(full: true);
     } catch (_) {
       return false;
     }
     final p = generatedPdfPath;
     return p != null && File(p).existsSync();
+  }
+
+  // زرار "إعادة بناء الـ PDF والإكسيل" في الشاشة الرئيسية (بعد ما تخلّص الفحص والتعديلات)
+  Future<void> rebuildFromButton() async {
+    final ok = await rebuildNow();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? _l(context, 'اتبنى الـ PDF والإكسيل بآخر التعديلات.', 'PDF and Excel rebuilt with the latest edits.')
+          : _l(context, 'مقدرتش أبني الملفات، جرّب تاني.', 'Could not rebuild the files, try again.')),
+      action: ok
+          ? SnackBarAction(label: _l(context, 'افتح PDF', 'Open PDF'), onPressed: () => openFile(latestOutput('.pdf'), 'application/pdf'))
+          : SnackBarAction(label: _l(context, 'إعادة', 'Retry'), onPressed: rebuildFromButton),
+    ));
   }
 
   Future<void> _onSwipe(ReceiptItem it, bool approve) async {
@@ -6322,6 +6496,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _life = state;
+    if (state != AppLifecycleState.resumed && !busy) _saveClosing();
     // رجعت للتطبيق: نعرض هل المراقبة كانت شغالة وانت برا (تشخيص)
     if (state == AppLifecycleState.resumed && autoScan && !busy && _lastTickAt != null && mounted) {
       final ago = DateTime.now().difference(_lastTickAt!).inSeconds;
@@ -6333,6 +6508,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    if (!busy) _saveClosing();
     _autoTimer?.cancel();
     homeRunG = null;
     homeSumG = null;
@@ -6879,11 +7055,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Directory('$baseDir/.scans').deleteSync(recursive: true);
     } catch (_) {}
     await clearScanCache();
+    deleteClosingState();
     setState(() {
       processedItems.clear();
       sysReads.clear();
       missingTerminals = [];
       warnings.clear();
+      filesDirty = false;
       standardXlsxPath = null;
       generatedPdfPath = null;
       extraPdfPaths = [];
@@ -6905,13 +7083,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           builder: (_) => ReviewPage(
               items: list,
               allItems: processedItems,
-              onRebuild: rebuildNow,
-              onOpenPdf: () => openFile(latestOutput('.pdf'), 'application/pdf'))),
+              )),
     );
     if (changed == true) {
       await _refresh();
     } else if (mounted) {
       setState(() {});
+      _saveClosing();
     }
   }
 
@@ -6938,14 +7116,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             single: true,
             initialIndex: at,
             sysLineOf: _sysLineOf,
-            onRebuild: rebuildNow,
-            onOpenPdf: () => openFile(latestOutput('.pdf'), 'application/pdf')),
+            ),
       ),
     );
     if (changed == true) {
       await _refresh();
     } else if (mounted) {
       setState(() {});
+      _saveClosing();
     }
   }
 
@@ -7148,6 +7326,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     // الفحص الخفيف: نفس الحسابات (الناقص + التقرير + غير المعتاد) من غير بناء الـ PDF ولا الإكسيل
     if (lite) {
+      filesDirty = true;
       final ignoreL = <int>{};
       try {
         for (final m in RegExp(r'\d+').allMatches(File('$baseDir/ignore.txt').readAsStringSync())) {
@@ -7161,8 +7340,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ];
       writeReport(reportDate);
       setState(() => status = 'تم فحص خفيف: ${_countLine()}\n'
-          '• من غير بناء الإكسيل والـ PDF (اضغط "فحص التقفيل" لبنائهم).' +
+          '• الإكسيل والـ PDF لسه متبنوش بآخر التعديلات: اضغط "إعادة بناء الـ PDF والإكسيل" لما تخلّص.' +
           (sourceNote.isEmpty ? '' : '\n$sourceNote'));
+      _saveClosing();
       return;
     }
     var pageNo = 0;
@@ -7319,6 +7499,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (!foundOrders.contains(i) && !ignore.contains(i)) i
     ];
     writeReport(reportDate);
+    filesDirty = false;
 
     setState(() => status = 'اكتمل العد: ${_countLine()}\n'
         '$xlsxLine\n'
@@ -7327,6 +7508,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ? ''
             : '\n• فيه إيصالات بتواريخ تانية (${otherByDate.keys.join(' ، ')}): اتعمل لها PDF منفصل لكل يوم، ومش داخلة في إجماليات يوم $reportDate.') +
         (sourceNote.isEmpty ? '' : '\n$sourceNote'));
+    _saveClosing();
   }
 
   // مبلغ السيستم الخاص بترمنل الباتش ده (أحدث صورة لنفس الترمنل وتاريخ الباتش)
@@ -8465,6 +8647,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 6),
           _statsRow(),
           const SizedBox(height: 6),
+          if (processedItems.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: SizedBox(
+                width: double.infinity,
+                child: filesDirty
+                    ? FilledButton.icon(
+                        onPressed: busy ? null : rebuildFromButton,
+                        icon: const Icon(Icons.autorenew),
+                        label: Text(_l(context, 'إعادة بناء الـ PDF والإكسيل (فيه تعديلات)',
+                            'Rebuild PDF & Excel (edits pending)')),
+                      )
+                    : OutlinedButton.icon(
+                        onPressed: busy ? null : rebuildFromButton,
+                        icon: const Icon(Icons.autorenew),
+                        label: Text(_l(context, 'إعادة بناء الـ PDF والإكسيل', 'Rebuild PDF & Excel')),
+                      ),
+              ),
+            ),
           _actionRow([
             _quickBtn(Icons.insights, _l(context, 'التقرير', 'Report'),
                 processedItems.isEmpty && sysReads.isEmpty ? null : openClosingReport),
@@ -8587,9 +8788,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 if (item.ign == 'drop') {
                                   keepIgnored(item);
                                   setState(() {});
+                                  _saveClosing();
                                 } else {
                                   keepAsExtraBatch(item, processedItems);
-                                  await _guardedRebuild();
+                                  await _refresh();
                                 }
                               },
                       ),
@@ -9018,17 +9220,13 @@ class ReviewPage extends StatefulWidget {
   final bool single; // فتحناها من القلم: الحفظ بيقفل الشاشة (والسحب يمين/شمال بيتنقل بين الباتشات)
   final int initialIndex;
   final SysLine? Function(ReceiptItem)? sysLineOf; // سطر مطابقة السيستم (من التقفيل)
-  final Future<bool> Function()? onRebuild; // زرار إعادة بناء الـ PDF (true = اتبنى)
-  final VoidCallback? onOpenPdf; // فتح الـ PDF بعد البناء للتأكد
   const ReviewPage(
       {super.key,
       required this.items,
       this.allItems,
       this.single = false,
       this.initialIndex = 0,
-      this.sysLineOf,
-      this.onRebuild,
-      this.onOpenPdf});
+      this.sysLineOf});
 
   @override
   State<ReviewPage> createState() => _ReviewPageState();
@@ -9038,7 +9236,6 @@ class _ReviewPageState extends State<ReviewPage> {
   int idx = 0;
   bool changed = false;
   int rev = 0; // بيتغير لما الصورة تتدوّر علشان تتحدّث
-  bool rebuilding = false; // إعادة بناء الـ PDF شغالة من الزرار
   final done = <ReceiptItem>{};
   late TextEditingController amt;
   int? order;
@@ -9193,40 +9390,9 @@ class _ReviewPageState extends State<ReviewPage> {
       changed = true;
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(_l(context, 'اتحفظ القص. هيتطبق على الـ PDF لما تخرج من الشاشة، أو اضغط زرار الـ PDF فوق دلوقتي.', 'Crop saved. It is applied to the PDF when you leave this screen, or tap the PDF button above now.'))),
+        SnackBar(content: Text(_l(context, 'اتحفظ القص. هيتطبق على الـ PDF لما تضغط "إعادة بناء الـ PDF والإكسيل" في الشاشة الرئيسية.', 'Crop saved. It is applied to the PDF when you tap "Rebuild PDF & Excel" on the main screen.'))),
       );
     }
-  }
-
-  // زرار الـ PDF: بيبني الملفات دلوقتي (تأكيد، أو إعادة لو القص/التدوير كان غلط وصلّحته).
-  // لو ما ضغطتوش، البناء بيتعمل لوحده أول ما تخرج من الشاشة (لو فيه تعديل).
-  Future<void> rebuildPdfNow() async {
-    final cb = widget.onRebuild;
-    if (cb == null || rebuilding) return;
-    final msg = ScaffoldMessenger.of(context);
-    msg.hideCurrentSnackBar();
-    msg.showSnackBar(SnackBar(
-        duration: const Duration(seconds: 120),
-        content: Text(_l(context, 'جاري إعادة بناء الـ PDF...', 'Rebuilding the PDF...'))));
-    setState(() => rebuilding = true);
-    final wasChanged = changed;
-    changed = false; // أي تعديل يحصل وهو بيبني بيرجّعها true وبيتبني تاني عند الخروج
-    var ok = false;
-    try {
-      ok = await cb();
-    } catch (_) {}
-    if (!ok) changed = changed || wasChanged;
-    msg.hideCurrentSnackBar();
-    if (mounted) setState(() => rebuilding = false);
-    if (!mounted) return;
-    msg.showSnackBar(SnackBar(
-      content: Text(ok
-          ? _l(context, 'اتبنى الـ PDF بآخر التعديلات.', 'PDF rebuilt with the latest edits.')
-          : _l(context, 'مقدرتش أبني الـ PDF، جرّب تاني.', 'Could not rebuild the PDF, try again.')),
-      action: ok && widget.onOpenPdf != null
-          ? SnackBarAction(label: _l(context, 'افتح', 'Open'), onPressed: widget.onOpenPdf!)
-          : SnackBarAction(label: _l(context, 'إعادة', 'Retry'), onPressed: rebuildPdfNow),
-    ));
   }
 
   Future<void> rotate() async {
@@ -9635,18 +9801,6 @@ class _ReviewPageState extends State<ReviewPage> {
             onPressed: () => Navigator.pop(context, changed),
           ),
           actions: [
-            if (widget.onRebuild != null)
-              rebuilding
-                  ? const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 14),
-                      child: Center(
-                          child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
-                    )
-                  : IconButton(
-                      icon: const Icon(Icons.picture_as_pdf_outlined),
-                      tooltip: _l(context, 'إعادة بناء الـ PDF', 'Rebuild PDF'),
-                      onPressed: rebuildPdfNow,
-                    ),
             IconButton(
               icon: const Icon(Icons.navigate_before),
               tooltip: tr('السابق'),
