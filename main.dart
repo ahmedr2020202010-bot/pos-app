@@ -1149,22 +1149,45 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
           r'PRINTED\W{0,3}\s*(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?',
           caseSensitive: false)
       .firstMatch(text);
-  final egpRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d+)[.,](\d{2})\s*EG[PR]', caseSensitive: false);
+  final egpRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:[,. ]\d{3})+|\d+)[.,](\d{2})\s*E\s?G\s?[PRF]', caseSensitive: false);
   double? amount;
   for (final m in egpRe.allMatches(text)) {
-    final v = double.tryParse('${m.group(1)!.replaceAll(',', '')}.${m.group(2)!}');
+    final v = double.tryParse('${m.group(1)!.replaceAll(RegExp(r'[,. ]'), '')}.${m.group(2)!}');
     if (v != null && (amount == null || v > amount)) amount = round2(v);
   }
-  if (!hasTitle) {
-    // العنوان اتقرا غلط: نتأكد من علامات تانية (Printed + EGP + ترمنل معروف) ومن إنه مش إيصال بنك
+
+  // الصورة متصورة من بعيد / بزاوية: العنوان و Printed غالباً بيتقروا غلط أو بيتقصوا. فنعتمد على علامات تانية كتير
+  // (أجزاء من العنوان، v60-lite، اسم المستخدم، Printed) ونكتفي بواحدة قوية + حاجة معاها.
+  final titleish = RegExp(r'A2R|OPERAT|ERATIONS|CONSOL|ONSOL|NSOLE').hasMatch(up);
+  final liteish = RegExp(r'V\s?\d{2}\s?[-–]\s?\W?\s?[LI1!|]\s?[I1!|]?\s?TE|\bLITE\b').hasMatch(up);
+  final userish = RegExp(r'AHMED\s*RAMADAN|AHMED\s*RAM').hasMatch(up);
+  final printedish = printedM != null || up.contains('PRINTED');
+  final extra = [liteish, userish, printedish, amount != null].where((b) => b).length;
+  final strong = hasTitle || (titleish && extra >= 1) || extra >= 3;
+
+  String? tid = findTerminalIn([text]);
+  tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
+  // أرقام الترمنل المقروءة بمسافات أو O بدل 0 (تصوير من بعيد)
+  if (tid == null) {
+    final sp = RegExp(r'(?<!\d)5[0O](?:\s?\d){6}(?!\d)').firstMatch(text)?.group(0);
+    if (sp != null) {
+      final d = sp.replaceAll(RegExp(r'\s'), '').replaceAll('O', '0');
+      if (RegExp(r'^50\d{6}$').hasMatch(d)) tid = d;
+    }
+  }
+  // قراءة غلط في رقم أو اتنين: أقرب ترمنل معروف (بشرط يكون واحد بس)
+  tid ??= findTerminalFuzzyIn([text], null);
+
+  if (!strong) {
+    // مفيش علامات كفاية: نتأكد من علامات تانية (Printed + EGP + ترمنل معروف) ومن إنه مش إيصال بنك
     if (printedM == null || amount == null) return null;
     if (classifyReceipt(text) != 'other') return null;
     if (findTerminalIn([text]) == null) return null;
+  } else if (classifyReceipt(text) == 'batch' && !hasTitle && !titleish) {
+    return null; // إيصال بنك حقيقي، مش سيستم
   }
-  String? tid = findTerminalIn([text]);
-  tid ??= RegExp(r'(?<!\d)(50\d{6})(?!\d)').firstMatch(text)?.group(1);
-  // إيصال السيستم لازم فيه رقم ترمنل (أي ترمنل). من غيره مش إيصال سيستم. رقم إصدار البرنامج (v60 / v51...) ملوش علاقة
-  if (tid == null) return null;
+  // صورة سيستم قوية بس الترمنل مش مقروء: برضه مش باتش (بتتسجل بترمنل فاضي وبيطلع تحذير)
+  if (tid == null && !strong) return null;
 
   String? date;
   final dm = RegExp(r'(?<!\d)(\d{1,2})\s?[.\-/]\s?(\d{1,2})\s?[.\-/]\s?(20\d{2})(?!\d)').firstMatch(text);
@@ -1198,7 +1221,7 @@ String _fmtMoney(double v) {
 
 // نتايج قراءة كل صورة (بتتحفظ في SharedPreferences: بتتمسح مع "مسح البيانات والكاش").
 // الفحص الجديد بيقرا بس الصور الجديدة، والباقي بيتاخد من هنا.
-const int _kScanVer = 1;
+const int _kScanVer = 2;
 const String _kScanCacheKey = 'closing_scan_cache_v1';
 Map<String, dynamic> _scanCache = <String, dynamic>{};
 bool _scanCacheLoaded = false;
@@ -7583,6 +7606,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     await saveScanCache();
     for (final s in sysReads) {
+      if (s.tid == null) {
+        warnings.add('${s.file}: صورة سيستم (A2R Operations Console) بس مش قادر أقرا رقم الترمنل - مش محسوبة كباتش');
+      }
       if (s.amount == null) {
         warnings.add('${s.file}: صورة سيستم (A2R Operations Console) بس مش قادر أقرا المبلغ - مش محسوبة كباتش');
       }
