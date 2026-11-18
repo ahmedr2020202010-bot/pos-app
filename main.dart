@@ -67,6 +67,36 @@ bool _plausibleDay(String? d, String? m) {
   return !dt.isAfter(DateTime(n.year, n.month, n.day).add(const Duration(days: 1)));
 }
 
+// قراءة مقطوعة للتاريخ (1.11 بدل 18.11): نفس الشهر واليوم المقروء بداية اليوم الأغلب
+bool _truncatedDay(String a, String main) {
+  final pa = a.split('.'), pm = main.split('.');
+  if (pa.length != 2 || pm.length != 2) return false;
+  return pa[1] == pm[1] && pa[0].length < pm[0].length && pm[0].startsWith(pa[0]);
+}
+
+// مسار صورة السيستم (لو اتنقلت أو المسار القديم مش محفوظ بندوّر في فولدر الصور)
+String? _sysImagePath(SysTotal s) {
+  final cands = <String>[
+    if (s.path.isNotEmpty) s.path,
+    '$rawImagesDir/${s.file}',
+    '$rawImagesDir/wa_${s.file}',
+  ];
+  for (final p in cands) {
+    try {
+      if (File(p).existsSync()) return p;
+    } catch (_) {}
+  }
+  return null;
+}
+
+// يفتح صورة السيستم بحجم كبير (زوم)
+void _openSysImage(BuildContext c, String path) {
+  Navigator.push(
+    c,
+    MaterialPageRoute(builder: (_) => ReceiptZoomPage(path: path, title: _l(c, 'صورة السيستم', 'System image'))),
+  );
+}
+
 bool _pageEnd(Object e) => e.toString().contains('Invalid page index');
 
 // قراءة OCR بحد أقصى للوقت: لو ML Kit علّق على صفحة، الصفحة دي بس بتفشل والعد بيكمّل
@@ -1170,10 +1200,11 @@ class SysTotal {
   final String file;
   final int? txn; // إيصالات إلكترونية (ده الرقم اللي بنقارن بيه عدد إيصالات الدفع)
   final int? txnAll; // إجمالي العمليات
-  const SysTotal(this.tid, this.amount, this.date, this.printed, this.file, {this.txn, this.txnAll});
+  final String path; // المسار الكامل لصورة السيستم (علشان تتفتح من الكارت)
+  const SysTotal(this.tid, this.amount, this.date, this.printed, this.file, {this.txn, this.txnAll, this.path = ''});
 
   Map<String, dynamic> toJson() =>
-      {'tid': tid, 'amt': amount, 'date': date, 'pr': printed, 'f': file, 'tx': txn, 'ta': txnAll};
+      {'tid': tid, 'amt': amount, 'date': date, 'pr': printed, 'f': file, 'tx': txn, 'ta': txnAll, 'p': path};
 
   static SysTotal fromJson(Map m) => SysTotal(
         m['tid'] as String?,
@@ -1183,6 +1214,7 @@ class SysTotal {
         (m['f'] as String?) ?? '',
         txn: (m['tx'] as num?)?.toInt(),
         txnAll: (m['ta'] as num?)?.toInt(),
+        path: (m['p'] as String?) ?? '',
       );
 }
 
@@ -1224,7 +1256,7 @@ List<int?> _sysCounts(RecognizedText rt) {
   return [total, elec];
 }
 
-SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
+SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt, String path = ''}) {
   final up = text.toUpperCase();
   final hasTitle = RegExp(r'OPERATIONS?\s*CONS|A2R\s*OPER').hasMatch(up);
   final printedM = RegExp(
@@ -1262,9 +1294,14 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
 
   if (!strong) {
     // مفيش علامات كفاية: نتأكد من علامات تانية (Printed + EGP + ترمنل معروف) ومن إنه مش إيصال بنك
-    if (printedM == null || amount == null) return null;
-    if (classifyReceipt(text) != 'other') return null;
-    if (findTerminalIn([text]) == null) return null;
+    // أو: (تاريخ يوم.شهر.سنة + مبلغ EGP + ترمنل معروف) من غير أي كلمة من إيصال بنك (صور الشاشة اللي العنوان فيها مش مقروء)
+    final hasDmy = RegExp(r'(?<!\d)\d{1,2}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?20\d{2}(?!\d)').hasMatch(text);
+    final lenient = amount != null && hasDmy && findTerminalIn([text]) != null && classifyReceipt(text) == 'other';
+    if (!lenient) {
+      if (printedM == null || amount == null) return null;
+      if (classifyReceipt(text) != 'other') return null;
+      if (findTerminalIn([text]) == null) return null;
+    }
   } else if (classifyReceipt(text) == 'batch' && !hasTitle && !titleish) {
     return null; // إيصال بنك حقيقي، مش سيستم
   }
@@ -1285,7 +1322,7 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt}) {
     printed = '${printedM.group(1)}-${printedM.group(2)!.padLeft(2, '0')}-${printedM.group(3)!.padLeft(2, '0')} $tt';
   }
   final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
-  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1]);
+  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1], path: path);
 }
 
 String _fmtMoney(double v) {
@@ -2962,6 +2999,28 @@ String classifyReceipt(String text) {
   return 'other';
 }
 
+// صورة إيصالات دفع واضحة (كارت مخفي + RRN + Approved + Merchant Copy ...) ومفيهاش أي علامة باتش/ملخص/إعادة طباعة.
+// دي مش باتش ومش محتاجة مراجعة، فبتتستبعد تلقائي (حتى لو متصورة مع إيصالين أو ورقة تانية مش من البنك زي إيصال تأمين).
+// أي علامة باتش في الصورة = ما بنستبعدهاش لوحدنا وبتروح للمراجعة زي الأول.
+bool isPaymentPhoto(String text) {
+  final up = text.toUpperCase();
+  if (RegExp(r'BATCH\s*CLOS|SUCCESSF|GRAND\s*TOTAL|TOTAL\s*NET|THANK\s*YOU|NBE\s*NETWORK|HOTLINE|REPRINT|SUMMARY|DUPLICATE|SETTLEMENT')
+      .hasMatch(up)) {
+    return false;
+  }
+  final marks = <RegExp>[
+    RegExp(r'R{1,2}N\W{0,3}\d{9,}'),
+    RegExp(r'\d{4,6}\W{0,2}\*{3,}\W{0,2}\d{4}'),
+    RegExp(r'APPROVED'),
+    RegExp(r'AUTH\W{0,3}\d{6}'),
+    RegExp(r'I\s*AUTHORI[SZ]E'),
+    RegExp(r'MERCHANT\s*COPY'),
+    RegExp(r'CLESS|CHIP\s*ONLINE'),
+    RegExp(r'NO\s*PIN|PLEASE\s*SIGN'),
+  ];
+  return marks.where((r) => r.hasMatch(up)).length >= 4;
+}
+
 // لو GRAND TOTAL = مجموع إجماليات الكروت (حتى لو أسماء الكروت اتقرت غلط): نرجّعه مؤكد.
 double? sumClosure(List<String> texts) {
   final cnt = <double, int>{};
@@ -3111,13 +3170,22 @@ int? findUnitExtraIn(List<String> texts) {
 }
 
 String? findDateIn(List<String> texts) {
-  final reg = RegExp(r"DATE\s*:?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})",
+  // الـ OCR بيغلط: 0→O ، 1→I/l ، 8→B ، 2→Z
+  final reg = RegExp(
+      r"DATE\s*:?\s*([0-9OoIl]{4})\s*[-/.]\s*([0-9OoIl]{1,2})\s*[-/.]\s*([0-9OoIlBSZ]{1,2})",
       caseSensitive: false);
+  int? num(String s) => int.tryParse(s
+      .replaceAll(RegExp(r'[Oo]'), '0')
+      .replaceAll(RegExp(r'[Il]'), '1')
+      .replaceAll('B', '8')
+      .replaceAll('S', '5')
+      .replaceAll('Z', '2'));
   for (final t in texts) {
     final m = reg.firstMatch(t);
     if (m != null) {
-      final mo = int.tryParse(m.group(2)!) ?? 0;
-      final d = int.tryParse(m.group(3)!) ?? 0;
+      final mo = num(m.group(2)!) ?? 0;
+      final d = num(m.group(3)!) ?? 0;
+      if (mo < 1 || mo > 12 || d < 1 || d > 31) continue;
       return "$d.$mo";
     }
   }
@@ -7573,7 +7641,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (sl != null)
           Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: _flagChip(context, sl.text, sl.ok ? Colors.green : Colors.red),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: sl.imagePath == null ? null : () => _openSysImage(context, sl.imagePath!),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(child: _flagChip(context, sl.text, sl.ok ? Colors.green : Colors.red)),
+                  if (sl.imagePath != null) ...[
+                    const SizedBox(width: 4),
+                    Icon(Icons.image_outlined, size: 18, color: cs.onSurfaceVariant),
+                  ],
+                ],
+              ),
+            ),
           ),
         _warnChips(item),
       ],
@@ -7587,12 +7668,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final diff = _sysDiffOf(item);
     if (sys == null || sys.amount == null || diff == null) return null;
     final head = '🖥️ ${_l(context, 'السيستم', 'System')}: ${_fmtMoney(sys.amount!)} ج.م';
-    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true);
+    final img = _sysImagePath(sys);
+    if (diff == 0) return SysLine('$head ✓ ${_l(context, 'مطابق', 'Matches')}', true, imagePath: img);
     return SysLine(
         '$head | ${_l(context, 'فرق', 'Gap')}: '
         '${diff > 0 ? _l(context, 'زيادة', 'Extra') : _l(context, 'ناقص', 'Missing')} '
         '${diff.abs().toStringAsFixed(2)} ج.م',
-        false);
+        false,
+        imagePath: img);
   }
 
   String subtitleOf(ReceiptItem item, {bool flags = true}) {
@@ -8011,16 +8094,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           var hit = true;
           if (ignPre == 'keep' && kind != 'receipt') hit = false;
           if (kind == 'none' && autoRotate && ce['ar'] != true) hit = false;
+          if (kind == 'pay' && ce['auto'] == null) hit = false; // نتيجة قديمة: نعيد تصنيفها مرة واحدة
           if (hit && kind == 'receipt') {
             final ct = ce['tid'];
             if (ct is String && !terminals.containsKey(ct)) hit = false;
           }
           if (hit) {
             if (kind == 'console') {
-              sysReads.add(SysTotal.fromJson(ce));
+              sysReads.add(SysTotal.fromJson({...ce, if (((ce['p'] as String?) ?? '').isEmpty) 'p': f.path}));
             } else if (kind == 'pay') {
               excludedPay.add(baseName(f.path));
-              if (ignPre != 'drop') {
+              if (ignPre != 'drop' && ce['auto'] != true) {
                 final igItem = ReceiptItem(path: f.path, key: ckey, how: 'none', ignoredDoc: true);
                 ignoredItems.add(igItem);
                 processedItems.add(igItem);
@@ -8068,7 +8152,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final ign = (fxm is Map && fxm['ign'] is String) ? fxm['ign'] as String : null;
         // صورة السيستم (A2R Operations Console): مش باتش، بناخد منها الترمنل والإجمالي بس
         if (ign != 'keep') {
-          final sp = parseSysConsole(res.text, baseName(f.path), rt: res);
+          final sp = parseSysConsole(res.text, baseName(f.path), rt: res, path: f.path);
           if (sp != null) {
             sysReads.add(sp);
             _cachePut(fkey, {'k': 'console', ...sp.toJson()});
@@ -8093,12 +8177,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (ign == 'keep') isReceipt = true; // قررت قبل كده إنها باتش
         // إيصال دفع أو مستند مش باتش/ملخص/ري برنت: بيدخل المراجعة (مش بيتتجاهل نهائي)
         var skipPay = false;
+        var autoPay = false; // إيصالات دفع واضحة: بتتستبعد من غير مراجعة
         if (isReceipt && ign != 'keep' && classifyReceipt(res.text) == 'payment') {
           isReceipt = false;
           skipPay = true;
+          autoPay = isPaymentPhoto(res.text);
         }
 
         // صورة مقلوبة؟ جرّب EXIF ثم 90 / 270 / 180
+        SysTotal? sysRot;
         if (!isReceipt && !skipPay && autoRotate) {
           for (final deg in const [0, 90, 270, 180]) {
             if (stopReq) break;
@@ -8107,6 +8194,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               final wrote = await fixImageAsync(f.path, tp, deg);
               if (!wrote) continue;
               final r2 = await recognizer.processImage(InputImage.fromFilePath(tp));
+              if (ign != 'keep') {
+                final sp2 = parseSysConsole(r2.text, baseName(f.path), rt: r2, path: f.path);
+                if (sp2 != null) {
+                  sysRot = sp2; // صورة سيستم بس متصورة مقلوبة/بزاوية
+                  break;
+                }
+              }
               if ((receiptScore(r2.text) >= 2 || findTerminalIn([r2.text]) != null) &&
                   classifyReceipt(r2.text) != 'payment') {
                 res = r2;
@@ -8120,6 +8214,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
 
         if (stopReq) break;
+        if (sysRot != null) {
+          sysReads.add(sysRot);
+          _cachePut(fkey, {'k': 'console', ...sysRot.toJson()});
+          if (!mounted) return;
+          setState(() {
+            progress = ((i + 1) / todo.length) * 0.5;
+            status = 'فحص OCR: ${i + 1} من ${todo.length} (صورة سيستم)';
+          });
+          continue;
+        }
         if (isReceipt) {
           final key = '${baseName(f.path)}:${f.lengthSync()}';
           final a = analyzeLines(toLines(res));
@@ -8211,8 +8315,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           processedItems.add(item); // يظهر فوراً (مؤقت) ويتنظّم في آخر المعالجة
         } else if (skipPay) {
           excludedPay.add(baseName(f.path));
-          _cachePut(fkey, {'k': 'pay'});
-          if (ign != 'drop') {
+          _cachePut(fkey, {'k': 'pay', 'auto': autoPay});
+          if (autoPay) _dbg('AUTO_DROP_PAY ${baseName(f.path)}');
+          if (ign != 'drop' && !autoPay) {
             final igItem = ReceiptItem(
               path: f.path,
               key: fkey,
@@ -8360,11 +8465,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final mainDate = mostCommon(dateVotes.keys.expand((k) => List.filled(dateVotes[k]!, k)).toList())?.key;
 
+    final nowD = DateTime.now();
+    final todayStr = '${nowD.day}.${nowD.month}';
     for (final r in kept) {
       final nm = baseName(r.path);
       if (mainDate != null && r.date != null && r.date != mainDate && r.dateFix == null) {
-        r.dateOdd = true; // بيدخل المراجعة
-        r.dateMain = mainDate;
+        if (mainDate == todayStr && _truncatedDay(r.date!, mainDate)) {
+          r.date = mainDate; // قراءة مقطوعة (1 بدل 18) مش تاريخ مختلف
+        } else {
+          r.dateOdd = true; // بيدخل المراجعة
+          r.dateMain = mainDate;
+        }
       }
       if (r.row != null && r.amount > 0) {
         if (!r.ok) warnings.add('$nm: ${r.unitName} = ${r.amount.toStringAsFixed(2)} (راجع المبلغ يدوياً)');
@@ -9078,7 +9189,8 @@ class ReceiptZoomPage extends StatelessWidget {
 class SysLine {
   final String text;
   final bool ok;
-  const SysLine(this.text, this.ok);
+  final String? imagePath; // صورة السيستم (لو موجودة بيتفتح عند الضغط)
+  const SysLine(this.text, this.ok, {this.imagePath});
 }
 
 class CropEditor extends StatefulWidget {
@@ -9962,11 +10074,24 @@ class _ReviewPageState extends State<ReviewPage> {
       for (final b in bad)
         Text(b, style: TextStyle(color: _tintFg(context, kReviewTone), fontSize: 13)),
       if (sl != null)
-        Text(sl.text,
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-                color: _tintFg(context, sl.ok ? Colors.green : Colors.red))),
+        InkWell(
+          onTap: sl.imagePath == null ? null : () => _openSysImage(context, sl.imagePath!),
+          child: Row(
+            children: [
+              Flexible(
+                child: Text(sl.text,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: _tintFg(context, sl.ok ? Colors.green : Colors.red))),
+              ),
+              if (sl.imagePath != null) ...[
+                const SizedBox(width: 6),
+                Icon(Icons.image_outlined, size: 18, color: _tintFg(context, sl.ok ? Colors.green : Colors.red)),
+              ],
+            ],
+          ),
+        ),
       if (good && sl == null)
         Text(_l(context, '✅ مفيش مشاكل', '✅ No problems'),
             style: TextStyle(color: _tintFg(context, Colors.green), fontSize: 13)),
