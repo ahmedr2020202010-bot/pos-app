@@ -8510,7 +8510,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     File(item.path),
                     width: 44,
                     height: 44,
-                    cacheWidth: 132,
                     fit: BoxFit.cover,
                   ),
                 ),
