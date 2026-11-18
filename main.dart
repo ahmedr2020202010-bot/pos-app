@@ -638,7 +638,7 @@ Widget _scanBar({
           child = Row(
             children: [
               Expanded(
-                flex: 3,
+                flex: 1,
                 child: FilledButton.icon(
                   onPressed: chainRunning ? null : onScanThis,
                   style: FilledButton.styleFrom(
@@ -650,16 +650,24 @@ Widget _scanBar({
                 ),
               ),
               const SizedBox(width: 8),
-              Expanded(
-                flex: 2,
-                child: OutlinedButton.icon(
+              SizedBox(
+                width: 84,
+                child: OutlinedButton(
                   onPressed: (chainRunning || homeBusyG || machBusyG) ? null : () => runAllScans(),
                   style: OutlinedButton.styleFrom(
                       minimumSize: const Size(0, 50),
-                      textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
-                  icon: const Icon(Icons.playlist_play, size: 20),
-                  label: const Text('فحص الكل'),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.playlist_play, size: 22),
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: const Text('فحص الكل', maxLines: 1, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -1664,6 +1672,10 @@ ThemeData _buildTheme(Brightness b) {
   // الدارك: خلفية زرقاء-فحمية هادية وطبقات أسطح واضحة (بدون تدرجات أو ظلال تقيلة)
   final cs = b == Brightness.dark
       ? base.copyWith(
+          primary: appSettings.seedIndex == kDefaultSeed ? const Color(0xFF5B8CFF) : null,
+          onPrimary: appSettings.seedIndex == kDefaultSeed ? Colors.white : null,
+          primaryContainer: appSettings.seedIndex == kDefaultSeed ? const Color(0xFF1F3C80) : null,
+          onPrimaryContainer: appSettings.seedIndex == kDefaultSeed ? Colors.white : null,
           surface: const Color(0xFF0D1117),
           surfaceContainerLow: const Color(0xFF141A22),
           surfaceContainer: const Color(0xFF171E27),
@@ -2244,13 +2256,6 @@ class AppTitle extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(color: cs.primary, borderRadius: BorderRadius.circular(10)),
-          child: Icon(Icons.point_of_sale_rounded, size: 19, color: cs.onPrimary),
-        ),
-        const SizedBox(width: 10),
         Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -5828,6 +5833,94 @@ Future<void> ensureNotifPerm(BuildContext context) async {
 
 String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : d == 2 ? '3 أيام' : 'الكل';
 
+// عدّاد صغير جوه لوحة الإحصائيات: رقم + اسم. بيتضغط بس لو ليه إجراء.
+Widget _statChip(IconData icon, String label, String value, MaterialColor c, {VoidCallback? onTap}) => Expanded(
+      child: Builder(builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        final dim = value == '0';
+        final col = dim ? cs.onSurfaceVariant.withAlpha(140) : _tone(ctx, c);
+        return InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: w.Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: col)),
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(icon, size: 12, color: col),
+                    const SizedBox(width: 3),
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(label, maxLines: 1, style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      }),
+    );
+
+// لوحة الإحصائيات الموحّدة: رقم رئيسي كبير فوق، وعدّادات ثانوية تحته في صف واحد
+Widget _statHero(BuildContext context, IconData icon, String label, String value, List<Widget> chips) {
+  final cs = Theme.of(context).colorScheme;
+  final kids = <Widget>[];
+  for (var i = 0; i < chips.length; i++) {
+    if (i > 0) kids.add(Container(width: 1, height: 30, color: cs.outlineVariant));
+    kids.add(chips[i]);
+  }
+  return Container(
+    padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+    decoration: BoxDecoration(
+      color: cs.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: cs.outlineVariant),
+    ),
+    child: Column(
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(color: cs.primary.withAlpha(34), borderRadius: BorderRadius.circular(11)),
+              child: Icon(icon, size: 21, color: cs.primary),
+            ),
+            const SizedBox(width: 10),
+            Text(label, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+            Expanded(
+              child: Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: w.Text(value,
+                      textDirection: TextDirection.ltr,
+                      style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w800, height: 1.1)),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Divider(height: 1, color: cs.outlineVariant),
+        const SizedBox(height: 2),
+        Row(children: kids),
+      ],
+    ),
+  );
+}
+
 // كارت إحصائية: الرقم هو الأبرز، الاسم تحته. بيتلوّن بحدود خفيفة لما الرقم مش صفر. بيتضغط بس لو ليه إجراء.
 Widget _statCard(IconData icon, String label, String value, Color c,
         {VoidCallback? onTap, bool compact = false}) =>
@@ -6503,16 +6596,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         .toList();
     final total = counted.fold<double>(0, (a, e) => a + e.amount);
     final rv = processedItems.where((e) => e.needsReview).length;
-    return Row(
-      children: [
-        _statCard(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blueGrey, compact: true),
-        _statCard(Icons.payments, 'الإجمالي', total.toStringAsFixed(2), Colors.blueGrey, compact: true),
-        _statCard(Icons.warning_amber, 'ناقص', '${missingTerminals.length}', Colors.amber,
-            compact: true, onTap: missingTerminals.isEmpty ? null : openClosingReport),
-        _statCard(Icons.fact_check, 'مراجعة', '$rv', kReviewTone,
-            compact: true, onTap: rv == 0 ? null : openReview),
-      ],
-    );
+    return _statHero(context, Icons.payments_outlined, 'الإجمالي', total.toStringAsFixed(2), [
+      _statChip(Icons.receipt_long, 'إيصالات', '${counted.length}', Colors.blueGrey),
+      _statChip(Icons.warning_amber_rounded, 'ناقص', '${missingTerminals.length}', Colors.amber,
+          onTap: missingTerminals.isEmpty ? null : openClosingReport),
+      _statChip(Icons.fact_check_outlined, 'مراجعة', '$rv', kReviewTone, onTap: rv == 0 ? null : openReview),
+    ]);
   }
 
   Widget _quickBtn(IconData icon, String label, VoidCallback? onTap, {bool primary = false}) =>
@@ -8385,8 +8474,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           if (processedItems.isEmpty && !busy)
             _emptyState(context, Icons.receipt_long, _l(context, 'مفيش إيصالات لسه', 'No receipts yet'),
                 _l(context, 'اضغط "فحص التقفيل" علشان نقرا الباتشات وصور السيستم.',
-                    'Tap "Scan closing" to read the batches and system images.'),
-                actionLabel: _l(context, 'فحص التقفيل', 'Scan closing'), onAction: () => runFullPipeline()),
+                    'Tap "Scan closing" to read the batches and system images.')),
           if (processedItems.isNotEmpty && visItems.isEmpty)
             Padding(
               padding: const EdgeInsets.all(24),
@@ -8416,11 +8504,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 visualDensity: VisualDensity.compact,
                 contentPadding: const EdgeInsetsDirectional.fromSTEB(10, 0, 2, 0),
                 onTap: () => editReceipt(item),
-                leading: Image.file(
-                  File(item.path),
-                  width: 40,
-                  height: 40,
-                  fit: BoxFit.cover,
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(
+                    File(item.path),
+                    width: 44,
+                    height: 44,
+                    cacheWidth: 132,
+                    fit: BoxFit.cover,
+                  ),
                 ),
                 title: Row(
                   children: [
@@ -14179,15 +14271,12 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           _runAllCard(),
           _statusBox(status),
           const SizedBox(height: 6),
-          Row(
-            children: [
-              _statCard(Icons.description, 'ملفات', '${results.length}', Colors.blueGrey, compact: true),
-              _statCard(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.blueGrey, compact: true),
-              _statCard(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.blueGrey, compact: true),
-              _statCard(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber, compact: true),
-              _statCard(Icons.fact_check, 'مراجعة', '$reviewN', kReviewTone, compact: true),
-            ],
-          ),
+          _statHero(context, Icons.folder_copy_outlined, 'ملفات', '${results.length}', [
+            _statChip(Icons.drive_file_rename_outline, 'اتسمّى', '$named', Colors.blueGrey),
+            _statChip(Icons.receipt_long, 'إيصالات', '$totalRc', Colors.blueGrey),
+            _statChip(Icons.hourglass_bottom, 'لسه', '$pendCount', Colors.amber),
+            _statChip(Icons.fact_check_outlined, 'مراجعة', '$reviewN', kReviewTone),
+          ]),
           const SizedBox(height: 6),
           _actionRow([
             _quickBtnG(context, Icons.note_add_outlined, 'يدوي', busy ? null : pickManualPdfs, primary: true),
@@ -14242,9 +14331,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           if (results.isEmpty && !busy)
             _emptyState(context, Icons.folder_copy, _l(context, 'مفيش ملفات لسه', 'No files yet'),
                 _l(context, 'اضغط "فحص إيصالات الدفع" علشان نقرا ملفات الـ PDF ونسمّيها.',
-                    'Tap "Scan payment receipts" to read and rename the PDF files.'),
-                actionLabel: _l(context, 'فحص إيصالات الدفع', 'Scan payment receipts'),
-                onAction: () => _startCountAll()),
+                    'Tap "Scan payment receipts" to read and rename the PDF files.')),
           if (results.isNotEmpty && visRes.isEmpty)
             Padding(
               padding: const EdgeInsets.all(24),
