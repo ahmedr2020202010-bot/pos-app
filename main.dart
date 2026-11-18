@@ -4278,7 +4278,108 @@ void saveCrop(String path, List<List<double>>? qs) {
     File(cropStorePath)
       ..createSync(recursive: true)
       ..writeAsStringSync(jsonEncode(m));
+    cropRev.value++;
   } catch (_) {}
+}
+
+// بيتغير لما قص يدوي يتحفظ علشان الصور المصغرة تتحدّث
+final ValueNotifier<int> cropRev = ValueNotifier<int>(0);
+final Map<String, String> _thumbMemo = <String, String>{};
+Future<void> _thumbLock = Future<void>.value(); // بنحسب مصغرة واحدة في كل مرة علشان الأجهزة القديمة
+
+// صورة مصغرة للباتش بعد القص (نفس الصفحة اللي بتدخل الـ PDF). لحد ما تجهز بتعرض الصورة الأصلية.
+class _ReceiptThumb extends StatefulWidget {
+  final String path;
+  final bool load; // false أثناء الفحص علشان ما نزاحمش المعالجة
+  final double size;
+  const _ReceiptThumb({super.key, required this.path, this.load = true, this.size = 44});
+
+  @override
+  State<_ReceiptThumb> createState() => _ReceiptThumbState();
+}
+
+class _ReceiptThumbState extends State<_ReceiptThumb> {
+  String? _crop;
+  int _gen = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    cropRev.addListener(_load);
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReceiptThumb old) {
+    super.didUpdateWidget(old);
+    if (old.path != widget.path) {
+      _crop = null;
+      _load();
+    } else if (widget.load && !old.load) {
+      _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    cropRev.removeListener(_load);
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    if (!widget.load) return;
+    final gen = ++_gen;
+    final p = widget.path;
+    String? res;
+    try {
+      final f = File(p);
+      if (!f.existsSync()) return;
+      final st = f.statSync();
+      final mq = cropOf(p);
+      final key = '$p|${st.size}|${st.modified.millisecondsSinceEpoch}|${mq == null ? 'a' : jsonEncode(mq)}';
+      res = _thumbMemo[key];
+      if (res != null && !File(res).existsSync()) res = null;
+      if (res == null) {
+        final prev = _thumbLock;
+        final done = Completer<void>();
+        _thumbLock = done.future;
+        try {
+          await prev;
+          if (!mounted || gen != _gen) return;
+          var l = <String>[];
+          if (mq != null) l = await scanReceiptAsync(p, manual: mq);
+          if (l.isEmpty) l = await scanReceiptAsync(p);
+          if (l.isNotEmpty) {
+            res = l.first;
+            _thumbMemo[key] = res;
+          }
+        } finally {
+          done.complete();
+        }
+      }
+    } catch (_) {}
+    if (!mounted || gen != _gen) return;
+    if (res != _crop) setState(() => _crop = res);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sz = widget.size;
+    return SizedBox(
+      width: sz,
+      height: sz,
+      child: Image.file(
+        File(_crop ?? widget.path),
+        key: ValueKey(_crop ?? widget.path),
+        width: sz,
+        height: sz,
+        fit: BoxFit.cover,
+        alignment: Alignment.topCenter,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => Icon(Icons.image_not_supported_outlined, size: sz * 0.5),
+      ),
+    );
+  }
 }
 
 // ───────── ضم باتش من صورة تانية: الصورة "المضيفة" بتاخد صور تانية جنبها في نفس صفحة الـ PDF ─────────
@@ -8506,12 +8607,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 onTap: () => editReceipt(item),
                 leading: ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: Image.file(
-                    File(item.path),
-                    width: 44,
-                    height: 44,
-                    fit: BoxFit.cover,
-                  ),
+                  child: _ReceiptThumb(key: ValueKey(item.path), path: item.path, load: !busy),
                 ),
                 title: Row(
                   children: [
