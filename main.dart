@@ -323,22 +323,40 @@ Widget _outputCard(
 }
 
 // كارت الإعدادات مطوي في سطر ملخّص واحد (المصدر • الفترة • المخرجات) وبالضغط عليه يفتح بكل الإعدادات
-Widget _settingsCollapsed(BuildContext context, String summary, List<Widget> children) => Card(
-      margin: const EdgeInsets.only(bottom: 6),
-      clipBehavior: Clip.antiAlias,
-      child: Theme(
-        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-        child: ExpansionTile(
-          tilePadding: const EdgeInsets.symmetric(horizontal: 10),
-          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
-          dense: true,
-          maintainState: true,
-          leading: const Icon(Icons.tune, size: 20),
-          title: Text(summary, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
-          children: [Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children)],
+Widget _settingsCollapsed(BuildContext context, String summary, List<Widget> children) {
+  final cs = Theme.of(context).colorScheme;
+  return Container(
+    margin: const EdgeInsets.only(bottom: 6),
+    clipBehavior: Clip.antiAlias,
+    decoration: BoxDecoration(
+      color: cs.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: cs.outlineVariant),
+    ),
+    child: Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 10),
+        childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+        dense: true,
+        maintainState: true,
+        shape: const Border(),
+        collapsedShape: const Border(),
+        leading: Container(
+          width: 30,
+          height: 30,
+          decoration: BoxDecoration(color: cs.primary.withAlpha(34), borderRadius: BorderRadius.circular(9)),
+          child: Icon(Icons.tune_rounded, size: 18, color: cs.primary),
         ),
+        title: Text(summary,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500)),
+        children: [Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children)],
       ),
-    );
+    ),
+  );
+}
 
 Widget _switchRow(String label, bool v, void Function(bool)? onChanged) => SwitchListTile(
       dense: true,
@@ -430,20 +448,21 @@ Widget _countMethodsPanel({required bool busy, required VoidCallback onChanged})
 
 Widget _statusBox(String text) => Builder(
       builder: (c) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
-          color: Theme.of(c).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          color: Theme.of(c).colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Theme.of(c).colorScheme.outlineVariant),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
               padding: const EdgeInsets.only(top: 1),
-              child: Icon(Icons.info_outline, size: 16, color: Theme.of(c).colorScheme.onSurfaceVariant),
+              child: Icon(Icons.info_outline_rounded, size: 16, color: Theme.of(c).colorScheme.primary),
             ),
             const SizedBox(width: 8),
-            Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
+            Expanded(child: Text(text, style: const TextStyle(fontSize: 12.5))),
           ],
         ),
       ),
@@ -562,23 +581,28 @@ Future<Map<String, String>?> transferFilesViaPicker(BuildContext context, List<S
   return done;
 }
 
-Widget _bottomBar(Widget button, {bool busy = false, double? progress}) => Material(
-      elevation: 6,
+Widget _bottomBar(Widget button, {bool busy = false, double? progress}) => Builder(
+      builder: (c) => Material(
+      color: Theme.of(c).colorScheme.surface,
+      elevation: 0,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (busy)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
-                child: LinearProgressIndicator(value: (progress ?? 0) > 0 ? progress : null),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(minHeight: 4, value: (progress ?? 0) > 0 ? progress : null),
+                ),
               ),
-            SizedBox(height: 44, width: double.infinity, child: button),
+            SizedBox(height: 50, width: double.infinity, child: button),
           ],
         ),
       ),
-    );
+    ));
 
 // ───────── عناصر موحّدة بين تاب التقفيل وتاب إيصالات الدفع ─────────
 
@@ -605,6 +629,7 @@ Widget _scanBar({
           child = FilledButton.icon(
             onPressed: stopReq ? null : onStop,
             style: FilledButton.styleFrom(
+                minimumSize: const Size(0, 50),
                 backgroundColor: Theme.of(c).colorScheme.error, foregroundColor: Theme.of(c).colorScheme.onError),
             icon: const Icon(Icons.stop),
             label: Text(stopReq ? 'جاري الإيقاف...' : 'إيقاف$stepTxt$pct'),
@@ -616,8 +641,11 @@ Widget _scanBar({
                 flex: 3,
                 child: FilledButton.icon(
                   onPressed: chainRunning ? null : onScanThis,
-                  style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-                  icon: const Icon(Icons.play_arrow),
+                  style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 50),
+                      textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+                  icon: const Icon(Icons.play_arrow_rounded, size: 26),
                   label: Text(thisLabel),
                 ),
               ),
@@ -626,8 +654,11 @@ Widget _scanBar({
                 flex: 2,
                 child: OutlinedButton.icon(
                   onPressed: (chainRunning || homeBusyG || machBusyG) ? null : () => runAllScans(),
-                  style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
-                  icon: const Icon(Icons.playlist_play),
+                  style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 50),
+                      textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+                  icon: const Icon(Icons.playlist_play, size: 20),
                   label: const Text('فحص الكل'),
                 ),
               ),
@@ -680,34 +711,70 @@ Widget _moreMenu(BuildContext context, {required bool busy}) {
   );
 }
 
-// زرار دايرة (أيقونة + اسم) لصف الأزرار الموحّد
-Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallback? onTap) {
+// بلاطة إجراء مدمجة (أيقونة + اسم). primary = إجراء أساسي بتمييز لوني؛ غير كده إجراء ثانوي هادي.
+Widget _quickBtnG(BuildContext context, IconData icon, String label, VoidCallback? onTap, {bool primary = false}) {
   final cs = Theme.of(context).colorScheme;
-  return InkWell(
-    borderRadius: BorderRadius.circular(30),
-    onTap: onTap,
+  final en = onTap != null;
+  final fg = !en ? Theme.of(context).disabledColor : (primary ? cs.primary : cs.onSurface);
+  return Expanded(
     child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CircleAvatar(
-            radius: 17,
-            backgroundColor: onTap == null ? cs.surfaceContainerHighest : cs.primaryContainer,
-            child: Icon(icon, size: 19, color: onTap == null ? Theme.of(context).disabledColor : cs.onPrimaryContainer),
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Material(
+        color: !en ? Colors.transparent : (primary ? cs.primary.withAlpha(30) : cs.surfaceContainerHigh),
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            height: 54,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 21, color: fg),
+                  const SizedBox(height: 3),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(label,
+                        maxLines: 1,
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: fg)),
+                  ),
+                ],
+              ),
+            ),
           ),
-          const SizedBox(height: 2),
-          Text(label,
-              style: TextStyle(
-                  fontSize: 11, color: onTap == null ? Theme.of(context).disabledColor : null)),
-        ],
+        ),
       ),
     ),
   );
 }
 
-Widget _actionRow(List<Widget> kids) =>
-    Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: kids);
+// فاصل رأسي رفيع بين مجموعات الأزرار
+Widget _actionDivider() => Builder(
+      builder: (c) => Container(
+        width: 1,
+        height: 30,
+        margin: const EdgeInsets.symmetric(horizontal: 3),
+        color: Theme.of(c).colorScheme.outlineVariant,
+      ),
+    );
+
+// لوح الأزرار الموحّد: كل البلاطات في كارت واحد هادي بدل أزرار كبيرة منفصلة
+Widget _actionRow(List<Widget> kids) => Builder(
+      builder: (c) {
+        final cs = Theme.of(c).colorScheme;
+        return Container(
+          padding: const EdgeInsets.all(4),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: cs.outlineVariant),
+          ),
+          child: Row(children: kids),
+        );
+      },
+    );
 
 // تلميح السحب + زرار "الباقي صح" (نفس المكان والشكل في التابين)
 Widget _reviewTools(BuildContext context,
@@ -838,20 +905,27 @@ class _RootPageState extends State<RootPage> {
     AppSettings.of(context);
     return Scaffold(
       body: IndexedStack(index: tab, children: const [HomePage(), MachinesPage()]),
-      bottomNavigationBar: NavigationBar(
-        height: 60,
-        selectedIndex: tab,
-        onDestinationSelected: (i) => setState(() => tab = i),
-        destinations: [
-          NavigationDestination(
-            icon: _badged(homeBadge, Icons.receipt_long),
-            label: tr('التقفيل'),
-          ),
-          NavigationDestination(
-            icon: _badged(machBadge, Icons.folder_copy),
-            label: tr('إيصالات الدفع'),
-          ),
-        ],
+      bottomNavigationBar: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border(top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant)),
+        ),
+        child: NavigationBar(
+          height: 66,
+          selectedIndex: tab,
+          onDestinationSelected: (i) => setState(() => tab = i),
+          destinations: [
+            NavigationDestination(
+              icon: _badged(homeBadge, Icons.receipt_long_outlined),
+              selectedIcon: _badged(homeBadge, Icons.receipt_long),
+              label: tr('التقفيل'),
+            ),
+            NavigationDestination(
+              icon: _badged(machBadge, Icons.folder_copy_outlined),
+              selectedIcon: _badged(machBadge, Icons.folder_copy),
+              label: tr('إيصالات الدفع'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1544,7 +1618,7 @@ Future<void> wipeEverything(BuildContext context) async {
       }
     }
   } catch (_) {}
-  for (final p in [fixPath, mStatePath, closingStatePath, '$baseDir/id_debug.txt']) {
+  for (final p in [fixPath, cropStorePath, mergeStorePath, mStatePath, closingStatePath, '$baseDir/id_debug.txt']) {
     final f = File(p);
     if (f.existsSync()) delFile(f);
   }
@@ -1586,10 +1660,23 @@ void _syncBadge(ValueNotifier<int> n, int v) {
 }
 
 ThemeData _buildTheme(Brightness b) {
-  final cs = ColorScheme.fromSeed(seedColor: kSeeds[appSettings.seedIndex], brightness: b);
+  final base = ColorScheme.fromSeed(seedColor: kSeeds[appSettings.seedIndex], brightness: b);
+  // الدارك: خلفية زرقاء-فحمية هادية وطبقات أسطح واضحة (بدون تدرجات أو ظلال تقيلة)
+  final cs = b == Brightness.dark
+      ? base.copyWith(
+          surface: const Color(0xFF0D1117),
+          surfaceContainerLow: const Color(0xFF141A22),
+          surfaceContainer: const Color(0xFF171E27),
+          surfaceContainerHigh: const Color(0xFF1D2530),
+          surfaceContainerHighest: const Color(0xFF252E3A),
+          outlineVariant: const Color(0xFF2A3441),
+          onSurfaceVariant: const Color(0xFF9AA7B8),
+        )
+      : base;
   return ThemeData(
     useMaterial3: true,
     colorScheme: cs,
+    scaffoldBackgroundColor: cs.surface,
     appBarTheme: AppBarTheme(
       backgroundColor: cs.surface,
       foregroundColor: cs.onSurface,
@@ -1606,8 +1693,20 @@ ThemeData _buildTheme(Brightness b) {
     ),
     navigationBarTheme: NavigationBarThemeData(
       backgroundColor: cs.surfaceContainer,
-      indicatorColor: cs.secondaryContainer,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      indicatorColor: cs.primary.withAlpha(46),
+      indicatorShape: const StadiumBorder(),
       labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+      iconTheme: WidgetStateProperty.resolveWith((st) => IconThemeData(
+            size: 24,
+            color: st.contains(WidgetState.selected) ? cs.primary : cs.onSurfaceVariant,
+          )),
+      labelTextStyle: WidgetStateProperty.resolveWith((st) => TextStyle(
+            fontSize: 12,
+            fontWeight: st.contains(WidgetState.selected) ? FontWeight.w700 : FontWeight.w500,
+            color: st.contains(WidgetState.selected) ? cs.onSurface : cs.onSurfaceVariant,
+          )),
     ),
     inputDecorationTheme: InputDecorationTheme(
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
@@ -1780,6 +1879,14 @@ const Map<String, String> _kEnExact = {
   'واتساب': 'WhatsApp',
   'إكسيل': 'Excel',
   'تدوير': 'Rotate',
+  'قص': 'Crop',
+  'قص ✓': 'Crop ✓',
+  'إضافة باتش': 'Add batch',
+  'ضم باتش من صورة تانية': 'Merge batch from another image',
+  'قص الباتش': 'Crop batch',
+  'تطبيق على الـ PDF': 'Apply to PDF',
+  'تلقائي': 'Auto',
+  'مسح القص اليدوي': 'Clear manual crop',
   'السابق': 'Previous',
   'التالي': 'Next',
   'إيقاف': 'Stop',
@@ -2134,19 +2241,31 @@ class AppTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Column(
+    return Row(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const w.Text(
-          kAppName,
-          textDirection: TextDirection.ltr,
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, height: 1.1),
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(color: cs.primary, borderRadius: BorderRadius.circular(10)),
+          child: Icon(Icons.point_of_sale_rounded, size: 19, color: cs.onPrimary),
         ),
-        w.Text(
-          kAppAuthor,
-          textDirection: TextDirection.ltr,
-          style: TextStyle(fontSize: 10, height: 1.2, color: cs.onSurfaceVariant),
+        const SizedBox(width: 10),
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const w.Text(
+              kAppName,
+              textDirection: TextDirection.ltr,
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, height: 1.1, letterSpacing: 0.3),
+            ),
+            w.Text(
+              kAppAuthor,
+              textDirection: TextDirection.ltr,
+              style: TextStyle(fontSize: 10.5, height: 1.2, color: cs.onSurfaceVariant),
+            ),
+          ],
         ),
       ],
     );
@@ -3680,7 +3799,7 @@ double _dist(double x1, double y1, double x2, double y2) =>
 // بيرجّع أركان كل باتش في الصورة (بإحداثيات الصورة الأصلية). فاضي = مش عارف يلاقي ورقة.
 // mode 0: الكشف الأصلي (سطوع Otsu). mode 1: احتياطي بالتشبّع (الورقة رمادي/أبيض والترابيزة/الإيد ملوّنة).
 // mode 2: احتياطي لو الخلفية فاتحة: Otsu تاني على البكسلات الفاتحة بس (الورقة أفتح من الترابيزة الفاتحة).
-List<List<double>> _detectReceipts(img.Image im, {int mode = 0}) {
+List<List<double>> _detectReceipts(img.Image im, {int mode = 0, bool allowFull = true}) {
   final w = im.width, h = im.height;
   final s = 480.0 / math.max(w, h);
   final sw = math.max(16, (w * s).round());
@@ -3698,19 +3817,22 @@ List<List<double>> _detectReceipts(img.Image im, {int mode = 0}) {
     }
   }
   var th = _otsu(hist, total);
-  if (mode == 2) {
-    final h2 = List<int>.filled(256, 0);
-    var t2 = 0;
-    for (var i = 0; i < total; i++) {
-      if (lum[i] > th) {
-        h2[lum[i]]++;
-        t2++;
+  if (mode == 2 || mode == 3) {
+    // الورقة أفتح من الترابيزة الفاتحة: Otsu تاني (ولو mode 3 تالت) على البكسلات الفاتحة بس
+    for (var lvl = 0; lvl < (mode == 3 ? 2 : 1); lvl++) {
+      final h2 = List<int>.filled(256, 0);
+      var t2 = 0;
+      for (var i = 0; i < total; i++) {
+        if (lum[i] > th) {
+          h2[lum[i]]++;
+          t2++;
+        }
       }
+      if (t2 < total * 0.05) return [];
+      final th2 = _otsu(h2, t2);
+      if (th2 - th < 8) return [];
+      th = th2;
     }
-    if (t2 < total * 0.05) return [];
-    final th2 = _otsu(h2, t2);
-    if (th2 - th < 12) return [];
-    th = th2;
   } else if (mode == 1) {
     final sat = Uint8List(total);
     final sh2 = List<int>.filled(256, 0);
@@ -3771,7 +3893,7 @@ List<List<double>> _detectReceipts(img.Image im, {int mode = 0}) {
   final mainSize = comps[order.first].length;
   if (mainSize < total * 0.04) return [];
   if (mainSize > total * 0.9) {
-    if (mode != 0) return [];
+    if (mode != 0 || !allowFull) return [];
     // الصورة كلها ورقة (سكرين/اسكانر جاهز): بس نحسّنها
     return [
       [0.0, 0.0, w.toDouble(), 0.0, 0.0, h.toDouble(), w.toDouble(), h.toDouble()]
@@ -3797,6 +3919,52 @@ List<List<double>> _detectReceipts(img.Image im, {int mode = 0}) {
     return acy.compareTo(bcy);
   });
   return out;
+}
+
+// ثقة التحديد (0..1): الإيصال مستطيل طويل وضيق ومش هو الصورة كلها ولا حتة صغيرة
+double _quadScore(List<double> q, int iw, int ih) {
+  final wq = (_dist(q[0], q[1], q[2], q[3]) + _dist(q[4], q[5], q[6], q[7])) / 2;
+  final hq = (_dist(q[0], q[1], q[4], q[5]) + _dist(q[2], q[3], q[6], q[7])) / 2;
+  if (wq <= 0 || hq <= 0) return 0.0;
+  final ratio = math.max(wq, hq) / math.min(wq, hq);
+  final frac = _quadArea(q) / (iw * ih);
+  final rs = ((ratio - 1.3) / 0.9).clamp(0.0, 1.0).toDouble();
+  final ars = frac > 0.92 ? 0.0 : (frac < 0.03 ? 0.0 : (frac < 0.08 ? (frac - 0.03) / 0.05 : 1.0));
+  return 0.55 * rs + 0.45 * ars;
+}
+
+class _Det {
+  final List<List<double>> quads;
+  final double conf;
+  const _Det(this.quads, this.conf);
+}
+
+// بيجرّب طرق الكشف بالترتيب: أول نتيجة واثقة بيقف عندها (مفيش وقت زيادة)، ولو مفيش بيختار الأعلى ثقة
+_Det _detectBest(img.Image im) {
+  var best = <List<double>>[];
+  var bs = -1.0;
+  for (var k = 0; k < 5; k++) {
+    List<List<double>> qd;
+    try {
+      qd = k == 0
+          ? _detectReceipts(im, allowFull: false)
+          : (k == 4 ? _detectReceipts(im) : _detectReceipts(im, mode: k));
+    } catch (_) {
+      continue;
+    }
+    if (qd.isEmpty) continue;
+    var sc = 0.0;
+    for (final q in qd) {
+      sc += _quadScore(q, im.width, im.height);
+    }
+    sc /= qd.length;
+    if (sc >= 0.55) return _Det(qd, sc);
+    if (sc > bs) {
+      bs = sc;
+      best = qd;
+    }
+  }
+  return _Det(best, best.isEmpty ? 0.0 : bs);
 }
 
 // بيفرد الورقة (تعديل منظور) ويحسّنها: يشيل الظلال، يبيّض الخلفية، يغمّق الكتابة
@@ -4036,9 +4204,12 @@ List<String> _scanToPages(String src, String base) {
     var im = img.decodeImage(File(src).readAsBytesSync());
     if (im != null) {
       im = img.bakeOrientation(im);
-      var quads = _detectReceipts(im);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 1);
-      if (quads.isEmpty) quads = _detectReceipts(im, mode: 2);
+      // الترابيزة الفاتحة بتخلّي الكشف الأول يعتبر الصورة كلها ورقة: نجرّب كل الطرق الأول، وبعدين نرجع للصورة كاملة
+      final det = _detectBest(im);
+      final quads = det.quads;
+      try {
+        File('${base}_conf').writeAsStringSync(det.conf.toStringAsFixed(3));
+      } catch (_) {}
       for (final q0 in quads) {
         final q = _extendForCaption(im, q0);
         final o = _warpAndEnhance(im, q);
@@ -4057,13 +4228,227 @@ List<String> _scanToPages(String src, String base) {
   return out;
 }
 
-Future<List<String>> scanReceiptAsync(String src) async {
+// ───────── القص اليدوي: لكل باتش 4 أركان (نسب 0..1 من الصورة بعد تصحيح الاتجاه) بترتيب tl, tr, bl, br ─────────
+// الصورة الواحدة ممكن يبقى فيها أكتر من باتش: بنخزّن قايمة أركان (واحدة لكل باتش)
+final String cropStorePath = '$baseDir/.app_crops.json';
+
+Map<String, dynamic> _loadCrops() {
+  try {
+    return Map<String, dynamic>.from(jsonDecode(File(cropStorePath).readAsStringSync()) as Map);
+  } catch (_) {
+    return <String, dynamic>{};
+  }
+}
+
+List<List<double>>? cropOf(String path) {
+  final v = _loadCrops()[baseName(path)];
+  if (v is! List || v.isEmpty) return null;
+  try {
+    if (v.first is num) {
+      // الشكل القديم: باتش واحد
+      return v.length == 8
+          ? <List<double>>[
+              [for (final x in v) (x as num).toDouble()]
+            ]
+          : null;
+    }
+    final out = <List<double>>[];
+    for (final e in v) {
+      if (e is List && e.length == 8) out.add([for (final x in e) (x as num).toDouble()]);
+    }
+    return out.isEmpty ? null : out;
+  } catch (_) {
+    return null;
+  }
+}
+
+void saveCrop(String path, List<List<double>>? qs) {
+  try {
+    final m = _loadCrops();
+    if (qs == null || qs.isEmpty) {
+      m.remove(baseName(path));
+    } else {
+      m[baseName(path)] = qs;
+    }
+    File(cropStorePath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+// ───────── ضم باتش من صورة تانية: الصورة "المضيفة" بتاخد صور تانية جنبها في نفس صفحة الـ PDF ─────────
+// (الحسابات مبتتغيرش: كل صورة بمبلغها، الضم بيأثر على شكل الـ PDF بس)
+final String mergeStorePath = '$baseDir/.app_merge.json';
+
+Map<String, dynamic> _loadMerges() {
+  try {
+    return Map<String, dynamic>.from(jsonDecode(File(mergeStorePath).readAsStringSync()) as Map);
+  } catch (_) {
+    return <String, dynamic>{};
+  }
+}
+
+List<String> mergeOf(String path) {
+  final v = _loadMerges()[baseName(path)];
+  if (v is List) return [for (final e in v) e.toString()];
+  return <String>[];
+}
+
+// لو الصورة دي مضمومة لصورة تانية: بيرجّع اسم المضيفة
+String? mergedInto(String path) {
+  final n = baseName(path);
+  for (final e in _loadMerges().entries) {
+    final v = e.value;
+    if (v is List && v.map((x) => x.toString()).contains(n)) return e.key;
+  }
+  return null;
+}
+
+void saveMerge(String path, List<String>? names) {
+  try {
+    final m = _loadMerges();
+    if (names == null || names.isEmpty) {
+      m.remove(baseName(path));
+    } else {
+      m[baseName(path)] = names;
+    }
+    File(mergeStorePath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+class MergeCand {
+  final String path, label, sub;
+  const MergeCand(this.path, this.label, this.sub);
+}
+
+class CropResult {
+  final List<List<double>>? quads; // null + clear = مسح القص اليدوي
+  final List<String> merged; // أسماء ملفات الصور المضمومة
+  final bool clear;
+  const CropResult(this.quads, this.merged, {this.clear = false});
+}
+
+// شمال لليمين (زي ترتيب الباتشات في الـ PDF)
+List<List<double>> _sortQuads(List<List<double>> qs) {
+  final l = qs.map((q) => List<double>.from(q)).toList();
+  double cx(List<double> q) => (q[0] + q[2] + q[4] + q[6]) / 4;
+  double cy(List<double> q) => (q[1] + q[3] + q[5] + q[7]) / 4;
+  l.sort((a, b) {
+    final c = cx(a).compareTo(cx(b));
+    return c != 0 ? c : cy(a).compareTo(cy(b));
+  });
+  return l;
+}
+
+// بتشتغل في Isolate: قص يدوي بالأركان اللي المستخدم حددها (صفحة لكل باتش)
+List<String> _scanManual(String src, String base, List<List<double>> qs) {
+  try {
+    final cached = <String>[];
+    while (File('${base}_${cached.length}.jpg').existsSync()) {
+      cached.add('${base}_${cached.length}.jpg');
+    }
+    if (cached.length == qs.length) return cached;
+    var im = img.decodeImage(File(src).readAsBytesSync());
+    if (im == null) return <String>[];
+    im = img.bakeOrientation(im);
+    final w = im.width.toDouble(), h = im.height.toDouble();
+    final out = <String>[];
+    for (var k = 0; k < qs.length; k++) {
+      final q = qs[k];
+      final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
+      final o = _warpAndEnhance(im, px);
+      if (o == null) continue;
+      final p = '${base}_${out.length}.jpg';
+      File(p).writeAsBytesSync(img.encodeJpg(o, quality: 90));
+      out.add(p);
+    }
+    return out;
+  } catch (_) {
+    return <String>[];
+  }
+}
+
+// بتشتغل في Isolate: نسخة معاينة مصغّرة للصورة + الأركان (المحفوظة أو التلقائية)
+Map<String, dynamic> _prepCrop(String src, String dst, List<List<double>>? saved) {
+  var im = img.decodeImage(File(src).readAsBytesSync());
+  if (im == null) throw Exception('decode failed');
+  im = img.bakeOrientation(im);
+  final k = math.min(1.0, 1600.0 / math.max(im.width, im.height));
+  if (k < 1.0) {
+    im = img.copyResize(im,
+        width: (im.width * k).round(), height: (im.height * k).round(), interpolation: img.Interpolation.linear);
+  }
+  File(dst).writeAsBytesSync(img.encodeJpg(im, quality: 88));
+  List<List<double>>? qs = saved;
+  var auto = false;
+  var conf = 1.0;
+  if (qs == null) {
+    try {
+      final det = _detectBest(im);
+      conf = det.conf;
+      final quads = det.quads;
+      if (quads.isNotEmpty) {
+        final iw0 = im.width, ih0 = im.height;
+        qs = <List<double>>[
+          for (final a in quads)
+            [for (var i = 0; i < 8; i++) _cd(a[i] / (i.isEven ? iw0 : ih0), 0.0, 1.0)]
+        ];
+        auto = true;
+      }
+    } catch (_) {}
+  }
+  qs ??= <List<double>>[
+    [0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9]
+  ];
+  return <String, dynamic>{'w': im.width, 'h': im.height, 'qs': qs, 'auto': auto, 'conf': conf};
+}
+
+// بتشتغل في Isolate: المعاينة الحية للقص (نفس دالة الفرد والتحسين اللي بتتستخدم في الـ PDF)
+List<Uint8List> _warpPreview(String path, List<List<double>> qs) {
+  final res = <Uint8List>[];
+  try {
+    final im = img.decodeJpg(File(path).readAsBytesSync());
+    if (im == null) return res;
+    final w = im.width.toDouble(), h = im.height.toDouble();
+    for (final q in qs) {
+      final px = <double>[for (var i = 0; i < 8; i++) q[i] * (i.isEven ? w : h)];
+      final o = _warpAndEnhance(im, px);
+      if (o != null) res.add(Uint8List.fromList(img.encodeJpg(o, quality: 85)));
+    }
+  } catch (_) {}
+  return res;
+}
+
+Future<Map<String, dynamic>> prepCropAsync(String src, String dst, List<List<double>>? saved) =>
+    Isolate.run(() => _prepCrop(src, dst, saved));
+
+Future<List<Uint8List>> warpPreviewAsync(String path, List<List<double>> qs) =>
+    Isolate.run(() => _warpPreview(path, qs));
+
+final Map<String, double> autoConf = <String, double>{}; // ثقة القص التلقائي لكل صورة (0..1)
+
+Future<List<String>> scanReceiptAsync(String src, {List<List<double>>? manual}) async {
   try {
     final st = File(src).statSync();
     Directory('$baseDir/.scans').createSync(recursive: true);
     final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    final base = '$baseDir/.scans/v6_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
-    return await Isolate.run(() => _scanToPages(src, base));
+    final tag = manual == null
+        ? 'v8'
+        : 'm${manual.expand((q) => q).map((v) => (v * 10000).round()).join('_').hashCode.toUnsigned(32)}';
+    final base = '$baseDir/.scans/${tag}_${safe}_${st.size}_${st.modified.millisecondsSinceEpoch}';
+    if (manual != null) return await Isolate.run(() => _scanManual(src, base, manual));
+    final res = await Isolate.run(() => _scanToPages(src, base));
+    try {
+      final cf = File('${base}_conf');
+      if (cf.existsSync()) {
+        autoConf[src] = double.tryParse(cf.readAsStringSync()) ?? 1.0;
+      } else if (res.isEmpty) {
+        autoConf[src] = 0.0;
+      }
+    } catch (_) {}
+    return res;
   } catch (_) {
     return <String>[];
   }
@@ -5443,34 +5828,58 @@ Future<void> ensureNotifPerm(BuildContext context) async {
 
 String _periodLabelOf(int d) => d == 0 ? 'اليوم' : d == 1 ? 'يومين' : d == 2 ? '3 أيام' : 'الكل';
 
-// كارت إحصائية صغير (أيقونة + رقم + اسم) بيتوزع بالتساوي جوه Row
+// كارت إحصائية: الرقم هو الأبرز، الاسم تحته. بيتلوّن بحدود خفيفة لما الرقم مش صفر. بيتضغط بس لو ليه إجراء.
 Widget _statCard(IconData icon, String label, String value, Color c,
         {VoidCallback? onTap, bool compact = false}) =>
     Expanded(
       child: Builder(builder: (ctx) {
         final dim = value == '0';
         final cs = Theme.of(ctx).colorScheme;
-        final ic = dim ? cs.onSurfaceVariant.withAlpha(120) : c;
-        return Card(
-          margin: const EdgeInsets.symmetric(horizontal: 2),
-          clipBehavior: Clip.antiAlias,
-          color: dim ? null : c.withAlpha(_isDark(ctx) ? 40 : 28),
-          child: InkWell(
-            onTap: onTap,
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8, horizontal: 4),
-              child: Column(
-                children: [
-                  Icon(icon, size: compact ? 16 : 18, color: ic),
-                  const SizedBox(height: 1),
-                  FittedBox(
-                      child: w.Text(value,
-                          style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: compact ? 14 : 15,
-                              color: dim ? cs.onSurfaceVariant.withAlpha(160) : null))),
-                  Text(label, style: TextStyle(fontSize: compact ? 10.5 : 11, color: cs.onSurfaceVariant)),
-                ],
+        final accent = c == Colors.blueGrey ? cs.primary : c;
+        final active = !dim && c != Colors.blueGrey;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: Material(
+            color: active ? accent.withAlpha(_isDark(ctx) ? 34 : 26) : cs.surfaceContainerLow,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: active ? accent.withAlpha(120) : cs.outlineVariant),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onTap,
+              child: SizedBox(
+                height: 58,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: w.Text(value,
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 19,
+                                  height: 1.15,
+                                  color: dim ? cs.onSurfaceVariant.withAlpha(150) : cs.onSurface))),
+                      const SizedBox(height: 2),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(icon, size: 11, color: dim ? cs.onSurfaceVariant.withAlpha(120) : accent),
+                          const SizedBox(width: 3),
+                          Flexible(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Text(label, maxLines: 1, style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -5484,6 +5893,8 @@ Widget _filterRowCompact(bool reviewOnly, int all, int review, void Function(boo
   const fs = TextStyle(fontSize: 12);
   return Row(
     children: [
+      const Icon(Icons.filter_list_rounded, size: 16),
+      const SizedBox(width: 6),
       const Text('عرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
       const SizedBox(width: 8),
       ChoiceChip(
@@ -6104,8 +6515,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _quickBtn(IconData icon, String label, VoidCallback? onTap) =>
-      _quickBtnG(context, icon, label, onTap);
+  Widget _quickBtn(IconData icon, String label, VoidCallback? onTap, {bool primary = false}) =>
+      _quickBtnG(context, icon, label, onTap, primary: primary);
 
   Future<void> pickFolder() async {
     final perm = await Permission.manageExternalStorage.request();
@@ -6612,16 +7023,48 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     Future<bool> buildPdf(List<ReceiptItem> items, File out) async {
       final pdf = pw.Document();
       var pages = 0;
+      // الصور المضمومة: الصورة المضيفة بتاخدها جنبها في نفس الصفحة، والمضمومة مبتطلعش صفحة لوحدها
+      final mergeMap = _loadMerges();
+      final byBase = <String, ReceiptItem>{for (final x in items) baseName(x.path): x};
+      final mergedOf = <String, List<ReceiptItem>>{};
+      final hidden = <String>{};
+      for (final r in items) {
+        final names = mergeMap[baseName(r.path)];
+        if (names is! List) continue;
+        for (final nm in names) {
+          final m = byBase[nm.toString()];
+          if (m == null || identical(m, r)) continue;
+          (mergedOf[baseName(r.path)] ??= <ReceiptItem>[]).add(m);
+          hidden.add(nm.toString());
+        }
+      }
+      hidden.removeAll(mergedOf.keys); // مضيف مبيتخبّاش (يمنع الدوران)
+      Future<List<String>> pagesOf(String path) async {
+        var l = <String>[];
+        try {
+          final mq = cropOf(path);
+          if (mq != null) l = await scanReceiptAsync(path, manual: mq);
+          if (l.isEmpty) l = await scanReceiptAsync(path);
+        } catch (_) {}
+        return l.isEmpty ? <String>[path] : l;
+      }
+
       for (final r in items) {
         pageNo++;
+        if (hidden.contains(baseName(r.path))) continue;
         if (!File(r.path).existsSync()) continue;
         setState(() => status = 'جاري تجهيز صفحات الـ PDF ($pageNo / ${processedItems.length})...');
         // سكانر: قص الباتش بس + فرد المنظور + تحسين. لو فشل نستخدم الصورة الأصلية.
         var srcs = <String>[];
         try {
-          srcs = await scanReceiptAsync(r.path);
+          final mq = cropOf(r.path);
+          if (mq != null) srcs = await scanReceiptAsync(r.path, manual: mq);
+          if (srcs.isEmpty) srcs = await scanReceiptAsync(r.path);
         } catch (_) {}
         if (srcs.isEmpty) srcs = <String>[r.path];
+        for (final mi in mergedOf[baseName(r.path)] ?? const <ReceiptItem>[]) {
+          if (File(mi.path).existsSync()) srcs = [...srcs, ...await pagesOf(mi.path)];
+        }
         // أكتر من باتش في نفس الصورة: صفحة واحدة والباتشات جنب بعض (شمال ليمين زي ما هما في الصورة)
         if (srcs.length > 1) {
           try {
@@ -7893,20 +8336,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _statsRow(),
           const SizedBox(height: 6),
           _actionRow([
+            _quickBtn(Icons.add_photo_alternate_outlined, 'يدوي', busy ? null : pickManualImages, primary: true),
+            _quickBtn(Icons.drive_file_move_outlined, _l(context, 'نقل', 'Move'), busy ? null : transferOutputs,
+                primary: true),
+            _quickBtn(Icons.chat_outlined, 'إرسال الكل', busy ? null : sendToWhatsApp, primary: true),
+            _actionDivider(),
             _quickBtn(Icons.insights, _l(context, 'التقرير', 'Report'),
                 processedItems.isEmpty && sysReads.isEmpty ? null : openClosingReport),
             _quickBtn(
-                Icons.table_chart,
+                Icons.table_chart_outlined,
                 'إكسيل',
                 xlsx == null
                     ? null
                     : () => openFile(xlsx,
                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
-            _quickBtn(Icons.picture_as_pdf, 'PDF',
+            _quickBtn(Icons.picture_as_pdf_outlined, 'PDF',
                 pdf == null ? null : () => openFile(pdf, 'application/pdf')),
-            _quickBtn(Icons.chat, 'إرسال الكل', busy ? null : sendToWhatsApp),
-            _quickBtn(Icons.drive_file_move, _l(context, 'نقل', 'Move'), busy ? null : transferOutputs),
-            _quickBtn(Icons.add_photo_alternate, 'يدوي', busy ? null : pickManualImages),
           ]),
           if (processedItems.isNotEmpty) ...[
             const SizedBox(height: 4),
@@ -8349,7 +8794,8 @@ class _FolderPickerState extends State<FolderPicker> {
 class ZoomableImage extends StatefulWidget {
   final String path;
   final ValueChanged<bool>? onZoom; // بيبلّغ لما الصورة تتكبّر/ترجع (علشان السحب بين الباتشات)
-  const ZoomableImage({super.key, required this.path, this.onZoom});
+  final List<String>? paths; // لو موجودة: بتتعرض بدل الصورة الأصلية (الباتشات بعد القص، جنب بعض)
+  const ZoomableImage({super.key, required this.path, this.onZoom, this.paths});
 
   @override
   State<ZoomableImage> createState() => _ZoomableImageState();
@@ -8402,11 +8848,21 @@ class _ZoomableImageState extends State<ZoomableImage> {
         minScale: 1,
         maxScale: 12,
         child: Center(
-          child: Image.file(
-            File(widget.path),
-            fit: BoxFit.contain,
-            filterQuality: FilterQuality.high,
-          ),
+          child: (widget.paths != null && widget.paths!.isNotEmpty)
+              ? Row(children: [
+                  for (final pp in widget.paths!)
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.all(2),
+                        child: Image.file(File(pp), fit: BoxFit.contain, filterQuality: FilterQuality.high),
+                      ),
+                    ),
+                ])
+              : Image.file(
+                  File(widget.path),
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
+                ),
         ),
       ),
     );
@@ -8438,6 +8894,546 @@ class SysLine {
   const SysLine(this.text, this.ok);
 }
 
+class CropEditor extends StatefulWidget {
+  final String path;
+  final List<MergeCand> cands; // باقي الباتشات اللي ينفع تتضم جنب ده
+  final void Function(CropResult?) onDone; // null = إلغاء
+  final bool inline; // جوه شاشة المراجعة: من غير معاينة سفلية (النتيجة بتظهر في الصورة بعد التطبيق)
+  const CropEditor(
+      {super.key, required this.path, required this.onDone, this.cands = const <MergeCand>[], this.inline = false});
+
+  @override
+  State<CropEditor> createState() => _CropEditorState();
+}
+
+class _CropEditorState extends State<CropEditor> {
+  String err = '';
+  String? prev;
+  double iw = 1, ih = 1;
+  List<List<double>> qs = <List<double>>[
+    [0.1, 0.1, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9]
+  ];
+  int sel = 0; // الباتش المختار حاليًا
+  bool loading = true, failed = false, autoFound = false, busy = false;
+  double conf = 1.0; // ثقة التحديد التلقائي
+  final List<List<List<double>>> _hist = <List<List<double>>>[]; // للتراجع
+
+  void _snap() {
+    _hist.add([for (final q in qs) List<double>.from(q)]);
+    if (_hist.length > 30) _hist.removeAt(0);
+  }
+
+  void _undo() {
+    if (_hist.isEmpty) return;
+    setState(() {
+      qs = _hist.removeLast();
+      if (sel >= qs.length) sel = 0;
+    });
+    _schedule();
+  }
+  int drag = -1;
+  int _seq = 0;
+  List<Uint8List> outs = <Uint8List>[];
+  List<String> merged = <String>[]; // مسارات الصور المضمومة
+  final Map<String, List<Uint8List>> mb = <String, List<Uint8List>>{};
+  Timer? _t;
+
+  @override
+  void initState() {
+    super.initState();
+    _init(true);
+  }
+
+  String _labelOf(String p) {
+    for (final c in widget.cands) {
+      if (c.path == p) return '${c.label} • ${c.sub}';
+    }
+    return baseName(p);
+  }
+
+  // صفحات صورة مضمومة (بقصها اليدوي لو فيه، أو التلقائي)
+  Future<void> _loadMb(String p) async {
+    if (mb.containsKey(p)) return;
+    try {
+      var l = <String>[];
+      final mq = cropOf(p);
+      if (mq != null) l = await scanReceiptAsync(p, manual: mq);
+      if (l.isEmpty) l = await scanReceiptAsync(p);
+      final bytes = <Uint8List>[for (final f in l) File(f).readAsBytesSync()];
+      mb[p] = bytes.isEmpty ? <Uint8List>[File(p).readAsBytesSync()] : bytes;
+    } catch (_) {
+      mb[p] = <Uint8List>[];
+    }
+  }
+
+  Future<void> _pickMerge() async {
+    final avail = widget.cands.where((c) => !merged.contains(c.path)).toList();
+    if (avail.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مفيش باتشات تانية تتضم.')),
+      );
+      return;
+    }
+    final pick = await showModalBottomSheet<MergeCand>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('اختار الباتش اللي هيتضم جنب ده في الـ PDF',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            Flexible(
+              child: ListView(shrinkWrap: true, children: [
+                for (final c in avail)
+                  ListTile(
+                    leading: SizedBox(
+                      width: 44,
+                      height: 56,
+                      child: Image.file(File(c.path), cacheWidth: 120, fit: BoxFit.cover),
+                    ),
+                    title: Text(c.label),
+                    subtitle: Text(c.sub),
+                    onTap: () => Navigator.pop(ctx, c),
+                  ),
+              ]),
+            ),
+          ]),
+        ),
+      ),
+    );
+    if (pick == null || !mounted) return;
+    setState(() => busy = true);
+    await _loadMb(pick.path);
+    if (!mounted) return;
+    setState(() {
+      merged.add(pick.path);
+      busy = false;
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _init(bool useSaved) async {
+    setState(() {
+      loading = true;
+      failed = false;
+    });
+    try {
+      Directory('$baseDir/.scans').createSync(recursive: true);
+      final src = widget.path;
+      final safe = baseName(src).replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+      final st = File(src).statSync();
+      final dst = '$baseDir/.scans/cp_${safe}_${st.size}.jpg';
+      final saved = useSaved ? cropOf(src) : null;
+      final r = await prepCropAsync(src, dst, saved);
+      if (!mounted) return;
+      await FileImage(File(dst)).evict();
+      if (useSaved) {
+        final names = mergeOf(src);
+        merged = [
+          for (final n in names)
+            for (final c in widget.cands)
+              if (baseName(c.path) == n) c.path
+        ];
+        for (final p in merged) {
+          await _loadMb(p);
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        prev = dst;
+        iw = (r['w'] as int).toDouble();
+        ih = (r['h'] as int).toDouble();
+        qs = [
+          for (final q in (r['qs'] as List)) [for (final v in (q as List)) (v as num).toDouble()]
+        ];
+        sel = 0;
+        autoFound = r['auto'] == true;
+        conf = (r['conf'] as num?)?.toDouble() ?? 1.0;
+        loading = false;
+      });
+      _refreshPreview();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        loading = false;
+        failed = true;
+        err = e.toString();
+      });
+    }
+  }
+
+  void _schedule() {
+    _t?.cancel();
+    _t = Timer(const Duration(milliseconds: 150), _refreshPreview);
+  }
+
+  Future<void> _refreshPreview() async {
+    final p = prev;
+    if (p == null || widget.inline) return; // جوه المراجعة مفيش معاينة سفلية: مفيش داعي نحسبها
+    final qq = _sortQuads(qs);
+    final my = ++_seq;
+    setState(() => busy = true);
+    final b = await warpPreviewAsync(p, qq);
+    if (!mounted || my != _seq) return;
+    setState(() {
+      outs = b;
+      busy = false;
+    });
+  }
+
+  void _addBatch() {
+    if (qs.length >= 4) return;
+    _snap();
+    // باتش جديد صغير في نص الصورة، وإنت تسحب أركانه
+    setState(() {
+      qs.add(<double>[0.35, 0.3, 0.65, 0.3, 0.35, 0.7, 0.65, 0.7]);
+      sel = qs.length - 1;
+    });
+    _schedule();
+  }
+
+  void _removeBatch() {
+    if (qs.length <= 1) return;
+    _snap();
+    setState(() {
+      qs.removeAt(sel);
+      sel = 0;
+    });
+    _schedule();
+  }
+
+  // تدوير الصورة نفسها 90° (القص القديم بيتمسح لأن اتجاه الصورة اتغيّر)
+  Future<void> _rotate() async {
+    try {
+      saveCrop(widget.path, null);
+      await fixImageAsync(widget.path, widget.path, 90);
+      await FileImage(File(widget.path)).evict();
+      imageCache.clear();
+      await _init(false);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('مقدرتش أدوّر الصورة.')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final editor = LayoutBuilder(builder: (c, box) {
+      final sc = math.min(box.maxWidth / iw, box.maxHeight / ih);
+      final dw = iw * sc, dh = ih * sc;
+      final ox = (box.maxWidth - dw) / 2, oy = (box.maxHeight - dh) / 2;
+      Offset pt(int b, int i) => Offset(ox + qs[b][2 * i] * dw, oy + qs[b][2 * i + 1] * dh);
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanStart: (d) {
+          _snap();
+          var bestB = -1, bestI = -1;
+          var bd = 60.0;
+          for (var b = 0; b < qs.length; b++) {
+            for (var i = 0; i < 4; i++) {
+              final dd = (pt(b, i) - d.localPosition).distance;
+              // لو دايرتين متقاربين نفضّل الباتش المختار
+              if (dd < bd || (dd == bd && b == sel)) {
+                bd = dd;
+                bestB = b;
+                bestI = i;
+              }
+            }
+          }
+          if (bestB < 0) {
+            // مش على ركن: لو جوه إطار باتش نحرّكه كله
+            for (final b in <int>[sel, for (var k = 0; k < qs.length; k++) if (k != sel) k]) {
+              final xs = [for (var i = 0; i < 4; i++) pt(b, i).dx];
+              final ys = [for (var i = 0; i < 4; i++) pt(b, i).dy];
+              final lp = d.localPosition;
+              if (lp.dx >= xs.reduce(math.min) && lp.dx <= xs.reduce(math.max) &&
+                  lp.dy >= ys.reduce(math.min) && lp.dy <= ys.reduce(math.max)) {
+                drag = -2;
+                setState(() => sel = b);
+                return;
+              }
+            }
+          }
+          drag = bestI;
+          if (bestB >= 0) setState(() => sel = bestB);
+        },
+        onPanUpdate: (d) {
+          if (drag == -2) {
+            final q = qs[sel];
+            var dx = d.delta.dx / dw, dy = d.delta.dy / dh;
+            for (var i = 0; i < 4; i++) {
+              dx = dx < 0 ? math.max(dx, -q[2 * i]) : math.min(dx, 1.0 - q[2 * i]);
+              dy = dy < 0 ? math.max(dy, -q[2 * i + 1]) : math.min(dy, 1.0 - q[2 * i + 1]);
+            }
+            setState(() {
+              for (var i = 0; i < 4; i++) {
+                q[2 * i] += dx;
+                q[2 * i + 1] += dy;
+              }
+            });
+            return;
+          }
+          if (drag < 0) return;
+          setState(() {
+            qs[sel][2 * drag] = _cd((d.localPosition.dx - ox) / dw, 0.0, 1.0);
+            qs[sel][2 * drag + 1] = _cd((d.localPosition.dy - oy) / dh, 0.0, 1.0);
+          });
+        },
+        onPanEnd: (_) {
+          if (drag >= 0 || drag == -2) _schedule();
+          drag = -1;
+        },
+        child: Stack(children: [
+          Positioned(
+            left: ox,
+            top: oy,
+            width: dw,
+            height: dh,
+            child: Image.file(File(prev!), fit: BoxFit.fill, gaplessPlayback: true),
+          ),
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _CropPainter(
+                [
+                  for (var b = 0; b < qs.length; b++) [for (var i = 0; i < 4; i++) pt(b, i)]
+                ],
+                sel,
+              ),
+            ),
+          ),
+          // عدسة: بتكبّر المنطقة تحت صباعك وإنت بتسحب الركن (بتتحط في الجنب البعيد عن الصباع)
+          if (drag >= 0)
+            Builder(builder: (_) {
+              const ls = 120.0, zoom = 3.0;
+              final fp = pt(sel, drag);
+              final left = fp.dx < box.maxWidth / 2 ? box.maxWidth - ls - 8 : 8.0;
+              final top = fp.dy < box.maxHeight / 2 ? box.maxHeight - ls - 8 : 8.0;
+              return Positioned(
+                left: left,
+                top: top,
+                width: ls,
+                height: ls,
+                child: IgnorePointer(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.blueAccent, width: 3),
+                      color: Colors.black,
+                    ),
+                    child: ClipOval(
+                      child: Stack(children: [
+                        Positioned(
+                          left: ls / 2 - (fp.dx - ox) * zoom,
+                          top: ls / 2 - (fp.dy - oy) * zoom,
+                          width: dw * zoom,
+                          height: dh * zoom,
+                          child: Image.file(File(prev!), fit: BoxFit.fill, gaplessPlayback: true),
+                        ),
+                        const Center(child: Icon(Icons.add, color: Colors.redAccent, size: 22)),
+                      ]),
+                    ),
+                  ),
+                ),
+              );
+            }),
+        ]),
+      );
+    });
+
+    return loading
+            ? const Center(child: CircularProgressIndicator())
+            : failed
+                ? Center(child: Padding(padding: const EdgeInsets.all(16), child: Text('مقدرتش أفتح الصورة.\n$err', textAlign: TextAlign.center)))
+                : Column(children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+                      child: Text(
+                        autoFound
+                            ? (conf < 0.55
+                                ? '⚠️ التحديد التلقائي مش واثق منه - راجع الأركان واسحبها.'
+                                : (widget.inline
+                                    ? 'اسحب الدواير على الأركان، أو اسحب من جوه الإطار علشان تحرّكه كله.'
+                                    : 'اسحب الدواير على أركان الباتش. المعاينة تحت بتتحدّث لايف.'))
+                            : 'ما عرفتش ألقط الباتش تلقائي. اسحب الدواير على أركانه.',
+                        style: const TextStyle(fontSize: 12.5),
+                      ),
+                    ),
+                    if (merged.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+                        child: Wrap(spacing: 6, children: [
+                          for (final p in merged)
+                            Chip(
+                              label: Text('➕ ${_labelOf(p)}', style: const TextStyle(fontSize: 12)),
+                              visualDensity: VisualDensity.compact,
+                              onDeleted: () => setState(() => merged.remove(p)),
+                            ),
+                        ]),
+                      ),
+                    Expanded(flex: 7, child: editor),
+                    if (!widget.inline) ...[
+                    const Divider(height: 1),
+                    Expanded(
+                      flex: 3,
+                      child: Container(
+                        color: Colors.black12,
+                        width: double.infinity,
+                        child: Stack(children: [
+                          Positioned.fill(
+                            child: outs.isEmpty
+                                ? const Center(child: CircularProgressIndicator())
+                                : InteractiveViewer(
+                                    maxScale: 5,
+                                    child: Row(children: [
+                                      for (final o in outs)
+                                        Expanded(
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(2),
+                                            child: Image.memory(o, fit: BoxFit.contain, gaplessPlayback: true),
+                                          ),
+                                        ),
+                                      for (final p in merged)
+                                        for (final o in mb[p] ?? const <Uint8List>[])
+                                          Expanded(
+                                            child: Padding(
+                                              padding: const EdgeInsets.all(2),
+                                              child: Image.memory(o,
+                                                  fit: BoxFit.contain, gaplessPlayback: true, cacheWidth: 900),
+                                            ),
+                                          ),
+                                    ]),
+                                  ),
+                          ),
+                          if (busy && outs.isNotEmpty)
+                            const Positioned(
+                              top: 6,
+                              right: 6,
+                              child: SizedBox(
+                                  width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                            ),
+                        ]),
+                      ),
+                    ),
+                    ],
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Wrap(spacing: 8, runSpacing: 4, alignment: WrapAlignment.center, children: [
+                          OutlinedButton.icon(
+                            onPressed: _rotate,
+                            icon: const Icon(Icons.rotate_right),
+                            label: const Text('تدوير'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: qs.length < 4 ? _addBatch : null,
+                            icon: const Icon(Icons.add),
+                            label: const Text('إضافة باتش'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: qs.length > 1 ? _removeBatch : null,
+                            icon: const Icon(Icons.delete_outline),
+                            label: Text('حذف باتش ${sel + 1}'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: widget.cands.isEmpty ? null : _pickMerge,
+                            icon: const Icon(Icons.call_merge),
+                            label: const Text('ضم باتش من صورة تانية'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: _hist.isEmpty ? null : _undo,
+                            icon: const Icon(Icons.undo),
+                            label: const Text('تراجع'),
+                          ),
+                          OutlinedButton(
+                            onPressed: () {
+                              _snap();
+                              _init(false);
+                            },
+                            child: const Text('تلقائي'),
+                          ),
+                        ]),
+                        const SizedBox(height: 6),
+                        Row(children: [
+                          OutlinedButton(
+                            onPressed: () => widget.onDone(null),
+                            child: const Text('إلغاء'),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: () => widget.onDone(CropResult(_sortQuads(qs), [for (final p in merged) baseName(p)])),
+                              child: const Text('تطبيق على الـ PDF'),
+                            ),
+                          ),
+                        ]),
+                      ]),
+                    ),
+                  ]);
+  }
+}
+
+class _CropPainter extends CustomPainter {
+  final List<List<Offset>> quads; // لكل باتش: tl, tr, bl, br
+  final int sel;
+  _CropPainter(this.quads, this.sel);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (var b = 0; b < quads.length; b++) {
+      final p = quads[b];
+      final col = b == sel ? const Color(0xFF00AAFF) : const Color(0xFFFF9800);
+      final path = Path()
+        ..moveTo(p[0].dx, p[0].dy)
+        ..lineTo(p[1].dx, p[1].dy)
+        ..lineTo(p[3].dx, p[3].dy)
+        ..lineTo(p[2].dx, p[2].dy)
+        ..close();
+      canvas.drawPath(path, Paint()..color = col.withOpacity(0.13));
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = col
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = b == sel ? 2.5 : 1.8);
+      for (final o in p) {
+        canvas.drawCircle(o, 14, Paint()..color = col.withOpacity(0.33));
+        canvas.drawCircle(
+            o,
+            14,
+            Paint()
+              ..color = Colors.white
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2.5);
+        canvas.drawCircle(o, 3, Paint()..color = col);
+      }
+      if (quads.length > 1) {
+        final c = Offset((p[0].dx + p[1].dx + p[2].dx + p[3].dx) / 4, (p[0].dy + p[1].dy + p[2].dy + p[3].dy) / 4);
+        final tp = TextPainter(
+          text: TextSpan(
+              text: '${b + 1}',
+              style: TextStyle(color: col, fontSize: 28, fontWeight: FontWeight.bold)),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CropPainter old) => true;
+}
+
 class ReviewPage extends StatefulWidget {
   final List<ReceiptItem> items;
   final List<ReceiptItem>? allItems; // كل الإيصالات (لحساب رقم الباتش الإضافي)
@@ -8465,8 +9461,68 @@ class _ReviewPageState extends State<ReviewPage> {
   int? order;
   late PageController _pc;
   final ValueNotifier<bool> _zoomed = ValueNotifier<bool>(false);
+  // الباتشات بعد القص اليدوي (لكل صورة): بتتعرض في المراجعة بدل الصورة الأصلية، وبتتحدّث أول ما تحفظ القص
+  final Map<String, List<String>> _cropPages = <String, List<String>>{};
+  bool showOrig = false;
+  final Set<String> _cvDone = <String>{}; // الباتشات اللي اتجرّب لها القص التلقائي
+  final Map<String, bool> _autoLow = <String, bool>{}; // التلقائي مش واثق منه
 
   ReceiptItem get item => widget.items[idx];
+
+  Future<void> _loadCropView(String p) async {
+    final mq = cropOf(p);
+    if (mq == null) {
+      // تلقائي: للباتش المفتوح بس، في Isolate ومتكاشّي (نفس نتيجة الـ PDF)
+      if (_cvDone.contains(p)) return;
+      _cvDone.add(p);
+      try {
+        final l = await scanReceiptAsync(p);
+        if (!mounted) return;
+        _autoLow[p] = (autoConf[p] ?? 1.0) < 0.55;
+        if (l.isEmpty) {
+          setState(() {});
+          return;
+        }
+        for (final f in l) {
+          await FileImage(File(f)).evict();
+        }
+        _cropPages[p] = l;
+        setState(() {
+          showOrig = false;
+          rev++;
+        });
+      } catch (_) {}
+      return;
+    }
+    _autoLow.remove(p);
+    try {
+      final pages = <String>[];
+      pages.addAll(await scanReceiptAsync(p, manual: mq));
+      for (final n in mergeOf(p)) {
+        for (final x in (widget.allItems ?? widget.items)) {
+          if (baseName(x.path) != n || !File(x.path).existsSync()) continue;
+          var l = <String>[];
+          final q2 = cropOf(x.path);
+          if (q2 != null) l = await scanReceiptAsync(x.path, manual: q2);
+          if (l.isEmpty) l = await scanReceiptAsync(x.path);
+          pages.addAll(l.isEmpty ? <String>[x.path] : l);
+        }
+      }
+      if (!mounted) return;
+      if (pages.isEmpty) {
+        _cropPages.remove(p);
+      } else {
+        for (final f in pages) {
+          await FileImage(File(f)).evict();
+        }
+        _cropPages[p] = pages;
+      }
+      setState(() {
+        showOrig = false;
+        rev++;
+      });
+    } catch (_) {}
+  }
 
   @override
   void initState() {
@@ -8488,6 +9544,7 @@ class _ReviewPageState extends State<ReviewPage> {
   void load() {
     amt.text = item.amount > 0 ? item.amount.toStringAsFixed(2) : '';
     order = item.orderNum;
+    if (!_cropPages.containsKey(item.path)) _loadCropView(item.path);
   }
 
   void go(int i) {
@@ -8604,13 +9661,90 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
+  // قص يدوي: بيفتح محرّر القص جوه نفس الشاشة (من غير ما يفتح صفحة تانية)
+  bool cropMode = false;
+  List<MergeCand> cropCands = <MergeCand>[];
+  int _cropSigBefore = 0;
+
+  int _sigOf(String p) {
+    try {
+      final st = File(p).statSync();
+      return st.size ^ st.modified.millisecondsSinceEpoch;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  void cropBatch() {
+    final me = item;
+    final cands = <MapEntry<int, MergeCand>>[];
+    for (final x in (widget.allItems ?? widget.items)) {
+      if (identical(x, me) || x.path == me.path || x.skip || !File(x.path).existsSync()) continue;
+      final lab = x.orderNum != null ? machineLabel(x.orderNum, x.unitName) : (x.unitName ?? '؟');
+      final rank = (me.orderNum != null && x.orderNum == me.orderNum) ? 0 : 1; // نفس الماكينة الأول
+      cands.add(MapEntry(rank * 1000 + (x.orderNum ?? 999),
+          MergeCand(x.path, lab, x.amount > 0 ? '${x.amount.toStringAsFixed(2)} ج.م' : 'مبلغ غير مقروء')));
+    }
+    cands.sort((a, b) => a.key.compareTo(b.key));
+    _cropSigBefore = _sigOf(me.path);
+    setState(() {
+      cropCands = [for (final e in cands) e.value];
+      cropMode = true;
+    });
+  }
+
+  Future<void> _finishCrop(CropResult? r) async {
+    final p = item.path;
+    // الـ PageView اتشال وقت القص: نعمل controller جديد على الباتش الحالي
+    _pc.dispose();
+    _pc = PageController(initialPage: idx);
+    final rotated = _sigOf(p) != _cropSigBefore;
+    if (rotated) {
+      await FileImage(File(p)).evict();
+      imageCache.clear();
+      changed = true;
+    }
+    if (!mounted) return;
+    setState(() {
+      cropMode = false;
+      if (rotated) rev++;
+    });
+    if (r == null) return;
+    if (r.clear) {
+      saveCrop(p, null);
+      saveMerge(p, null);
+      _cropPages.remove(p);
+      _cvDone.remove(p);
+      setState(() {
+        showOrig = false;
+        rev++;
+      });
+      _loadCropView(p); // يرجع للتلقائي
+    } else {
+      saveCrop(p, r.quads);
+      saveMerge(p, r.merged);
+      _loadCropView(p); // الصورة في المراجعة بتتبدّل بالباتش المقصوص فوراً
+    }
+    changed = true;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(r.clear
+          ? 'اتمسح القص والضم، الـ PDF هيرجع للوضع التلقائي.'
+          : 'اتحفظ ✓ (${r.quads!.length} باتش${r.merged.isNotEmpty ? ' + ${r.merged.length} مضموم' : ''}) هيتطبق على الـ PDF أول ما تخلّص المراجعة.'),
+    ));
+    setState(() {});
+  }
+
   Future<void> rotate() async {
     try {
+      saveCrop(item.path, null); // التدوير بيغيّر اتجاه الصورة فالقص القديم مبقاش صالح
+      _cropPages.remove(item.path);
+      _cvDone.remove(item.path);
       await fixImageAsync(item.path, item.path, 90);
       await FileImage(File(item.path)).evict();
       imageCache.clear();
       changed = true;
       setState(() => rev++);
+      _loadCropView(item.path);
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -8691,8 +9825,9 @@ class _ReviewPageState extends State<ReviewPage> {
                   });
                 },
                 itemBuilder: (c, i) => ZoomableImage(
-                  key: ValueKey('${widget.items[i].path}#${i == idx ? rev : 0}'),
+                  key: ValueKey('${widget.items[i].path}#${i == idx ? rev : 0}#${showOrig ? 'o' : 'c'}'),
                   path: widget.items[i].path,
+                  paths: showOrig ? null : _cropPages[widget.items[i].path],
                   onZoom: (zz) {
                     if (i == idx) _zoomed.value = zz;
                   },
@@ -8710,13 +9845,40 @@ class _ReviewPageState extends State<ReviewPage> {
                 context,
                 MaterialPageRoute(
                   builder: (_) => ReceiptZoomPage(
-                    path: it.path,
+                    path: (!showOrig && (_cropPages[it.path]?.length ?? 0) == 1) ? _cropPages[it.path]!.first : it.path,
                     title: it.orderNum != null ? machineLabel(it.orderNum, it.unitName) : (it.unitName ?? '؟'),
                   ),
                 ),
               ),
             ),
           ),
+          if (_cropPages.containsKey(it.path))
+            Positioned(
+              top: 4,
+              right: 4,
+              child: FilterChip(
+                selected: !showOrig,
+                avatar: Icon(showOrig ? Icons.image_outlined : Icons.crop, size: 16),
+                label: Text(
+                    showOrig
+                        ? 'الأصلي'
+                        : (cropOf(it.path) != null
+                            ? 'المقصوص ✓'
+                            : (_autoLow[it.path] == true ? 'تلقائي ⚠️ راجعه' : 'تلقائي ✓')),
+                    style: const TextStyle(fontSize: 12)),
+                onSelected: (_) => setState(() => showOrig = !showOrig),
+              ),
+            ),
+          if (!_cropPages.containsKey(it.path) && _autoLow[it.path] == true)
+            Positioned(
+              top: 4,
+              right: 4,
+              child: ActionChip(
+                avatar: const Icon(Icons.warning_amber, size: 16),
+                label: const Text('مش لاقي الباتش تلقائي - دوس قص', style: TextStyle(fontSize: 12)),
+                onPressed: cropBatch,
+              ),
+            ),
         ],
       ),
     );
@@ -8727,6 +9889,17 @@ class _ReviewPageState extends State<ReviewPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _problemsBox(it),
+          if (cropOf(it.path) != null || mergeOf(it.path).isNotEmpty || mergedInto(it.path) != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                  [
+                    if (cropOf(it.path) != null) '✂️ قص يدوي مطبّق على الباتش ده في الـ PDF',
+                    if (mergeOf(it.path).isNotEmpty) '➕ فيه ${mergeOf(it.path).length} باتش مضموم جنبه في نفس صفحة الـ PDF',
+                    if (mergedInto(it.path) != null) '➕ الباتش ده مضموم لصفحة صورة تانية في الـ PDF (مش بيطلع صفحة لوحده)',
+                  ].join('\n'),
+                  style: TextStyle(color: _tintFg(context, Colors.blue), fontSize: 13)),
+            ),
           if (it.dupSuspect || it.userExcluded)
             Container(
               margin: const EdgeInsets.only(bottom: 8),
@@ -8960,6 +10133,19 @@ class _ReviewPageState extends State<ReviewPage> {
                 label: const Text('تدوير'),
               ),
               const SizedBox(width: 8),
+              if (cropOf(it.path) != null || mergeOf(it.path).isNotEmpty)
+                FilledButton.tonalIcon(
+                  onPressed: cropBatch,
+                  icon: const Icon(Icons.crop),
+                  label: const Text('قص ✓'),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: cropBatch,
+                  icon: const Icon(Icons.crop),
+                  label: const Text('قص'),
+                ),
+              const SizedBox(width: 8),
               Expanded(
                 child: FilledButton(
                   onPressed: () => save(),
@@ -8975,19 +10161,31 @@ class _ReviewPageState extends State<ReviewPage> {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) Navigator.pop(context, changed);
+        if (didPop) return;
+        if (cropMode) {
+          _finishCrop(null);
+        } else {
+          Navigator.pop(context, changed);
+        }
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text('مراجعة ${idx + 1} / ${widget.items.length}'
+          title: Text(cropMode ? 'قص الباتش' : 'مراجعة ${idx + 1} / ${widget.items.length}'
               '${done.contains(it) ? '  ✓' : ''}'
               '  •  ${it.needsReview ? _l(context, '⚠️ محتاج مراجعة', '⚠️ Needs review') : _l(context, '✅ سليم', '✅ OK')}',
               style: const TextStyle(fontSize: 16)),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
-            onPressed: () => Navigator.pop(context, changed),
+            onPressed: () => cropMode ? _finishCrop(null) : Navigator.pop(context, changed),
           ),
-          actions: [
+          actions: cropMode
+              ? [
+                  TextButton(
+                    onPressed: () => _finishCrop(const CropResult(null, <String>[], clear: true)),
+                    child: const Text('مسح القص اليدوي'),
+                  ),
+                ]
+              : [
             IconButton(
               icon: const Icon(Icons.navigate_before),
               tooltip: tr('السابق'),
@@ -9001,7 +10199,15 @@ class _ReviewPageState extends State<ReviewPage> {
           ],
         ),
         body: SafeArea(
-          child: LayoutBuilder(
+          child: cropMode
+              ? CropEditor(
+                  key: ValueKey('crop${it.path}'),
+                  path: it.path,
+                  cands: cropCands,
+                  inline: true,
+                  onDone: _finishCrop,
+                )
+              : LayoutBuilder(
             builder: (context, c) {
               if (c.maxWidth > 600) {
                 return Row(
@@ -10157,25 +11363,30 @@ Widget _emptyState(BuildContext context, IconData icon, String title, String sub
     {String? actionLabel, VoidCallback? onAction}) {
   final cs = Theme.of(context).colorScheme;
   return Padding(
-    padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 24),
+    padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 24),
     child: Column(
       children: [
-        CircleAvatar(
-          radius: 40,
-          backgroundColor: cs.primaryContainer,
-          child: Icon(icon, size: 40, color: cs.onPrimaryContainer),
+        Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            color: cs.primary.withAlpha(30),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: cs.primary.withAlpha(80)),
+          ),
+          child: Icon(icon, size: 30, color: cs.primary),
         ),
-        const SizedBox(height: 16),
-        w.Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 6),
-        w.Text(sub, textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+        const SizedBox(height: 14),
+        w.Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 4),
+        w.Text(sub, textAlign: TextAlign.center, style: TextStyle(fontSize: 12.5, height: 1.4, color: cs.onSurfaceVariant)),
         if (actionLabel != null && onAction != null) ...[
-          const SizedBox(height: 18),
+          const SizedBox(height: 16),
           FilledButton.icon(
             onPressed: onAction,
-            icon: const Icon(Icons.play_arrow),
+            icon: const Icon(Icons.play_arrow_rounded),
             label: w.Text(actionLabel),
-            style: FilledButton.styleFrom(minimumSize: const Size(0, 48), padding: const EdgeInsets.symmetric(horizontal: 24)),
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 46), padding: const EdgeInsets.symmetric(horizontal: 24)),
           ),
         ],
       ],
@@ -12979,13 +14190,16 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
           ),
           const SizedBox(height: 6),
           _actionRow([
+            _quickBtnG(context, Icons.note_add_outlined, 'يدوي', busy ? null : pickManualPdfs, primary: true),
+            _quickBtnG(context, Icons.drive_file_move_outlined, _l(context, 'نقل', 'Move'),
+                (busy && !namingDone) || results.every((r) => r.excluded) ? null : transferGood,
+                primary: true),
+            _quickBtnG(context, Icons.chat_outlined, 'إرسال الكل ($named)',
+                (busy && !namingDone) || named == 0 ? null : shareAll,
+                primary: true),
+            _actionDivider(),
             _quickBtnG(context, Icons.insights, _l(context, 'التقرير', 'Report'),
                 results.isEmpty ? null : openOverview),
-            _quickBtnG(context, Icons.chat, 'إرسال الكل ($named)',
-                (busy && !namingDone) || named == 0 ? null : shareAll),
-            _quickBtnG(context, Icons.drive_file_move, _l(context, 'نقل', 'Move'),
-                (busy && !namingDone) || results.every((r) => r.excluded) ? null : transferGood),
-            _quickBtnG(context, Icons.note_add, 'يدوي', busy ? null : pickManualPdfs),
           ]),
           const SizedBox(height: 4),
           _filterRowCompact(reviewOnly, results.length, reviewN, (v) => setState(() => reviewOnly = v)),
