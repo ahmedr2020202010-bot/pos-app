@@ -1193,18 +1193,42 @@ Widget _runAllCard() => ValueListenableBuilder<String>(
 // ───────── مبلغ السيستم (صورة A2R Operations Console) + حفظ نتايج فحص التقفيل ─────────
 // صورة السيستم: فيها رقم الترمنل + "إجمالي مبالغ السيستم". مش باتش، فمتتعدّش، والمبلغ بيتربط بالباتشات بالترمنل.
 class SysTotal {
-  final String? tid; // رقم الترمنل المقروء
-  final double? amount; // إجمالي مبالغ السيستم
+  String? tid; // رقم الترمنل المقروء (قابل للتعديل من شاشة المراجعة)
+  double? amount; // إجمالي مبالغ السيستم (قابل للتعديل)
   final String? date; // بنفس صيغة تاريخ الإيصالات (يوم.شهر)
   final String printed; // وقت الطباعة (لو فيه أكتر من صورة لنفس الترمنل ناخد الأحدث)
   final String file;
   final int? txn; // إيصالات إلكترونية (ده الرقم اللي بنقارن بيه عدد إيصالات الدفع)
   final int? txnAll; // إجمالي العمليات
   final String path; // المسار الكامل لصورة السيستم (علشان تتفتح من الكارت)
-  const SysTotal(this.tid, this.amount, this.date, this.printed, this.file, {this.txn, this.txnAll, this.path = ''});
+  List<double> cands; // احتمالات المبالغ المقروءة من الصورة
+  bool manual; // اتعدّلت يدوياً؟
 
-  Map<String, dynamic> toJson() =>
-      {'tid': tid, 'amt': amount, 'date': date, 'pr': printed, 'f': file, 'tx': txn, 'ta': txnAll, 'p': path};
+  SysTotal(
+    this.tid,
+    this.amount,
+    this.date,
+    this.printed,
+    this.file, {
+    this.txn,
+    this.txnAll,
+    this.path = '',
+    List<double>? cands,
+    this.manual = false,
+  }) : cands = cands ?? <double>[];
+
+  Map<String, dynamic> toJson() => {
+        'tid': tid,
+        'amt': amount,
+        'date': date,
+        'pr': printed,
+        'f': file,
+        'tx': txn,
+        'ta': txnAll,
+        'p': path,
+        'cands': cands,
+        'man': manual,
+      };
 
   static SysTotal fromJson(Map m) => SysTotal(
         m['tid'] as String?,
@@ -1215,7 +1239,85 @@ class SysTotal {
         txn: (m['tx'] as num?)?.toInt(),
         txnAll: (m['ta'] as num?)?.toInt(),
         path: (m['p'] as String?) ?? '',
+        cands: ((m['cands'] as List?) ?? const []).map((e) => (e as num).toDouble()).toList(),
+        manual: m['man'] == true,
       );
+}
+
+// حساب مسافة التعديل (تبديل/حذف/إضافة) لمعالجة مؤشر الماوس فوق الرقم
+int _editDist(String a, String b) {
+  final n = a.length, m = b.length;
+  var prev = List<int>.generate(m + 1, (j) => j);
+  var cur = List<int>.filled(m + 1, 0);
+  for (var i = 1; i <= n; i++) {
+    cur[0] = i;
+    for (var j = 1; j <= m; j++) {
+      final cost = a[i - 1] == b[j - 1] ? 0 : 1;
+      cur[j] = math.min(math.min(prev[j] + 1, cur[j - 1] + 1), prev[j - 1] + cost);
+    }
+    final tmp = prev;
+    prev = cur;
+    cur = tmp;
+  }
+  return prev[m];
+}
+
+// مطابقة مرنة لترمنل صورة السيستم (تتجاهل مؤشر الماوس I / T / | / l والمسافات)
+String? _findSysTidFuzzy(String text) {
+  final dist = <String, int>{};
+  final re = RegExp(r'[56S][0O][\d\s/Il|!TJ\[\]\(\)\-_.:]{4,12}\d');
+  for (final m in re.allMatches(text)) {
+    final raw = m.group(0)!;
+    final variants = <String>{
+      raw.replaceAll(RegExp(r'[Oo]'), '0').replaceAll('S', '5').replaceAll('/', '7').replaceAll(RegExp(r'\D'), ''),
+      raw
+          .replaceAll(RegExp(r'[Oo]'), '0')
+          .replaceAll('S', '5')
+          .replaceAll('/', '7')
+          .replaceAll(RegExp(r'[Il|!]'), '1')
+          .replaceAll(RegExp(r'\D'), ''),
+    };
+    for (final digits in variants) {
+      if (digits.length < 7 || digits.length > 9) continue;
+      for (final tid in terminals.keys) {
+        final d = _editDist(digits, tid);
+        if (d < (dist[tid] ?? 99)) dist[tid] = d;
+      }
+    }
+  }
+  if (dist.isEmpty) return null;
+  final best = dist.values.reduce(math.min);
+  final winners = dist.entries.where((e) => e.value == best).map((e) => e.key).toList();
+  if (best <= 1 && winners.length == 1) return winners.first;
+  return null;
+}
+
+// استخراج احتمالات المبالغ في صورة السيستم (المبلغ المرتبط بـ EGP أولاً ثم أي مبالغ عشرية تانية)
+List<double> _sysCandidateAmounts(String text) {
+  final out = <double>[];
+  void add(double? v) {
+    if (v == null || v < 1 || v > 5000000) return;
+    final r = round2(v);
+    if (!out.any((x) => (x - r).abs() < 0.005)) out.add(r);
+  }
+
+  final egpRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:[,. ]\d{3})+|\d+)[.,](\d{2})\s*E\s?G\s?[PRF]', caseSensitive: false);
+  final egpVals = <double>[];
+  for (final m in egpRe.allMatches(text)) {
+    final v = double.tryParse('${m.group(1)!.replaceAll(RegExp(r'[,. ]'), '')}.${m.group(2)!}');
+    if (v != null) egpVals.add(round2(v));
+  }
+  egpVals.sort((a, b) => b.compareTo(a));
+  for (final v in egpVals) {
+    add(v);
+  }
+
+  final looseRe = RegExp(r'(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d{2,})[.,](\d{2})(?!\d)');
+  for (final m in looseRe.allMatches(text)) {
+    final v = double.tryParse('${m.group(1)!.replaceAll(',', '')}.${m.group(2)!}');
+    add(v);
+  }
+  return out.take(5).toList();
 }
 
 // أعداد صورة السيستم من مواقع الأسطر (الـ OCR لاتيني فبيقرا الأرقام بس، والعناوين العربي مش مقروءة).
@@ -1291,6 +1393,9 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt, String 
   }
   // قراءة غلط في رقم أو اتنين: أقرب ترمنل معروف (بشرط يكون واحد بس)
   tid ??= findTerminalFuzzyIn([text], null);
+  tid ??= _findSysTidFuzzy(text);
+  final cands = _sysCandidateAmounts(text);
+  amount ??= cands.isNotEmpty ? cands.first : null;
 
   if (!strong) {
     // مفيش علامات كفاية: نتأكد من علامات تانية (Printed + EGP + ترمنل معروف) ومن إنه مش إيصال بنك
@@ -1322,7 +1427,7 @@ SysTotal? parseSysConsole(String text, String file, {RecognizedText? rt, String 
     printed = '${printedM.group(1)}-${printedM.group(2)!.padLeft(2, '0')}-${printedM.group(3)!.padLeft(2, '0')} $tt';
   }
   final cnt = rt == null ? <int?>[null, null] : _sysCounts(rt);
-  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1], path: path);
+  return SysTotal(tid, amount, date, printed, file, txnAll: cnt[0], txn: cnt[1], path: path, cands: cands);
 }
 
 String _fmtMoney(double v) {
@@ -4884,11 +4989,37 @@ void logScan({
   } catch (_) {}
 }
 
+final ValueNotifier<int> unreadNotifG = ValueNotifier<int>(0);
+
+class NotificationBellButton extends StatelessWidget {
+  const NotificationBellButton({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: unreadNotifG,
+      builder: (context, count, _) => IconButton(
+        tooltip: tr('سجل الإشعارات'),
+        icon: Badge(
+          isLabelVisible: count > 0,
+          label: w.Text(count > 99 ? '99+' : '$count'),
+          child: Icon(count > 0 ? Icons.notifications_active_outlined : Icons.notifications_outlined),
+        ),
+        onPressed: () {
+          unreadNotifG.value = 0;
+          showAutoLog(context);
+        },
+      ),
+    );
+  }
+}
+
 // بيسجّل الإشعار في السجل وبيبعته لشريط التليفون (بصوت واهتزاز لو فيه مشكلة، وهادي لو تمام)
 Future<void> postAutoNotify(
     {required String tab, required String title, required String text, required bool bad, String? openKey}) async {
   final payload = openKey == null ? null : '$tab|$openKey';
   _addLog(tab, title, text, bad, payload, 'auto');
+  unreadNotifG.value++;
   try {
     await _chan.invokeMethod('notify', {
       'title': tr(title),
@@ -4900,6 +5031,7 @@ Future<void> postAutoNotify(
 }
 
 void showAutoLog(BuildContext context) {
+  unreadNotifG.value = 0;
   Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AutoLogPage()));
 }
 
@@ -5309,6 +5441,32 @@ void saveFix(ReceiptItem item) {
       ..createSync(recursive: true)
       ..writeAsStringSync(jsonEncode(m));
   } catch (_) {}
+}
+
+void saveSysFix(SysTotal s) {
+  if (s.file.isEmpty) return;
+  try {
+    final m = loadFixes();
+    m['sys:${s.file}'] = {'tid': s.tid, 'amt': s.amount};
+    File(fixPath)
+      ..createSync(recursive: true)
+      ..writeAsStringSync(jsonEncode(m));
+  } catch (_) {}
+}
+
+void applySysFix(SysTotal s) {
+  final fx = loadFixes()['sys:${s.file}'];
+  if (fx is! Map) return;
+  final t = fx['tid'];
+  if (t is String && terminals.containsKey(t)) {
+    s.tid = t;
+    s.manual = true;
+  }
+  final a = fx['amt'];
+  if (a is num && a > 0) {
+    s.amount = round2(a.toDouble());
+    s.manual = true;
+  }
 }
 
 // صورة كان التطبيق متجاهلها: ادخلها كباتش (هتكمّل المبلغ والماكينة بإيدك)
@@ -6255,6 +6413,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         for (final e in (m['sys'] as List? ?? const []))
           if (e is Map) SysTotal.fromJson(e)
       ];
+      for (final s in sys) {
+        applySysFix(s);
+      }
       if (its.isEmpty && sys.isEmpty) return;
       processedItems.addAll(its);
       sysReads.addAll(sys);
@@ -6462,9 +6623,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (key != null) _openByKeyHome(key, 0);
   }
 
-  // بيفتح شاشة تعديل الإيصال اللي جه عنه الإشعار (لو الفحص لسه شغال بيستنى يخلص)
+  // بيفتح شاشة تعديل الإيصال أو صورة السيستم اللي جه عنها الإشعار (لو الفحص لسه شغال بيستنى يخلص)
   Future<void> _openByKeyHome(String key, int tries) async {
     if (!mounted) return;
+    if (key.startsWith('sys:')) {
+      final f = key.substring(4);
+      SysTotal? sy;
+      for (final s in sysReads) {
+        if (s.file == f) {
+          sy = s;
+          break;
+        }
+      }
+      if (sy == null || busy) {
+        if (tries < 15) {
+          await Future.delayed(const Duration(milliseconds: 600));
+          return _openByKeyHome(key, tries + 1);
+        }
+        return;
+      }
+      await editSysTotal(sy);
+      return;
+    }
     ReceiptItem? it;
     for (final e in processedItems) {
       if (e.key == key) {
@@ -6641,30 +6821,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final newNames = ready.map((e) => baseName(e.value.path)).toSet();
       for (final sy in sysReads) {
         if (!newNames.contains(sy.file)) continue;
-        final t = sy.tid != null ? terminals[sy.tid] : null;
-        final label = t != null ? machineLabel(t.orderNum, t.unitName) : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
-        if (sy.amount == null) {
-          lines.add('⚠️ صورة سيستم ($label): مش قادر أقرا المبلغ - راجعها');
-          continue;
-        }
-        var tot = 0.0;
-        var has = false;
-        if (t != null) {
-          for (final x in processedItems) {
-            if (x.counts && x.amount > 0 && x.orderNum == t.orderNum) {
-              tot += x.amount;
-              has = true;
-            }
-          }
-        }
-        final amt = sy.amount!.toStringAsFixed(2);
-        if (!has) {
-          lines.add('🖥️ صورة سيستم $label: $amt ج.م (لسه مفيش باتش للمقارنة)');
-        } else {
-          final d = round2(tot - sy.amount!);
-          lines.add(d == 0
-              ? '✅ صورة سيستم $label: $amt ج.م - مطابق للباتشات'
-              : '⚠️ صورة سيستم $label: $amt ج.م - فرق ${d.toStringAsFixed(2)} عن مجموع الباتشات');
+        final line = _sysLiteLine(sy);
+        lines.add(line);
+        final isBad = line.startsWith('⚠️');
+        if (openKey == null || (isBad && !openBad)) {
+          openKey = 'sys:${sy.file}';
+          openBad = isBad;
         }
       }
     } catch (e) {
@@ -6673,6 +6835,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       quickBusyG = false;
     }
     if (lines.isNotEmpty) await _quickNotify(lines, openKey: openKey);
+  }
+
+  String _sysLiteLine(SysTotal sy) {
+    final t = sy.tid != null ? terminals[sy.tid] : null;
+    final label = t != null ? machineLabel(t.orderNum, t.unitName) : (sy.tid != null ? 'ترمنل ${sy.tid}' : sy.file);
+    if (sy.tid == null) {
+      return '⚠️ صورة سيستم ($label): مش قادر أقرا الترمنل - اضغط للمراجعة';
+    }
+    if (sy.amount == null) {
+      return '⚠️ صورة سيستم ($label): مش قادر أقرا المبلغ - اضغط للمراجعة';
+    }
+    var tot = 0.0;
+    var has = false;
+    if (t != null) {
+      for (final x in processedItems) {
+        if (x.counts && x.amount > 0 && x.orderNum == t.orderNum) {
+          tot += x.amount;
+          has = true;
+        }
+      }
+    }
+    final amt = sy.amount!.toStringAsFixed(2);
+    if (!has) {
+      return '🖥️ صورة سيستم $label: $amt ج.م (لسه مفيش باتش للمقارنة)';
+    }
+    final d = round2(tot - sy.amount!);
+    return d == 0
+        ? '✅ صورة سيستم $label: $amt ج.م - مطابق للباتشات'
+        : '⚠️ صورة سيستم $label: $amt ج.م - فرق ${d.toStringAsFixed(2)} عن مجموع الباتشات';
   }
 
   // سطر النتيجة لكل إيصال جديد (من نتيجة فحص التقفيل نفسها)
@@ -7503,6 +7694,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return best;
   }
 
+  Future<void> editSysTotal(SysTotal sy) async {
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => SysReviewPage(sys: sy, allItems: processedItems)),
+    );
+    if (changed == true) {
+      _saveClosing(force: true);
+      await _refresh();
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
   // تقرير التقفيل: مبالغ السيستم + الماكينات الناقصة + كل الملاحظات + الإيصالات اللي محتاجة مراجعة
   Future<void> openClosingReport() async {
     await Navigator.push(
@@ -7515,6 +7719,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           warnings: List<String>.from(warnings),
           subtitleOf: subtitleOf,
           onOpen: editReceipt,
+          onOpenSys: editSysTotal,
         ),
       ),
     );
@@ -7841,6 +8046,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               if (ln == null) continue;
               logScan(tab: 'home', title: ln, bad: ln.startsWith('⚠️'), kind: logKind, openKey: it.key);
             }
+            for (final sy in sysReads) {
+              final ln = _sysLiteLine(sy);
+              logScan(tab: 'home', title: ln, bad: ln.startsWith('⚠️'), kind: logKind, openKey: 'sys:${sy.file}');
+            }
           }
         } catch (_) {}
       }
@@ -8099,9 +8308,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             final ct = ce['tid'];
             if (ct is String && !terminals.containsKey(ct)) hit = false;
           }
+          if (hit && kind == 'console') {
+            if (ce['tid'] == null || ce['cands'] == null) hit = false;
+          }
           if (hit) {
             if (kind == 'console') {
-              sysReads.add(SysTotal.fromJson({...ce, if (((ce['p'] as String?) ?? '').isEmpty) 'p': f.path}));
+              final cs0 = SysTotal.fromJson({...ce, if (((ce['p'] as String?) ?? '').isEmpty) 'p': f.path});
+              applySysFix(cs0);
+              sysReads.add(cs0);
             } else if (kind == 'pay') {
               excludedPay.add(baseName(f.path));
               if (ignPre != 'drop' && ce['auto'] != true) {
@@ -8154,6 +8368,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (ign != 'keep') {
           final sp = parseSysConsole(res.text, baseName(f.path), rt: res, path: f.path);
           if (sp != null) {
+            applySysFix(sp);
             sysReads.add(sp);
             _cachePut(fkey, {'k': 'console', ...sp.toJson()});
             if (!mounted) return;
@@ -8215,6 +8430,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
         if (stopReq) break;
         if (sysRot != null) {
+          applySysFix(sysRot);
           sysReads.add(sysRot);
           _cachePut(fkey, {'k': 'console', ...sysRot.toJson()});
           if (!mounted) return;
@@ -8584,6 +8800,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         titleSpacing: 12,
         title: const AppTitle(),
         actions: [
+          const NotificationBellButton(),
           const HeaderButtons(),
           _moreMenu(context, busy: busy),
         ],
@@ -9182,6 +9399,217 @@ class ReceiptZoomPage extends StatelessWidget {
         foregroundColor: Colors.white,
       ),
       body: SafeArea(child: ZoomableImage(path: path)),
+    );
+  }
+}
+
+class SysReviewPage extends StatefulWidget {
+  final SysTotal sys;
+  final List<ReceiptItem> allItems;
+  const SysReviewPage({super.key, required this.sys, required this.allItems});
+
+  @override
+  State<SysReviewPage> createState() => _SysReviewPageState();
+}
+
+class _SysReviewPageState extends State<SysReviewPage> {
+  late String? tid = widget.sys.tid != null && terminals.containsKey(widget.sys.tid) ? widget.sys.tid : null;
+  late final TextEditingController amtCtl = TextEditingController(
+    text: widget.sys.amount != null ? widget.sys.amount!.toStringAsFixed(2) : '',
+  );
+  late List<double> cands = List<double>.from(widget.sys.cands);
+  bool reading = false;
+
+  @override
+  void dispose() {
+    amtCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _reRead() async {
+    final imgPath = _sysImagePath(widget.sys);
+    if (imgPath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الصورة مش موجودة.')));
+      return;
+    }
+    setState(() => reading = true);
+    final rec = TextRecognizer(script: TextRecognitionScript.latin);
+    SysTotal? best;
+    try {
+      Directory(tmpDir).createSync(recursive: true);
+      for (final deg in const [0, 90, 270, 180]) {
+        for (final enh in const [true, false]) {
+          final tp = '$tmpDir/resys_$deg.jpg';
+          await fixImageAsync(imgPath, tp, deg);
+          var rp = tp;
+          if (enh) {
+            rp = '$tmpDir/resys_${deg}_e.jpg';
+            await enhanceImageAsync(tp, rp);
+          }
+          final res = await rec.processImage(InputImage.fromFilePath(rp));
+          final sp = parseSysConsole(res.text, widget.sys.file, rt: res, path: imgPath);
+          if (sp == null) continue;
+          if (best == null || (best.tid == null && sp.tid != null) || (best.amount == null && sp.amount != null)) {
+            best = sp;
+          }
+          for (final c in sp.cands) {
+            if (!cands.any((x) => (x - c).abs() < 0.005)) cands.add(c);
+          }
+          if (best.tid != null && best.amount != null) break;
+        }
+        if (best != null && best.tid != null && best.amount != null) break;
+      }
+    } finally {
+      await rec.close();
+    }
+    if (!mounted) return;
+    setState(() {
+      reading = false;
+      if (best?.tid != null && terminals.containsKey(best!.tid)) tid = best.tid;
+      if (best?.amount != null) amtCtl.text = best!.amount!.toStringAsFixed(2);
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: w.Text(best?.tid != null
+          ? '✅ اتقرا الترمنل ${best!.tid}${best.amount != null ? ' • المبلغ ${best.amount!.toStringAsFixed(2)}' : ''}'
+          : 'مقدرتش أقرا الترمنل تلقائياً، اختار الماكينة من القايمة.'),
+    ));
+  }
+
+  void _save() {
+    final v = double.tryParse(amtCtl.text.replaceAll(',', '').trim());
+    if (v == null || v <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اكتب مبلغ صحيح')));
+      return;
+    }
+    widget.sys.tid = tid;
+    widget.sys.amount = round2(v);
+    widget.sys.cands = cands;
+    widget.sys.manual = true;
+    saveSysFix(widget.sys);
+    Navigator.pop(context, true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final imgPath = _sysImagePath(widget.sys);
+    final nums = numToTid.keys.toList()..sort();
+    final info = tid != null ? terminals[tid] : null;
+    double? batchTot;
+    if (info != null) {
+      var s = 0.0;
+      var has = false;
+      for (final x in widget.allItems) {
+        if (x.counts && x.amount > 0 && x.orderNum == info.orderNum) {
+          s += x.amount;
+          has = true;
+        }
+      }
+      if (has) batchTot = round2(s);
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        toolbarHeight: 54,
+        title: const Text('مراجعة صورة السيستم'),
+        actions: [
+          IconButton(
+            tooltip: tr('إعادة قراءة الترمنل'),
+            icon: reading
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.document_scanner_outlined),
+            onPressed: reading ? null : _reRead,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            flex: 5,
+            child: Container(
+              color: Colors.black,
+              width: double.infinity,
+              child: imgPath != null
+                  ? ZoomableImage(path: imgPath)
+                  : const Center(child: Text('الصورة غير موجودة', style: TextStyle(color: Colors.white))),
+            ),
+          ),
+          Expanded(
+            flex: 5,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (batchTot != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _statusBox('مجموع باتشات الماكينة: ${_fmtMoney(batchTot)} ج.م'),
+                    ),
+                  DropdownButtonFormField<String?>(
+                    value: tid,
+                    isExpanded: true,
+                    decoration: const InputDecoration(labelText: 'صورة سيستم ماكينة', isDense: true),
+                    items: [
+                      const DropdownMenuItem<String?>(value: null, child: Text('غير محدد')),
+                      for (final n in nums)
+                        DropdownMenuItem<String?>(
+                          value: numToTid[n],
+                          child: w.Text(
+                            '${machineLabel(n, terminals[numToTid[n]]!.unitName)} (${numToTid[n]})',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() => tid = v),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: amtCtl,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'إجمالي مبالغ السيستم (ج.م)', isDense: true),
+                  ),
+                  if (cands.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    const Text('احتمالات مبالغ مقروءة من الصورة:', style: TextStyle(fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        for (final c in cands)
+                          ActionChip(
+                            label: w.Text(_fmtMoney(c)),
+                            onPressed: () => setState(() => amtCtl.text = c.toStringAsFixed(2)),
+                          ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: reading ? null : _reRead,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('إعادة قراءة الترمنل'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _save,
+                          icon: const Icon(Icons.save),
+                          label: const Text('حفظ وتحديث'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -12401,6 +12829,7 @@ class ClosingReportPage extends StatefulWidget {
   final List<String> warnings;
   final String Function(ReceiptItem) subtitleOf;
   final Future<void> Function(ReceiptItem) onOpen;
+  final Future<void> Function(SysTotal)? onOpenSys;
   const ClosingReportPage({
     super.key,
     required this.items,
@@ -12409,6 +12838,7 @@ class ClosingReportPage extends StatefulWidget {
     required this.warnings,
     required this.subtitleOf,
     required this.onOpen,
+    this.onOpenSys,
   });
 
   @override
@@ -12425,11 +12855,10 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
     final total = counted.fold<double>(0, (a, e) => a + e.amount);
     final review = items.where((e) => e.needsReview).toList();
 
-    // أحدث صورة سيستم لكل (ترمنل + تاريخ)، ومقارنتها بمجموع باتشات الماكينة
+    // أحدث صورة سيستم لكل (ترمنل + تاريخ)، مع إظهار الصور اللي فيها ترمنل أو مبلغ ناقص للمراجعة
     final best = <String, SysTotal>{};
     for (final s in widget.sysReads) {
-      if (s.tid == null || s.amount == null) continue;
-      final k = '${s.tid}|${s.date ?? ''}';
+      final k = (s.tid == null || s.amount == null) ? 'raw:${s.file}' : '${s.tid}|${s.date ?? ''}';
       final p = best[k];
       if (p == null || s.printed.compareTo(p.printed) > 0) best[k] = s;
     }
@@ -12438,8 +12867,8 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
     var sysDiffs = 0;
     final sysRows = <Widget>[];
     for (final s in sysList) {
-      final t = terminals[s.tid];
-      final nm = t != null ? machineLabel(t.orderNum, t.unitName) : 'ترمنل ${s.tid}';
+      final t = s.tid != null ? terminals[s.tid] : null;
+      final nm = t != null ? machineLabel(t.orderNum, t.unitName) : (s.tid != null ? 'ترمنل ${s.tid}' : s.file);
       var tot = 0.0;
       var n = 0;
       if (t != null) {
@@ -12450,25 +12879,45 @@ class _ClosingReportPageState extends State<ClosingReportPage> {
           }
         }
       }
-      final diff = round2(tot - s.amount!);
-      final okMatch = diff == 0;
+      final incomplete = s.tid == null || s.amount == null;
+      final diff = incomplete ? 0.0 : round2(tot - s.amount!);
+      final okMatch = !incomplete && diff == 0;
       if (!okMatch) sysDiffs++;
-      sysRows.add(Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: w.Text(
-                  '$nm${s.date != null ? ' (${s.date})' : ''}\n${_fmtMoney(s.amount!)} ج.م${n > 1 ? ' • مجموع $n باتشات' : ''}${s.txn != null ? '\nإيصالات إلكترونية: ${s.txn}${s.txnAll != null && s.txnAll != s.txn ? ' (إجمالي العمليات ${s.txnAll})' : ''}' : ''}',
-                  style: const TextStyle(fontSize: 13)),
-            ),
-            w.Text(okMatch ? '✅ مطابق' : '⚠️ فرق ${diff > 0 ? '+' : ''}${diff.toStringAsFixed(2)}',
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: _tintFg(context, okMatch ? Colors.green : kReviewTone))),
-          ],
+      final statusTxt = incomplete
+          ? '⚠️ راجع'
+          : (okMatch ? '✅ مطابق' : '⚠️ فرق ${diff > 0 ? '+' : ''}${diff.toStringAsFixed(2)}');
+      sysRows.add(InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: widget.onOpenSys == null
+            ? null
+            : () async {
+                await widget.onOpenSys!(s);
+                if (mounted) setState(() {});
+              },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: w.Text(
+                    '$nm${s.date != null ? ' (${s.date})' : ''}\n'
+                    '${s.amount != null ? '${_fmtMoney(s.amount!)} ج.م' : 'المبلغ غير مقروء'}'
+                    '${n > 1 ? ' • مجموع $n باتشات' : ''}'
+                    '${s.txn != null ? '\nإيصالات إلكترونية: ${s.txn}${s.txnAll != null && s.txnAll != s.txn ? ' (إجمالي العمليات ${s.txnAll})' : ''}' : ''}',
+                    style: const TextStyle(fontSize: 13)),
+              ),
+              w.Text(statusTxt,
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: _tintFg(context, okMatch ? Colors.green : kReviewTone))),
+              if (widget.onOpenSys != null) ...[
+                const SizedBox(width: 4),
+                Icon(Icons.edit_outlined, size: 16, color: cs.onSurfaceVariant),
+              ],
+            ],
+          ),
         ),
       ));
     }
@@ -14438,6 +14887,7 @@ class _MachinesPageState extends State<MachinesPage> with WidgetsBindingObserver
         titleSpacing: 12,
         title: const AppTitle(),
         actions: [
+          const NotificationBellButton(),
           const HeaderButtons(),
           _moreMenu(context, busy: busy),
         ],
